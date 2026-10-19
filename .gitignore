@@ -1,0 +1,27 @@
+# Local credentials and environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*service-account*.json
+*serviceAccount*.json
+.runtimeconfig.json
+
+# Machine-specific Firebase and Apps Script configuration
+.firebaserc
+.firebase/
+firebase-debug*.log
+.clasp.json
+.clasprc.json
+
+# Dependencies, caches, and local outputs
+node_modules/
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+
+# Local release archives and data backups
+*.zip
+backups/

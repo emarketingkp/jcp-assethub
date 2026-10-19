@@ -1,0 +1,6 @@
+{
+  "version": "2.7",
+  "released": "2026-10-19",
+  "name": "Universal AI asset recognition and multi-image evidence",
+  "notes": "V2.6-compatible recognition: multiple photos, typed identifiers, source evidence, dynamic attributes, conflict review and explicit reconciliation."
+}

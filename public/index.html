@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#14366F">
+  <meta name="description" content="JCP AssetHub asset management with guest read + add access">
+  <title>JCP AssetHub</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<div id="appLoading" class="app-loading" aria-hidden="false"><span class="btn-spinner" aria-hidden="true"></span><span data-loading-text>Loading AssetHub...</span></div>
+<svg class="svg-defs" aria-hidden="true">
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11 12 3l9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="m4 7 8-4 8 4-8 4-8-4Z"/><path d="m4 7 8 4 8-4v10l-8 4-8-4V7Z"/><path d="M12 11v10"/></symbol>
+  <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><path d="M8 12h8M12 8v8"/></symbol>
+  <symbol id="i-tools" viewBox="0 0 24 24"><path d="m14 7 3-3 3 3-3 3"/><path d="m4 20 8-8"/><path d="M11 5a5 5 0 0 0 6 6L9 19a3 3 0 0 1-4-4l8-8a5 5 0 0 0-2-2Z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 13.5v-3l-2.2-.8-.8-2.1 1-2-2.1-2.1-2 1-2.1-.8L10 1.5H7l-.8 2.2-2.1.8-2-1L0 5.6l1 2-.8 2.1L-2 10.5v3l2.2.8.8 2.1-1 2L1.1 20.5l2-1 2.1.8L6 22.6h3l.8-2.2 2.1-.8 2 1 2.1-2.1-1-2 .8-2.1Z" transform="translate(3 -0.1) scale(.75)"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 21h20L12 3Z"/><path d="M12 9v5M12 18h.01"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 7h4l2-2h4l2 2h4v12H4V7Z"/><circle cx="12" cy="13" r="4"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M5 20h14"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M5 20h14"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="m4 20 4-.8L19 8l-3-3L4.8 16.2 4 20Z"/><path d="m14 7 3 3"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m5 18 5-5 3 3 2-2 4 4"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+  <symbol id="i-laptop" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="11" rx="1"/><path d="M2 19h20l-2-4H4l-2 4Z"/></symbol>
+  <symbol id="i-printer" viewBox="0 0 24 24"><path d="M7 8V3h10v5"/><rect x="4" y="8" width="16" height="9" rx="2"/><path d="M7 14h10v7H7z"/><path d="M17 11h.01"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M10 5h4M11 19h2"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="8" r="2"/><path d="M9 15h6M9 18h6"/></symbol>
+  <symbol id="i-radio" viewBox="0 0 24 24"><rect x="6" y="5" width="12" height="17" rx="2"/><path d="M9 2h6M12 2v3"/><circle cx="12" cy="11" r="3"/><path d="M9 17h6"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M10 5H5v14h5M14 8l4 4-4 4M8 12h10"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M18 12a6 6 0 0 0-10-4L5 11M6 12a6 6 0 0 0 10 4l3-3"/></symbol>
+  <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 5h16M7 12h10M10 19h4"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></symbol>
+  <symbol id="i-log" viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></symbol>
+</svg>
+
+<div id="app" class="app">
+  <aside id="sidebar" class="sidebar">
+    <div class="brand"><div class="brandmark">JC</div><div><b>AssetHub</b><small>JCP internal</small></div></div>
+    <nav>
+      <div class="nav-label">Work</div>
+      <button class="nav-btn active" data-route="dashboard"><svg class="ico"><use href="#i-home"/></svg>Dashboard</button>
+      <button class="nav-btn" data-route="assets"><svg class="ico"><use href="#i-box"/></svg>Assets</button>
+      <button class="nav-btn" data-route="scanner"><svg class="ico"><use href="#i-scan"/></svg>Scan Device</button>
+      <button class="nav-btn" data-route="maintenance"><svg class="ico"><use href="#i-tools"/></svg>Maintenance</button>
+      <button class="nav-btn" data-route="audit"><svg class="ico"><use href="#i-check"/></svg>Audit</button>
+      <button class="nav-btn" data-route="reports"><svg class="ico"><use href="#i-chart"/></svg>Reports</button>
+      <div class="nav-label admin-only">Admin</div>
+      <button class="nav-btn admin-only" data-route="admin"><svg class="ico"><use href="#i-settings"/></svg>System Setup</button>
+    </nav>
+    <div class="sidebar-foot"><b>JCP Office + KitaPrint</b><p>Sites are separate from areas, exact location and assignee.</p></div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button id="menuBtn" class="iconbtn menu-btn" aria-label="Toggle navigation"><svg class="ico"><use href="#i-box"/></svg></button>
+      <div class="mobile-brand" aria-hidden="true"><b>AssetHub</b><small>JCP</small></div>
+      <div class="search"><svg class="ico"><use href="#i-search"/></svg><input id="globalSearch" placeholder="Search asset ID, model, serial, person..." autocomplete="off"></div>
+      <button id="systemStatusBtn" class="system-status-btn" type="button" title="System connection status"><span id="systemStatusDot" class="system-status-dot checking"></span><span id="systemStatusText">Checking</span></button>
+      <div id="syncIndicator" class="sync-indicator hidden" aria-live="polite"><span class="sync-spinner" aria-hidden="true"></span><span id="syncIndicatorText">Syncing</span></div>
+      <button id="updateBtn" class="update-btn hidden"><svg class="ico sm"><use href="#i-refresh"/></svg>Update available</button>
+      <div class="top-spacer"></div>
+      <button id="adminToggle" class="admin-toggle" type="button" aria-pressed="false" title="Switch Admin view">
+        <span class="admin-toggle-track"><span class="admin-toggle-dot"></span></span>
+        <span>Admin</span>
+      </button>
+      <button id="profileBtn" class="profile-btn"><div id="avatar" class="avatar">A</div><div class="profile-copy"><b id="profileName">Guest</b><small id="profileRole">Read + Add</small></div><svg class="ico sm"><use href="#i-chevron"/></svg></button>
+      <div id="profileMenu" class="profile-menu">
+        <div class="identity"><b id="menuName">...</b><small id="menuEmail">...</small><span id="menuRole" class="role-pill">...</span></div>
+        <button id="apiSettingsBtn" class="menu-action"><svg class="ico sm"><use href="#i-settings"/></svg>Connection settings</button>
+        <button id="signInBtn" class="menu-action"><svg class="ico sm"><use href="#i-user"/></svg>Sign in</button>
+        <button id="logoutBtn" class="menu-action hidden"><svg class="ico sm"><use href="#i-logout"/></svg>Sign out</button>
+      </div>
+    </header>
+
+    <div class="content">
+      <section id="page-dashboard" class="page active">
+        <div class="page-head"><div><div class="eyebrow">JCP Asset Operations</div><h1>Dashboard</h1><p>Quick actions first. Attention items and recent changes follow.</p></div></div>
+        <div class="action-zone">
+          <button class="scan-primary" data-go="scanner"><div class="big-icon"><svg class="ico xl"><use href="#i-scan"/></svg></div><div><b>Scan Device</b><span>One scanner for JCP QR, manufacturer barcode or device label OCR.</span></div><svg class="ico"><use href="#i-arrow"/></svg></button>
+          <div class="quick-stack">
+            <button class="quick-secondary" data-action="find"><div class="quick-icon"><svg class="ico lg"><use href="#i-search"/></svg></div><div><b>Find Asset</b><small>Search by ID, model, serial, site or person.</small></div></button>
+            <button class="quick-secondary issue" data-action="reportIssue"><div class="quick-icon"><svg class="ico lg"><use href="#i-tools"/></svg></div><div><b>Report Issue</b><small>Staff can raise a maintenance issue quickly.</small></div></button>
+            <button class="quick-secondary audit" data-action="continueAudit"><div class="quick-icon"><svg class="ico lg"><use href="#i-check"/></svg></div><div><b>Continue Audit</b><small>Open the latest physical verification.</small></div></button>
+          </div>
+        </div>
+        <div id="statusStrip" class="status-strip"></div>
+        <div class="dashboard-grid">
+          <div class="card panel"><div class="panel-head"><div><h3>Recent activity</h3><small>What changed across JCP Office and KitaPrint.</small></div></div><div id="activityList" class="activity-list"></div></div>
+          <div class="card panel"><div class="panel-head"><div><h3>Recently accessed / updated</h3><small>Fast route back to active records.</small></div></div><div id="recentAssets" class="compact-assets"></div></div>
+        </div>
+      </section>
+
+      <section id="page-assets" class="page">
+        <div class="page-head"><div><div class="eyebrow">Asset register</div><h1>Assets</h1><p>Photos, device information, placement, assignment and extensible custom information.</p></div><div class="actions"><button id="addAssetBtn" class="btn primary"><svg class="ico sm"><use href="#i-plus"/></svg>Add Asset</button></div></div>
+        <div class="asset-toolbar">
+          <div class="asset-search-inline"><svg class="ico sm"><use href="#i-search"/></svg><input id="assetSearch" placeholder="Search ID, model, serial, location or person" autocomplete="off"></div>
+          <button id="assetDateBtn" class="toolbar-icon-btn" type="button" aria-label="Filter assets by date" title="Date filter"><svg class="ico"><use href="#i-calendar"/></svg><span id="assetDateBadge" class="control-badge hidden">1</span></button>
+          <button id="assetFilterBtn" class="toolbar-icon-btn" type="button" aria-label="More asset filters" title="More filters"><svg class="ico"><use href="#i-filter"/></svg><span id="assetFilterBadge" class="control-badge hidden">0</span></button>
+          <div id="assetViewToggle" class="view-toggle" role="group" aria-label="Asset view">
+            <span class="view-toggle-indicator" aria-hidden="true"></span>
+            <button id="assetListViewBtn" type="button" data-view="list" aria-label="List view"><svg class="ico sm"><use href="#i-list"/></svg><span>List</span></button>
+            <button id="assetGridViewBtn" type="button" data-view="grid" aria-label="Grid view"><svg class="ico sm"><use href="#i-grid"/></svg><span>Grid</span></button>
+          </div>
+        </div>
+        <div id="assetFilterChips" class="filter-chips"></div>
+        <div class="mobile-sort-row"><label>Sort<select id="assetMobileSort"><option value="updated_at:desc">Updated: newest</option><option value="updated_at:asc">Updated: oldest</option><option value="asset_id:asc">Asset ID: A–Z</option><option value="asset_id:desc">Asset ID: Z–A</option><option value="device:asc">Device: A–Z</option><option value="device:desc">Device: Z–A</option><option value="site_name:asc">Location: A–Z</option><option value="site_name:desc">Location: Z–A</option></select></label></div>
+        <div id="assetListHeader" class="asset-list-header"></div>
+        <div id="assetList" class="asset-list"><div class="empty-state">Loading assets...</div></div>
+      </section>
+
+      <section id="page-scanner" class="page">
+        <div class="page-head"><div><div class="eyebrow">Unified scanner</div><h1>Scan Device</h1><p>Point the camera at a JCP asset tag, manufacturer barcode or device label. AssetHub decides what it sees.</p></div></div>
+        <div class="scanner-layout">
+          <div class="card scanner-card">
+            <div class="scanner-view"><video id="scannerVideo" playsinline muted></video><canvas id="scannerCanvas" class="hidden"></canvas><div id="scannerPlaceholder" class="scanner-placeholder"><svg class="ico xl"><use href="#i-camera"/></svg><b>Camera is off</b><span>Point at a device label, then take a photo.</span></div><div class="scan-frame"></div></div>
+            <button id="mobileScannerClose" class="scanner-mobile-close" type="button" aria-label="Close scanner">×</button><div id="scanHint" class="scan-hint">Frame the device label, take a photo, and review the result. OCR and codes are checked together.</div>
+            <div class="scanner-actions"><button id="startCameraBtn" class="btn blue"><svg class="ico sm"><use href="#i-scan"/></svg>Live Scanner</button><button id="captureBtn" class="btn primary"><svg class="ico sm"><use href="#i-camera"/></svg><span class="capture-label">Take Label Photo</span></button><button type="button" id="mobileTorchBtn" class="btn light scanner-torch" aria-label="Toggle torch" title="Torch">Torch</button><label class="btn light file-btn"><svg class="ico sm"><use href="#i-upload"/></svg>Choose Existing Photo<input id="scannerFile" type="file" accept="image/*"></label><input id="scannerCameraFile" class="hidden" type="file" accept="image/*" capture="environment"></div>
+          </div>
+          <div class="card panel scan-result-panel"><button id="mobileScannerResultClose" class="scanner-result-close" type="button" aria-label="Close scan result">×</button><div class="panel-head"><div><h3>Recognition result</h3><small>Scanner observes. You confirm before any record changes.</small></div></div><div id="scanResult" class="scan-result"><div class="empty-state compact">No scan yet.</div></div></div>
+        </div>
+      </section>
+
+      <section id="page-maintenance" class="page">
+        <div class="page-head"><div><div class="eyebrow">Issue → repair → resolution</div><h1>Maintenance</h1><p>Find an issue quickly, then edit status, assignment, cost and resolution.</p></div><div class="actions"><button id="reportIssueBtn" class="btn primary"><svg class="ico sm"><use href="#i-plus"/></svg>Report Issue</button></div></div>
+        <div class="asset-toolbar maintenance-toolbar">
+          <div class="asset-search-inline"><svg class="ico sm"><use href="#i-search"/></svg><input id="maintenanceSearch" placeholder="Search asset, issue or assignee" autocomplete="off"></div>
+          <button id="maintenanceDateBtn" class="toolbar-icon-btn" type="button" aria-label="Filter maintenance by date" title="Date filter"><svg class="ico"><use href="#i-calendar"/></svg><span id="maintenanceDateBadge" class="control-badge hidden">1</span></button>
+          <button id="maintenanceFilterBtn" class="toolbar-icon-btn" type="button" aria-label="More maintenance filters" title="More filters"><svg class="ico"><use href="#i-filter"/></svg><span id="maintenanceFilterBadge" class="control-badge hidden">0</span></button>
+        </div>
+        <div id="maintenanceFilterChips" class="filter-chips"></div>
+        <div class="mobile-sort-row maintenance-sort-row"><label>Sort<select id="maintenanceMobileSort"><option value="reported_at:desc">Reported: newest</option><option value="reported_at:asc">Reported: oldest</option><option value="device:asc">Device: A–Z</option><option value="device:desc">Device: Z–A</option><option value="status:asc">Status: A–Z</option><option value="status:desc">Status: Z–A</option></select></label></div>
+        <div id="maintenanceOverview" class="maintenance-overview"></div>
+        <div id="maintenanceListHeader" class="asset-list-header maintenance-list-header"></div>
+        <div id="maintenanceList" class="maintenance-list"><div class="empty-state">Loading maintenance...</div></div>
+      </section>
+
+      <section id="page-audit" class="page">
+        <div class="page-head"><div><div class="eyebrow">Physical verification</div><h1>Audit</h1><p>Verify where equipment actually is. Mismatches are recorded instead of silently changing the asset.</p></div><div class="actions"><button id="startAuditBtn" class="btn primary"><svg class="ico sm"><use href="#i-plus"/></svg>Start Audit</button></div></div>
+        <div id="auditList" class="audit-list"><div class="empty-state">Loading audits...</div></div>
+      </section>
+
+      <section id="page-reports" class="page">
+        <div class="page-head"><div><div class="eyebrow">Overview → trend → detail</div><h1>Reports</h1><p>Start with one report and time range. Open deeper filters, charts and records only when you need them.</p></div></div>
+        <div class="report-stack">
+          <section class="card report-primary">
+            <div class="report-primary-grid">
+              <label>Report<select id="reportType"><option value="asset">Asset register</option><option value="maintenance">Maintenance & repair</option><option value="warranty">Warranty</option><option value="audit">Physical audit</option><option value="movement">Movement history</option><option value="activity">Activity log</option><option value="incomplete">Missing information</option></select></label>
+              <label>Time range<select id="reportDatePreset"><option value="30">Last 30 days</option><option value="7">Last 7 days</option><option value="90">Last 90 days</option><option value="month">This month</option><option value="all" selected>All time</option><option value="custom">Custom</option></select></label>
+              <button id="runReportBtn" class="btn blue"><svg class="ico sm"><use href="#i-chart"/></svg>Run Report</button>
+            </div>
+            <details class="report-disclosure" id="reportFilterDetails">
+              <summary><span><b>More filters</b><small>Site, area, category, status, person and custom dates</small></span><span class="disclosure-chevron">⌄</span></summary>
+              <div class="report-controls report-controls-secondary">
+                <label>From<input id="reportDateFrom" type="date"></label>
+                <label>To<input id="reportDateTo" type="date"></label>
+                <label id="reportDateFieldWrap">Asset date<select id="reportDateField"><option value="updated_at">Updated date</option><option value="created_at">Created date</option></select></label>
+                <label>Site<select id="reportSite"><option value="">All sites</option></select></label>
+                <label>Area<select id="reportArea"><option value="">All areas</option></select></label>
+                <label>Category<select id="reportCategory"><option value="">All categories</option></select></label>
+                <label id="reportStatusWrap">Status<select id="reportStatus"><option value="">All statuses</option></select></label>
+                <label id="reportAssignedWrap">Assigned / user<input id="reportAssigned" placeholder="Person / team / user"></label>
+              </div>
+            </details>
+          </section>
+
+          <section class="report-overview-block">
+            <div class="section-kicker">At a glance</div>
+            <div id="reportSummary" class="report-summary"></div>
+          </section>
+
+          <details class="card report-disclosure report-result-section" id="reportTrendDetails">
+            <summary><span><b>Trend</b><small>How activity changes over time</small></span><span class="disclosure-chevron">⌄</span></summary>
+            <div id="reportVisuals" class="report-visuals report-trend-only"></div>
+          </details>
+
+          <details class="card report-disclosure report-result-section" id="reportBreakdownDetails">
+            <summary><span><b>Breakdowns</b><small>Where assets, issues or activity are concentrated</small></span><span class="disclosure-chevron">⌄</span></summary>
+            <div id="reportBreakdowns" class="report-visuals report-breakdowns"></div>
+          </details>
+
+          <details class="card report-disclosure report-result-section" id="reportDetailDetails">
+            <summary><span><b>Detailed records</b><small id="reportDetailCount">Open the underlying rows and logs</small></span><span class="disclosure-chevron">⌄</span></summary>
+            <div class="report-detail-actions"><button id="exportReportBtn" class="btn light"><svg class="ico sm"><use href="#i-download"/></svg>Full CSV</button><button id="printReportBtn" class="btn light">Print / PDF</button></div>
+            <div class="report-table-wrap"><table class="report-table"><thead id="reportHead"></thead><tbody id="reportBody"></tbody></table></div>
+          </details>
+        </div>
+      </section>
+
+      <section id="page-admin" class="page admin-only">
+        <div class="page-head"><div><div class="eyebrow">Administrator only</div><h1>System Setup</h1><p>Manage sites, areas, dynamic categories, custom asset fields and user access.</p></div></div>
+        <div class="admin-layout"><div class="card admin-menu"><button class="admin-tab active" data-admin="sites">Sites & Areas</button><button class="admin-tab" data-admin="categories">Categories</button><button class="admin-tab" data-admin="fields">Custom Fields</button><button class="admin-tab" data-admin="users">Users & Access</button><button class="admin-tab" data-admin="system">System</button></div><div id="adminPanel" class="card panel admin-panel"></div></div>
+      </section>
+    </div>
+  </main>
+</div>
+<nav id="mobileNav" class="mobile-nav" aria-label="Primary mobile navigation">
+  <button type="button" data-mobile-route="dashboard" class="active"><svg class="ico"><use href="#i-home"/></svg><span>Home</span></button>
+  <button type="button" data-mobile-route="assets"><svg class="ico"><use href="#i-box"/></svg><span>Assets</span></button>
+  <button type="button" data-mobile-route="scanner"><svg class="ico"><use href="#i-scan"/></svg><span>Scan</span></button>
+  <button type="button" data-mobile-route="maintenance"><svg class="ico"><use href="#i-tools"/></svg><span>Maintenance</span></button>
+  <button id="mobileMoreBtn" type="button"><svg class="ico"><use href="#i-more"/></svg><span>More</span></button>
+</nav>
+<div id="sidebarBackdrop" class="sidebar-backdrop" aria-hidden="true"></div>
+
+<div id="drawerBackdrop" class="backdrop hidden"></div>
+<aside id="assetDrawer" class="drawer"><div class="drawer-head"><div><strong>Asset Details</strong><small id="drawerId"></small></div><button id="closeDrawerBtn" class="close-btn" aria-label="Close asset details">×</button></div><div id="drawerBody" class="drawer-body"></div></aside>
+
+<div id="modalWrap" class="modal-wrap hidden" role="dialog" aria-modal="true"><div class="modal"><div class="modal-head"><h2 id="modalTitle">Modal</h2><button id="modalCloseBtn" class="close-btn" aria-label="Close dialog">×</button></div><div id="modalBody" class="modal-body"></div></div></div>
+<div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<div id="offlineBar" class="offline-bar hidden">You are offline. Existing screens may remain visible, but changes need a connection.</div>
+
+<!-- Optional scanner/QR helpers load asynchronously so a slow CDN never blocks AssetHub startup. -->
+<div id="reportPrintSheet" class="report-print-sheet" aria-hidden="true"></div>
+<script async src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script async src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script defer src="./store.js"></script>
+<script defer src="./api-config.js"></script>
+<script defer src="./api.js"></script>
+<script defer src="./image.js"></script>
+<script defer src="./code-scanner.js"></script>
+<script defer src="./recognition-v27.js"></script>
+<script defer src="./app.js"></script>
+</body>
+</html>
