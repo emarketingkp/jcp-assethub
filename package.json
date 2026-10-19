@@ -1,0 +1,12 @@
+{
+  "name": "jcp-assethub",
+  "version": "2.7.1",
+  "private": true,
+  "description": "Development checks for the Firebase and Apps Script application",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "test:browser": "node tests/browser.test.cjs"
+  },
+  "devDependencies": { "playwright": "1.62.1" }
+}

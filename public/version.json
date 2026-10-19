@@ -1,6 +1,7 @@
 {
   "version": "2.7",
+  "build": "2.7-input-photos-1",
   "released": "2026-10-19",
-  "name": "Universal AI asset recognition and multi-image evidence",
-  "notes": "V2.6-compatible recognition: multiple photos, typed identifiers, source evidence, dynamic attributes, conflict review and explicit reconciliation."
+  "name": "Local input suggestions and clearer photo controls",
+  "notes": "Cached recognition dictionary, brand aliases, evidence-based suggestions, camera/gallery controls and safe photo retries. Compatible with the V2.7 backend."
 }

@@ -1,0 +1,54 @@
+// Synthetic backend for browser regression tests. Never connects to production.
+(() => {
+  const options=window.__mockOptions||{};
+  const refs={sites:[{site_id:'SITE-TEST',name:'Test Site',active:true}],areas:[{area_id:'AREA-TEST',site_id:'SITE-TEST',name:'Test Area',active:true}],categories:window.__fixtureCategories,brands:[],custom_fields:[],assignees:[],locations:[],users:[]};
+  const user={name:'Test Staff',username:'test-staff',role:options.role||'STAFF'};
+  const state=window.__mock={calls:[],assets:[],uploadAttempts:0,failNextUpload:false,failUploadAt:0,aiRelease:null};
+  const pixel='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jgE0AAAAASUVORK5CYII=';
+  const clone=x=>structuredClone(x);
+  const api={getUrl:()=>'/test-backend',setUrl(){},getToken:()=>user.role==='GUEST'?'':'test-session',setToken(){},getLastTiming:()=>null};
+  api.get=async(action,params={})=>{
+    state.calls.push({action,params:clone(params)});
+    if(action==='bootstrap')return {success:true,version:'2.7',user,references:clone(refs),dashboard:{},authenticated:user.role!=='GUEST',ai_ocr_enabled:!!options.ai};
+    if(action==='sync')return {sync:{assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}};
+    if(action==='suggestMatchesV27')return {matches:[]};
+    if(action==='listAssets')return {rows:clone(state.assets)};
+    if(action==='getAsset')return {asset:clone(state.assets.find(a=>a.asset_id===params.asset_id))};
+    if(action==='getImageData')return {data:{data_url:pixel}};
+    if(action==='diagnostics')return {diagnostics:{status:'online',components:{}}};
+    throw new Error('Unexpected mock GET: '+action);
+  };
+  api.post=async(action,params={})=>{
+    state.calls.push({action,params:clone(params)});
+    if(action==='ocr')return {result:{text:options.ocrText||'Brand: Ricoh\nCategory: Printer\nModel: TEST-100\nSerial: O01I2345\nRAM: 8 GB',fields:{brand:'HP',category:'Desktop PC'}}};
+    if(action==='interpretOcrUniversal'){
+      if(options.aiDelayed)return new Promise(resolve=>{state.aiRelease=()=>resolve({result:{fields:{brand:{value:'Ricoh',evidence:'Brand: Ricoh',status:'supported'}}}});});
+      throw new Error('Simulated provider outage');
+    }
+    if(action==='createAsset'){
+      const a={...params,asset_id:'TEST-'+(state.assets.length+1),category_name:params.category,site_name:'Test Site',area_name:params.area,images:[],custom_fields:[],maintenance:[],movements:[],activity:[],guest_upload_token:user.role==='GUEST'?'test-upload-grant':''};
+      state.assets.push(a);return {asset:clone(a)};
+    }
+    if(action==='updateAsset'){
+      const a=state.assets.find(a=>a.asset_id===params.asset_id);Object.assign(a,params);return {asset:clone(a)};
+    }
+    if(action==='uploadImage'){
+      state.uploadAttempts++;
+      if(state.failNextUpload||state.uploadAttempts===state.failUploadAt){state.failNextUpload=false;throw new Error('Simulated image upload failure');}
+      const a=state.assets.find(a=>a.asset_id===params.assetId);
+      if(user.role==='GUEST'&&params.guest_upload_token!=='test-upload-grant')throw new Error('Missing guest upload grant');
+      const image={image_id:'IMG-'+state.uploadAttempts,image_type:params.imageType,drive_file_id:'FILE-'+state.uploadAttempts,thumbnail_file_id:'THUMB-'+state.uploadAttempts,active:true};
+      a.images.push(image);return {image:clone(image)};
+    }
+    if(action==='replaceImage'){
+      const a=state.assets.find(a=>a.images.some(i=>i.image_id===params.image_id));
+      const image=a.images.find(i=>i.image_id===params.image_id);
+      if(user.role!=='ADMIN')throw new Error('PERMISSION_DENIED');
+      if(params.imageType!==image.image_type)throw new Error('Image type changed');
+      image.drive_file_id='REPLACED-FILE';image.thumbnail_file_id='REPLACED-THUMB';
+      return {image:clone(image)};
+    }
+    throw new Error('Unexpected mock POST: '+action);
+  };
+  window.AssetAPI=api;
+})();

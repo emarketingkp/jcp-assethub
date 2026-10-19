@@ -1,0 +1,498 @@
+{
+  "schemaVersion": 1,
+  "dataVersion": "1.0.0",
+  "brands": [
+    {
+      "name": "Dell",
+      "aliases": []
+    },
+    {
+      "name": "HP",
+      "aliases": [
+        "Hewlett-Packard",
+        "Hewlett Packard"
+      ]
+    },
+    {
+      "name": "HPE",
+      "aliases": [
+        "Hewlett Packard Enterprise"
+      ]
+    },
+    {
+      "name": "Lenovo",
+      "aliases": []
+    },
+    {
+      "name": "Acer",
+      "aliases": []
+    },
+    {
+      "name": "ASUS",
+      "aliases": [
+        "ASUSTeK"
+      ]
+    },
+    {
+      "name": "Epson",
+      "aliases": []
+    },
+    {
+      "name": "Canon",
+      "aliases": []
+    },
+    {
+      "name": "Brother",
+      "aliases": []
+    },
+    {
+      "name": "Zebra",
+      "aliases": []
+    },
+    {
+      "name": "Xiaomi",
+      "aliases": []
+    },
+    {
+      "name": "Samsung",
+      "aliases": []
+    },
+    {
+      "name": "Apple",
+      "aliases": []
+    },
+    {
+      "name": "MSI",
+      "aliases": []
+    },
+    {
+      "name": "Huawei",
+      "aliases": []
+    },
+    {
+      "name": "TP-Link",
+      "aliases": [
+        "TP LINK",
+        "TPLINK"
+      ]
+    },
+    {
+      "name": "D-Link",
+      "aliases": [
+        "D LINK",
+        "DLINK"
+      ]
+    },
+    {
+      "name": "BlueTap",
+      "aliases": []
+    },
+    {
+      "name": "Ricoh",
+      "aliases": []
+    },
+    {
+      "name": "Sharp",
+      "aliases": []
+    },
+    {
+      "name": "Toshiba",
+      "aliases": []
+    },
+    {
+      "name": "Fujitsu",
+      "aliases": []
+    },
+    {
+      "name": "Panasonic",
+      "aliases": []
+    },
+    {
+      "name": "Sony",
+      "aliases": []
+    },
+    {
+      "name": "LG",
+      "aliases": []
+    },
+    {
+      "name": "BenQ",
+      "aliases": []
+    },
+    {
+      "name": "ViewSonic",
+      "aliases": []
+    },
+    {
+      "name": "AOC",
+      "aliases": []
+    },
+    {
+      "name": "Philips",
+      "aliases": []
+    },
+    {
+      "name": "Kyocera",
+      "aliases": []
+    },
+    {
+      "name": "Konica Minolta",
+      "aliases": [
+        "KONICA-MINOLTA"
+      ]
+    },
+    {
+      "name": "Lexmark",
+      "aliases": []
+    },
+    {
+      "name": "OKI",
+      "aliases": []
+    },
+    {
+      "name": "Bixolon",
+      "aliases": []
+    },
+    {
+      "name": "Star Micronics",
+      "aliases": [
+        "STAR MICRONICS"
+      ]
+    },
+    {
+      "name": "Honeywell",
+      "aliases": []
+    },
+    {
+      "name": "Datalogic",
+      "aliases": []
+    },
+    {
+      "name": "TSC",
+      "aliases": []
+    },
+    {
+      "name": "SATO",
+      "aliases": []
+    },
+    {
+      "name": "Godex",
+      "aliases": []
+    },
+    {
+      "name": "Citizen",
+      "aliases": []
+    },
+    {
+      "name": "Motorola",
+      "aliases": []
+    },
+    {
+      "name": "Hytera",
+      "aliases": []
+    },
+    {
+      "name": "Kenwood",
+      "aliases": []
+    },
+    {
+      "name": "Icom",
+      "aliases": []
+    },
+    {
+      "name": "Ubiquiti",
+      "aliases": []
+    },
+    {
+      "name": "MikroTik",
+      "aliases": []
+    },
+    {
+      "name": "Cisco",
+      "aliases": []
+    },
+    {
+      "name": "Roland",
+      "aliases": []
+    },
+    {
+      "name": "Mimaki",
+      "aliases": []
+    },
+    {
+      "name": "Graphtec",
+      "aliases": []
+    },
+    {
+      "name": "Silhouette",
+      "aliases": []
+    },
+    {
+      "name": "Cricut",
+      "aliases": []
+    },
+    {
+      "name": "Juki",
+      "aliases": []
+    },
+    {
+      "name": "Jack",
+      "aliases": []
+    },
+    {
+      "name": "Hikvision",
+      "aliases": []
+    },
+    {
+      "name": "Dahua",
+      "aliases": []
+    },
+    {
+      "name": "Uniview",
+      "aliases": []
+    },
+    {
+      "name": "HPRT",
+      "aliases": []
+    },
+    {
+      "name": "Xprinter",
+      "aliases": []
+    }
+  ],
+  "categories": [
+    {
+      "categoryId": "CAT-PC",
+      "name": "Desktop PC",
+      "aliases": [
+        "desktop",
+        "desktop computer",
+        "desktop pc",
+        "komputer meja"
+      ]
+    },
+    {
+      "categoryId": "CAT-LAP",
+      "name": "Laptop",
+      "aliases": [
+        "laptop",
+        "notebook computer",
+        "komputer riba"
+      ]
+    },
+    {
+      "categoryId": "CAT-MON",
+      "name": "Monitor",
+      "aliases": [
+        "monitor",
+        "computer monitor",
+        "display monitor"
+      ]
+    },
+    {
+      "categoryId": "CAT-PRN",
+      "name": "Printer",
+      "aliases": [
+        "printer",
+        "pencetak"
+      ]
+    },
+    {
+      "categoryId": "CAT-THM",
+      "name": "Thermal Printer",
+      "aliases": [
+        "thermal printer",
+        "receipt printer",
+        "label printer",
+        "thermal receipt printer"
+      ]
+    },
+    {
+      "categoryId": "CAT-SCN",
+      "name": "Barcode Scanner",
+      "aliases": [
+        "barcode scanner",
+        "barcode reader",
+        "pengimbas kod bar"
+      ]
+    },
+    {
+      "categoryId": "CAT-MFP",
+      "name": "Scanner Printer / MFP",
+      "aliases": [
+        "multifunction printer",
+        "multi function printer",
+        "all in one printer",
+        "scanner printer",
+        "MFP"
+      ]
+    },
+    {
+      "categoryId": "CAT-DMP",
+      "name": "Dot Matrix Printer",
+      "aliases": [
+        "dot matrix printer",
+        "dot matrix",
+        "dot matriks"
+      ]
+    },
+    {
+      "categoryId": "CAT-PHN",
+      "name": "Mobile Phone",
+      "aliases": [
+        "mobile phone",
+        "smartphone",
+        "telefon bimbit"
+      ]
+    },
+    {
+      "categoryId": "CAT-CAM",
+      "name": "Camera",
+      "aliases": [
+        "camera",
+        "webcam",
+        "kamera"
+      ]
+    },
+    {
+      "categoryId": "CAT-WLK",
+      "name": "Walkie-Talkie",
+      "aliases": [
+        "walkie talkie",
+        "two way radio"
+      ]
+    }
+  ],
+  "fieldLabels": {
+    "brand": [
+      "brand",
+      "make",
+      "jenama"
+    ],
+    "manufacturer": [
+      "manufacturer",
+      "manufactured by",
+      "pengilang"
+    ],
+    "model": [
+      "model",
+      "model name",
+      "model number",
+      "model no",
+      "product model",
+      "product name"
+    ],
+    "category": [
+      "category",
+      "device type",
+      "equipment type",
+      "type",
+      "kategori"
+    ],
+    "serial": [
+      "serial",
+      "serial number",
+      "serial no",
+      "s/n",
+      "sn",
+      "nombor siri"
+    ]
+  },
+  "specificationLabels": [
+    {
+      "key": "ram",
+      "label": "RAM",
+      "aliases": [
+        "ram",
+        "installed ram",
+        "memory",
+        "system memory"
+      ]
+    },
+    {
+      "key": "cpu",
+      "label": "CPU",
+      "aliases": [
+        "cpu",
+        "processor",
+        "pemproses"
+      ]
+    },
+    {
+      "key": "ssd",
+      "label": "SSD",
+      "aliases": [
+        "ssd",
+        "solid state drive"
+      ]
+    },
+    {
+      "key": "hdd",
+      "label": "HDD",
+      "aliases": [
+        "hdd",
+        "hard disk"
+      ]
+    },
+    {
+      "key": "storage",
+      "label": "Storage",
+      "aliases": [
+        "storage",
+        "storage capacity",
+        "capacity storage"
+      ]
+    },
+    {
+      "key": "voltage",
+      "label": "Voltage",
+      "aliases": [
+        "voltage",
+        "input voltage",
+        "rated voltage"
+      ]
+    },
+    {
+      "key": "power",
+      "label": "Power",
+      "aliases": [
+        "power",
+        "rated power",
+        "power consumption"
+      ]
+    },
+    {
+      "key": "capacity",
+      "label": "Capacity",
+      "aliases": [
+        "capacity",
+        "rated capacity"
+      ]
+    },
+    {
+      "key": "frequency",
+      "label": "Frequency",
+      "aliases": [
+        "frequency",
+        "rated frequency"
+      ]
+    },
+    {
+      "key": "current",
+      "label": "Current",
+      "aliases": [
+        "current",
+        "rated current"
+      ]
+    },
+    {
+      "key": "os",
+      "label": "Operating System",
+      "aliases": [
+        "os",
+        "operating system"
+      ]
+    }
+  ],
+  "models": []
+}

@@ -16,6 +16,7 @@
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
   const APP_VERSION = '2.7';
+  const BUILD_ID = '2.7-input-photos-1';
   const ASSET_BASE_URL = 'https://assets.jcpmalaysia.com/';
   const CACHE_BOOT = 'jcp_assethub_cache_boot_v1';
   const CACHE_ASSETS = 'jcp_assethub_cache_assets_v1';
@@ -473,6 +474,7 @@
   }
 
   async function init(){
+    void window.AssetInput?.ready();
     bindStaticEvents();
     applyReportDatePreset(false);
     syncMobileNav(state.route);
@@ -627,6 +629,7 @@
   }
   function closeSidebar(){ $('sidebar').classList.remove('open'); $('sidebarBackdrop').classList.remove('show'); document.body.classList.remove('sidebar-open'); }
   function openModal(title,html,onReady,options={}){
+    state.modalCleanup?.();state.modalCleanup=null;
     const wrap=$('modalWrap'), modal=wrap.querySelector('.modal');
     state.modalRestoreFocus=document.activeElement instanceof HTMLElement ? document.activeElement : null;
     $('modalTitle').textContent=title; $('modalBody').innerHTML=html;
@@ -639,6 +642,7 @@
   }
   function closeModal(){
     const wrap=$('modalWrap'); if(wrap.classList.contains('hidden'))return;
+    state.modalCleanup?.();state.modalCleanup=null;
     wrap.classList.add('hidden');wrap.classList.remove('locked');$('modalBody').innerHTML='';document.body.classList.remove('modal-open');
     $('modalCloseBtn').classList.remove('hidden');state.modalRestoreFocus?.focus?.();state.modalRestoreFocus=null;
   }
@@ -1042,7 +1046,7 @@
     const custom=(a.custom_fields||[]).filter(f=>f.value).map(f=>`<div class="detail-field"><label>${esc(f.label)}</label><div>${esc(f.value)}</div></div>`).join('');
     const pd=a.private_details||null;
     const privateSection=pd&&Object.values(pd).some(Boolean)?`<div class="detail-section staff-private-section"><div class="staff-private-head"><div><h3>Staff-only information</h3><small>Visible only to signed-in Staff and Admin.</small></div><span class="private-badge">STAFF / ADMIN</span></div><div class="detail-grid"><div class="detail-field"><label>Mobile number</label><div>${esc(pd.mobile_number||'—')}</div></div><div class="detail-field"><label>Registered owner</label><div>${esc(pd.register_owner||'—')}</div></div><div class="detail-field"><label>Account number</label><div>${esc(pd.account_number||'—')}</div></div><div class="detail-field"><label>Amount paid</label><div>${esc(pd.amount_paid||'—')}</div></div></div></div>`:'';
-    $('drawerBody').innerHTML=`<div class="detail-hero"><div id="drawerMainPhoto" class="detail-photo">${icon(catIcon(a.category_name),'xl')}</div><div class="detail-title"><h2>${esc(assetDisplayName(a))}</h2><p>${esc(a.asset_id)} · ${esc(a.category_name)}</p>${statusBadge(a.status)}<div class="actions asset-primary-actions" style="margin-top:10px"><button id="editAssetDrawer" class="btn blue sm">${icon('edit','sm')}Edit Asset</button><button id="reportAssetIssue" class="btn light sm">${icon('tools','sm')}Report Issue</button></div><details class="asset-drawer-more"><summary>More actions</summary><div class="actions"><button id="moveAssetDrawer" class="btn light sm">${icon('pin','sm')}Move / Assign</button><button id="assetQrBtn" class="btn light sm">${icon('scan','sm')}QR Label</button>${isAuthenticated()?`<button id="scanUpdateDrawer" class="btn light sm">${icon('scan','sm')}Scan to Update</button>`:''}${isAuthenticated()?`<button id="mergeAssetDrawer" class="btn light sm">${icon('refresh','sm')}Merge / Reconcile</button>`:''}</div></details></div></div><div class="detail-section"><h3>Placement & assignment</h3><div class="detail-grid"><div class="detail-field"><label>Site</label><div>${esc(a.site_name||'—')}</div></div><div class="detail-field"><label>Area</label><div>${esc(a.area_name||'—')}</div></div><div class="detail-field"><label>Exact location</label><div>${esc(a.exact_location||'—')}</div></div><div class="detail-field"><label>Assigned to</label><div>${esc(a.assigned_to||'—')}</div></div></div></div><div class="detail-section"><h3>Device information</h3><div class="detail-grid"><div class="detail-field"><label>Serial</label><div>${esc(a.serial||'—')}</div></div><div class="detail-field"><label>Specifications</label><div>${esc(a.specifications||'—')}</div></div>${custom}</div></div>${privateSection}<div class="detail-section"><div class="panel-head"><div><h3>Images</h3><small>Main, label, condition, damage and repair photos.</small></div><button id="addAssetImage" class="btn light sm">${icon('upload','sm')}Add image</button></div><div id="drawerGallery" class="gallery"></div></div><div class="detail-section"><h3>Maintenance</h3><div>${(a.maintenance||[]).slice(0,5).map(m=>`<div class="ref-row"><div><b>${esc(m.issue)}</b><small>${esc(m.status)} · ${esc(nowText(m.reported_at))}</small></div>${isAuthenticated()?`<button class="btn light sm" data-drawer-maint="${esc(m.maintenance_id)}">${icon('edit','sm')}Edit</button>`:''}</div>`).join('')||'<div class="empty-state compact">No maintenance history.</div>'}</div></div><div class="detail-section"><h3>Movement history</h3><div>${(a.movements||[]).slice(0,5).map(m=>`<div class="ref-row"><div><b>${esc(m.from_site||'—')} → ${esc(m.to_site||'—')}</b><small>${esc(m.from_area||'')} → ${esc(m.to_area||'')} · ${esc(nowText(m.moved_at))}</small></div></div>`).join('')||'<div class="empty-state compact">No movement history.</div>'}</div></div><div class="detail-section"><h3>Activity log</h3><div>${(a.activity||[]).slice(0,8).map(x=>`<div class="ref-row"><div><b>${esc(activityLabel(x.action))}</b><small>${esc(x.user||'Guest')} · ${esc(nowText(x.timestamp))}</small></div></div>`).join('')||'<div class="empty-state compact">No activity yet.</div>'}</div></div>`;
+    $('drawerBody').innerHTML=`<div class="detail-hero"><div id="drawerMainPhoto" class="detail-photo">${icon(catIcon(a.category_name),'xl')}</div><div class="detail-title"><h2>${esc(assetDisplayName(a))}</h2><p>${esc(a.asset_id)} · ${esc(a.category_name)}</p>${statusBadge(a.status)}<div class="actions asset-primary-actions" style="margin-top:10px"><button id="editAssetDrawer" class="btn blue sm">${icon('edit','sm')}Edit Asset</button><button id="reportAssetIssue" class="btn light sm">${icon('tools','sm')}Report Issue</button></div><details class="asset-drawer-more"><summary>More actions</summary><div class="actions"><button id="moveAssetDrawer" class="btn light sm">${icon('pin','sm')}Move / Assign</button><button id="assetQrBtn" class="btn light sm">${icon('scan','sm')}QR Label</button>${isAuthenticated()?`<button id="scanUpdateDrawer" class="btn light sm">${icon('scan','sm')}Scan to Update</button>`:''}${isAuthenticated()?`<button id="mergeAssetDrawer" class="btn light sm">${icon('refresh','sm')}Merge / Reconcile</button>`:''}</div></details></div></div><div class="detail-section"><h3>Placement & assignment</h3><div class="detail-grid"><div class="detail-field"><label>Site</label><div>${esc(a.site_name||'—')}</div></div><div class="detail-field"><label>Area</label><div>${esc(a.area_name||'—')}</div></div><div class="detail-field"><label>Exact location</label><div>${esc(a.exact_location||'—')}</div></div><div class="detail-field"><label>Assigned to</label><div>${esc(a.assigned_to||'—')}</div></div></div></div><div class="detail-section"><h3>Device information</h3><div class="detail-grid"><div class="detail-field"><label>Serial</label><div>${esc(a.serial||'—')}</div></div><div class="detail-field"><label>Specifications</label><div>${esc(a.specifications||'—')}</div></div>${custom}</div></div>${privateSection}<div class="detail-section"><div class="panel-head"><div><h3>Images</h3><small>Main, label, condition, damage and repair photos.</small></div><div class="photo-picker-actions"><button id="addAssetImage" class="btn light sm">${icon('camera','sm')}Take photo</button><button id="addAssetGallery" class="btn light sm">${icon('image','sm')}Choose from gallery</button></div></div><div id="drawerGallery" class="gallery"></div></div><div class="detail-section"><h3>Maintenance</h3><div>${(a.maintenance||[]).slice(0,5).map(m=>`<div class="ref-row"><div><b>${esc(m.issue)}</b><small>${esc(m.status)} · ${esc(nowText(m.reported_at))}</small></div>${isAuthenticated()?`<button class="btn light sm" data-drawer-maint="${esc(m.maintenance_id)}">${icon('edit','sm')}Edit</button>`:''}</div>`).join('')||'<div class="empty-state compact">No maintenance history.</div>'}</div></div><div class="detail-section"><h3>Movement history</h3><div>${(a.movements||[]).slice(0,5).map(m=>`<div class="ref-row"><div><b>${esc(m.from_site||'—')} → ${esc(m.to_site||'—')}</b><small>${esc(m.from_area||'')} → ${esc(m.to_area||'')} · ${esc(nowText(m.moved_at))}</small></div></div>`).join('')||'<div class="empty-state compact">No movement history.</div>'}</div></div><div class="detail-section"><h3>Activity log</h3><div>${(a.activity||[]).slice(0,8).map(x=>`<div class="ref-row"><div><b>${esc(activityLabel(x.action))}</b><small>${esc(x.user||'Guest')} · ${esc(nowText(x.timestamp))}</small></div></div>`).join('')||'<div class="empty-state compact">No activity yet.</div>'}</div></div>`;
     // Keep the essential placement visible; collapse supporting detail only on phones.
     if(window.matchMedia('(max-width:760px)').matches){
       const sections=Array.from($('drawerBody').querySelectorAll(':scope > .detail-section'));
@@ -1067,7 +1071,8 @@
     $('scanUpdateDrawer')?.addEventListener('click',()=>withAccess('STAFF',()=>{state.scanUpdateTarget={asset_id:a.asset_id,brand:a.brand,model:a.model};closeDrawer();setRoute('scanner');toast('Scan to update '+a.asset_id+'.');}));
     $('mergeAssetDrawer')?.addEventListener('click',()=>withAccess('STAFF',()=>openManualMerge(a)));
     $$('[data-drawer-maint]').forEach(b=>b.addEventListener('click',()=>openMaintenanceManage((a.maintenance||[]).find(m=>String(m.maintenance_id)===String(b.dataset.drawerMaint)))));
-    $('addAssetImage').addEventListener('click',()=>withAccess('STAFF',()=>openImageUpload(a.asset_id)));
+    $('addAssetImage').addEventListener('click',()=>withAccess('STAFF',()=>openImageUpload(a.asset_id,'camera')));
+    $('addAssetGallery').addEventListener('click',()=>withAccess('STAFF',()=>openImageUpload(a.asset_id,'gallery')));
   }
   function assetPublicUrl(assetId){
     const base = ASSET_BASE_URL.endsWith('/') ? ASSET_BASE_URL : ASSET_BASE_URL + '/';
@@ -1162,11 +1167,14 @@
   }
 
   function openReplaceImage(asset,img){
-    openModal('Replace Asset Image',`<div class="login-note">The replacement keeps the same image type: <b>${esc(img.image_type)}</b>.</div><div class="field"><label>Replacement image</label><input id="replaceImageFile" type="file" accept="image/*" capture="environment"></div><div class="modal-actions"><button id="replaceImageSubmit" class="btn blue">Compress & Replace</button></div><div id="replaceImageStatus" style="font-size:11px;color:var(--muted);margin-top:8px"></div>`,()=>{
+    openModal('Replace Asset Image',`<div class="login-note">The replacement keeps the same image type: <b>${esc(img.image_type)}</b>.</div><div id="replacePhotoPicker"></div><div class="modal-actions"><button id="replaceImageSubmit" class="btn blue">Compress & Replace</button></div><div id="replaceImageStatus" style="font-size:11px;color:var(--muted);margin-top:8px"></div>`,()=>{
+      const picker=AssetPhotoPicker.mount($('replacePhotoPicker'),{multiple:false,maxFiles:1,onError:message=>toast(message,'error')});
+      state.modalCleanup=()=>picker.dispose();
       $('replaceImageSubmit').addEventListener('click',async()=>{
-        const file=$('replaceImageFile').files?.[0]; if(!file)return toast('Choose an image first.','error');
+        const file=picker.items[0]?.file; if(!file)return toast('Choose an image first.','error');
         const btn=$('replaceImageSubmit');
         await withBusy(btn,'Replacing...',async()=>{
+          picker.setBusy(true);setPhotoOperationBusy(true);
           try{
             $('replaceImageStatus').textContent='Compressing image...';
             const {full,thumb}=await AssetImage.prepareForStorage(file);
@@ -1176,7 +1184,8 @@
             invalidateImageCache([img.drive_file_id,img.thumbnail_file_id,r.image?.drive_file_id,r.image?.thumbnail_file_id]);
             invalidateAssetDetail(asset.asset_id);
             toast('Image replaced.'); closeModal(); scheduleSync('image-replaced',20); openAsset(asset.asset_id,{force:true});
-          }catch(err){$('replaceImageStatus').textContent=humanError(err);}
+          }catch(err){const status=$('replaceImageStatus');if(status)status.textContent=humanError(err);}
+          finally{picker.setBusy(false);setPhotoOperationBusy(false);}
         });
       });
     });
@@ -1194,14 +1203,46 @@
       picker.addEventListener('change',()=>{const target=scope.querySelector('#'+picker.dataset.pickerFor);if(picker.value&&target){target.value=picker.value;target.dispatchEvent(new Event('input',{bubbles:true}));}});
     });
   }
+  function bindInputAssistance(scope){
+    const attach=engine=>{
+      if(!engine||!scope.isConnected)return;
+      const inputs=Array.from(scope.querySelectorAll('input')).filter(el=>['category','brand','model'].includes(el.dataset.universalField||el.name));
+      for(const input of inputs){
+        if(input.dataset.assistBound)return;input.dataset.assistBound='1';
+        const choices=document.createElement('div');choices.className='input-suggestions';choices.setAttribute('aria-live','polite');
+        (input.closest('.field,.v27-edit-field')||input.parentElement).append(choices);
+        const render=()=>{
+          choices.replaceChildren();if(input.disabled)return;
+          const brand=inputs.find(el=>(el.dataset.universalField||el.name)==='brand')?.value||'';
+          const field=input.dataset.universalField||input.name;
+          const suggestions=engine.suggest(field,input.value,{categories:state.refs.categories,brand,assets:state.assets});
+          for(const suggestion of suggestions){
+            if(suggestion.value===input.value)continue;
+            const button=document.createElement('button');button.type='button';button.className='btn light sm';
+            button.textContent=suggestion.value;button.title=suggestion.reason;
+            button.addEventListener('click',()=>{
+              if(input.disabled)return;
+              input.value=suggestion.value;input.dispatchEvent(new Event('input',{bubbles:true}));render();
+            });choices.append(button);
+          }
+        };
+        input.addEventListener('input',render);
+        inputs.find(el=>(el.dataset.universalField||el.name)==='brand')?.addEventListener('input',render);
+        render();
+      }
+    };
+    attach(window.AssetInput?.current);
+    if(!window.AssetInput?.current)window.AssetInput?.ready().then(attach);
+  }
   function assetFormHtml(a={}){
     const catValue=a.category_name||a.category||''; const site=a.site_id||''; const area=a.area_name||a.area||'';
-    return `<form id="assetForm" class="form-grid">${a.asset_id?`<div class="field full asset-form-scan-action"><div><b>Update from a device photo</b><small>Scan a label or Windows specifications screen, then review differences before saving.</small></div><button type="button" id="scanUpdateAsset" class="btn light">${icon('scan','sm')} Scan to update</button></div>`:''}<div class="field"><label>Category</label>${editablePicker("assetCategory","category",catValue,state.refs.categories.map(x=>x.name),"Enter category")}<small>You can type a new device type. Admin can later add it to the master category list.</small></div><div class="field"><label>Brand</label>${editablePicker("assetBrand","brand",a.brand||"",state.refs.brands,"Enter brand")}</div><div class="field"><label>Model</label><input name="model" value="${esc(a.model||'')}" required></div><div class="field"><label>Serial number</label><input name="serial" value="${esc(a.serial||'')}"></div><div class="field"><label>Site</label><select name="site_id" id="assetSite" required><option value="">Select site</option>${state.refs.sites.map(x=>`<option value="${esc(x.site_id)}" ${String(x.site_id)===String(site)?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div><div class="field"><label>Area / Department</label>${editablePicker("assetArea","area",area,[],"Enter area / department")}</div><div class="field"><label>Status</label><select name="status">${['Active','Spare','Faulty','Under Repair','Missing','Retired'].map(s=>`<option ${String(a.status||'Active')===s?'selected':''}>${s}</option>`).join('')}</select></div><details class="asset-form-extra field full"><summary>Additional information <small>Location, assignment, specifications and photos</small></summary><div class="asset-form-extra-grid form-grid"><div class="field"><label>Exact location <span style="font-weight:500">(optional)</span></label><input name="exact_location" list="locationOptions" value="${esc(a.exact_location||'')}" placeholder="e.g. DTF A3 Station"><datalist id="locationOptions">${state.refs.locations.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field"><label>Assigned person / team <span style="font-weight:500">(optional)</span></label><input name="assigned_to" list="assigneeOptions" value="${esc(a.assigned_to||'')}" placeholder="Person or team"><datalist id="assigneeOptions">${state.refs.assignees.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field full"><label>Specifications</label><textarea name="specifications" rows="3">${esc(a.specifications||'')}</textarea></div><div class="field"><label>Movement note <span style="font-weight:500">(only if placement changes)</span></label><input name="movement_note" placeholder="Optional reason"></div></div></details>${state.refs.custom_fields.some(f=>String(f.required)==='true'||f.required===true)?`<div id="customFieldsForm" class="field full"><span class="label">Required custom information</span><div class="form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>String(f.required)==='true'||f.required===true))}</div></div>`:''}${state.refs.custom_fields.some(f=>!(String(f.required)==='true'||f.required===true))?`<details class="asset-form-extra field full"><summary>Other custom information</summary><div class="asset-form-extra-grid form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>!(String(f.required)==='true'||f.required===true)))}</div></details>`:''}<details class="asset-form-extra field full"><summary>Photos <small>Add condition, serial or other images</small></summary><div class="asset-photo-extra"><div class="field full"><label>Photos</label><input id="assetPhotoFiles" type="file" accept="image/*" multiple><small>Photos are compressed in the browser before Drive upload.</small><div id="assetPhotoPreview" class="preview-strip"></div></div></div></details><div id="assetSaveStatus" class="asset-save-status" role="status" aria-live="polite"></div><div class="field full"><div class="modal-actions">${a.asset_id&&a.status!=='Retired'&&isAdmin()?'<button type="button" id="retireAssetBtn" class="btn danger">Retire Asset</button>':''}<button type="button" id="cancelAssetForm" class="btn light">Cancel</button><button type="submit" class="btn blue">${a.asset_id?'Save Changes':'Create Asset'}</button></div></div></form>`;
+    return `<form id="assetForm" class="form-grid">${a.asset_id?`<div class="field full asset-form-scan-action"><div><b>Update from a device photo</b><small>Scan a label or Windows specifications screen, then review differences before saving.</small></div><button type="button" id="scanUpdateAsset" class="btn light">${icon('scan','sm')} Scan to update</button></div>`:''}<div class="field"><label>Category</label>${editablePicker("assetCategory","category",catValue,state.refs.categories.map(x=>x.name),"Enter category")}<small>You can type a new device type. Admin can later add it to the master category list.</small></div><div class="field"><label>Brand</label>${editablePicker("assetBrand","brand",a.brand||"",[...state.refs.brands,...(window.AssetInput?.current?.brands()||[])],"Enter brand")}</div><div class="field"><label>Model</label><input name="model" value="${esc(a.model||'')}" autocomplete="off" required></div><div class="field"><label>Serial number</label><input name="serial" value="${esc(a.serial||'')}"></div><div class="field"><label>Site</label><select name="site_id" id="assetSite" required><option value="">Select site</option>${state.refs.sites.map(x=>`<option value="${esc(x.site_id)}" ${String(x.site_id)===String(site)?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div><div class="field"><label>Area / Department</label>${editablePicker("assetArea","area",area,[],"Enter area / department")}</div><div class="field"><label>Status</label><select name="status">${['Active','Spare','Faulty','Under Repair','Missing','Retired'].map(s=>`<option ${String(a.status||'Active')===s?'selected':''}>${s}</option>`).join('')}</select></div><details class="asset-form-extra field full"><summary>Additional information <small>Location, assignment and specifications</small></summary><div class="asset-form-extra-grid form-grid"><div class="field"><label>Exact location <span style="font-weight:500">(optional)</span></label><input name="exact_location" list="locationOptions" value="${esc(a.exact_location||'')}" placeholder="e.g. DTF A3 Station"><datalist id="locationOptions">${state.refs.locations.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field"><label>Assigned person / team <span style="font-weight:500">(optional)</span></label><input name="assigned_to" list="assigneeOptions" value="${esc(a.assigned_to||'')}" placeholder="Person or team"><datalist id="assigneeOptions">${state.refs.assignees.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field full"><label>Specifications</label><textarea name="specifications" rows="3">${esc(a.specifications||'')}</textarea></div><div class="field"><label>Movement note <span style="font-weight:500">(only if placement changes)</span></label><input name="movement_note" placeholder="Optional reason"></div></div></details>${state.refs.custom_fields.some(f=>String(f.required)==='true'||f.required===true)?`<div id="customFieldsForm" class="field full"><span class="label">Required custom information</span><div class="form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>String(f.required)==='true'||f.required===true))}</div></div>`:''}${state.refs.custom_fields.some(f=>!(String(f.required)==='true'||f.required===true))?`<details class="asset-form-extra field full"><summary>Other custom information</summary><div class="asset-form-extra-grid form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>!(String(f.required)==='true'||f.required===true)))}</div></details>`:''}<section class="field full asset-form-photos"><h3>Photos</h3><p>${a._scanFiles?.length||a._scanFile?'Scan photos are included. ':''}Take photos or choose from your gallery. These attach to this asset without restarting recognition.</p><div id="assetPhotoPicker"></div><small>Photos are compressed before upload. Review the selected photos below.</small></section><div id="assetSaveStatus" class="asset-save-status" role="status" aria-live="polite"></div><div class="field full"><div class="modal-actions">${a.asset_id&&a.status!=='Retired'&&isAdmin()?'<button type="button" id="retireAssetBtn" class="btn danger">Retire Asset</button>':''}<button type="button" id="cancelAssetForm" class="btn light">Cancel</button><button type="submit" class="btn blue">${a.asset_id?'Save Changes':'Create Asset'}</button></div></div></form>`;
   }
   function customFieldsHtml(existing,fields=state.refs.custom_fields){ const map={}; existing.forEach(x=>map[x.field_id]=x.value); return fields.map(f=>{ const v=map[f.field_id]||''; const req=String(f.required)==='true'||f.required===true?'required':''; if(f.field_type==='select'){let opts=[];try{opts=JSON.parse(f.options_json||'[]')}catch{} return `<div class="field"><label>${esc(f.label)}</label><select data-custom="${esc(f.field_id)}" ${req}><option value="">—</option>${opts.map(o=>`<option ${String(o)===String(v)?'selected':''}>${esc(o)}</option>`).join('')}</select></div>`;} if(f.field_type==='boolean') return `<div class="field"><label>${esc(f.label)}</label><select data-custom="${esc(f.field_id)}" ${req}><option value="">—</option><option value="Yes" ${v==='Yes'?'selected':''}>Yes</option><option value="No" ${v==='No'?'selected':''}>No</option></select></div>`; return `<div class="field"><label>${esc(f.label)}</label><input type="${['date','number'].includes(f.field_type)?f.field_type:'text'}" data-custom="${esc(f.field_id)}" value="${esc(v)}" ${req}></div>`; }).join('')||'<div class="empty-state compact">No custom fields configured.</div>'; }
   function openAssetForm(asset={}){
     if(asset.asset_id && !isAuthenticated()) return withAccess('STAFF',()=>openAssetForm(asset));
     const initialScanFiles = Array.isArray(asset._scanFiles)?asset._scanFiles:(asset._scanFile?[asset._scanFile]:[]);
+    const fromScan=initialScanFiles.length>0;
     openModal(asset.asset_id?'Edit Asset':'Add Asset',assetFormHtml(asset),()=>{
       const form=$('assetForm'); const siteSel=$('assetSite'); const areaInput=$('assetArea');
       function updateAreas(){ const rows=state.refs.areas.filter(x=>!siteSel.value||String(x.site_id)===String(siteSel.value)); form.querySelector('[data-picker-for="assetArea"]').innerHTML='<option value="">Choose…</option>'+chooserOptions(rows.map(x=>x.name)).map(x=>`<option value="${esc(x)}" ${x===areaInput.value?'selected':''}>${esc(x)}</option>`).join(''); }
@@ -1212,10 +1253,18 @@
         closeModal();closeDrawer();setRoute('scanner');
         toast('Scan a label to compare against '+asset.asset_id+'.');
       });
-      const files=$('assetPhotoFiles');
-      if(initialScanFiles.length){ $('assetPhotoPreview').innerHTML=initialScanFiles.map(f=>`<div class="preview-chip"><img src="${URL.createObjectURL(f)}" alt="OCR source preview"></div>`).join(''); }
-      files.addEventListener('change',()=>{ const chosen=Array.from(files.files||[]); const all=[...initialScanFiles,...chosen]; $('assetPhotoPreview').innerHTML=all.map(f=>`<div class="preview-chip"><img src="${URL.createObjectURL(f)}" alt="Preview"></div>`).join(''); });
-      $('cancelAssetForm').addEventListener('click',closeModal);
+      bindInputAssistance(form);
+      const photos=AssetPhotoPicker.mount($('assetPhotoPicker'),{initial:initialScanFiles,onError:message=>toast(message,'error')});
+      state.modalCleanup=()=>photos.dispose();
+      let savedAsset=null,guestUploadToken='';
+      const viewSaved=()=>{
+        const id=savedAsset.asset_id;
+        closeModal();closeDrawer();
+        if(fromScan){resetScannerResult({restartCamera:false});setRoute('assets');}
+        if(photos.items.some(item=>item.uploaded))invalidateAssetDetail(id);
+        openAsset(id,{force:true});
+      };
+      $('cancelAssetForm').addEventListener('click',()=>savedAsset?viewSaved():closeModal());
       $('retireAssetBtn')?.addEventListener('click',()=>withAccess('ADMIN',async()=>{ if(!confirm(`Retire ${asset.asset_id}?`))return; try{const r=await AssetAPI.post('retireAsset',{asset_id:asset.asset_id});cacheAssetDetail(r.asset);toast('Asset retired.');closeModal();closeDrawer();scheduleSync('retire');}catch(err){toast(humanError(err),'error');} }));
       form.addEventListener('submit',async e=>{
         e.preventDefault(); const fd=new FormData(form); const custom={}; form.querySelectorAll('[data-custom]').forEach(el=>custom[el.dataset.custom]=el.value);
@@ -1224,17 +1273,34 @@
         await withBusy(submit,asset.asset_id?'Saving...':'Creating...',async()=>{
           try{
             const creating=!asset.asset_id;
-            const saveMsg=()=>{const el=$('assetSaveStatus');if(el)el.textContent='Saving changes to Google Sheets…';};saveMsg();
-            const r=await AssetAPI.post(creating?'createAsset':'updateAsset',params); const id=r.asset.asset_id;
-            if($('assetSaveStatus'))$('assetSaveStatus').textContent='Saved. Updating local view and photos…';
-            cacheAssetDetail(r.asset);
-            const guestUploadToken=r.asset.guest_upload_token||''; const chosen=Array.from(files.files||[]);
-            for(const photo of initialScanFiles) await uploadAssetImage(id,photo,'serial_label',()=>{},guestUploadToken);
-            for(let i=0;i<chosen.length;i++) await uploadAssetImage(id,chosen[i],i===0&&creating?'main':'other',()=>{},guestUploadToken);
-            if(initialScanFiles.length||chosen.length)invalidateAssetDetail(id);
-            toast(creating?'Asset created.':'Asset updated.'); closeModal(); closeDrawer(); scheduleSync(creating?'asset-created':'asset-updated',6500);
-            if(creating){ const fresh=state.assets.find(x=>x.asset_id===id)||r.asset; showAssetQr(fresh); } else {if(initialScanFiles.length||chosen.length){invalidateAssetDetail(id);openAsset(id,{force:true});}else openAsset(id);}
-          }catch(err){toast(humanError(err),'error');}
+            photos.setBusy(true);setPhotoOperationBusy(true);
+            $('assetSaveStatus').textContent=savedAsset?'Retrying pending photos…':'Saving changes to Google Sheets…';
+            if(!savedAsset){
+              const r=await AssetAPI.post(creating?'createAsset':'updateAsset',params);
+              savedAsset=r.asset;guestUploadToken=r.asset.guest_upload_token||'';
+              cacheAssetDetail(savedAsset);
+              // A photo retry must not create another record or silently discard edits.
+              form.querySelectorAll('input,select,textarea').forEach(el=>{el.disabled=true;});
+              $('cancelAssetForm').textContent='View saved asset';
+            }
+            const pending=photos.items.filter(item=>!item.uploaded);
+            for(const item of pending){
+              const type=item.type==='serial_label'?'serial_label':(creating&&!photos.items.some(p=>p.uploaded)&&!initialScanFiles.length?'main':'other');
+              await uploadAssetImage(savedAsset.asset_id,item.file,type,message=>{
+                const status=$('assetSaveStatus');if(status)status.textContent=savedAsset.asset_id+' saved. '+message;
+              },guestUploadToken);
+              photos.markUploaded(item);
+            }
+            toast(creating?'Asset created.':'Asset updated.');
+            scheduleSync(creating?'asset-created':'asset-updated',6500);
+            if(fromScan||!creating)viewSaved();
+            else{const fresh=savedAsset;if(photos.items.some(item=>item.uploaded))invalidateAssetDetail(fresh.asset_id);closeModal();closeDrawer();showAssetQr(fresh);}
+          }catch(err){
+            const message=savedAsset?`${savedAsset.asset_id} is saved. Some photos are still pending. Retry uploads or view the saved asset. ${humanError(err)}`:humanError(err);
+            if($('assetSaveStatus'))$('assetSaveStatus').textContent=message;
+            if(savedAsset)submit.dataset.originalHtml='Retry photo upload';
+            toast(message,'error');
+          }finally{photos.setBusy(false);setPhotoOperationBusy(false);}
         });
       });
     },{size:'lg'});
@@ -1251,11 +1317,34 @@
     });
   }
 
-  function openImageUpload(assetId){
-    if(!isAuthenticated()) return withAccess('STAFF',()=>openImageUpload(assetId));
-    openModal('Add Asset Image',`<div class="field"><label>Image type</label><select id="imageType"><option value="main">Main Photo</option><option value="serial_label">Serial / Device Label</option><option value="condition">Condition</option><option value="damage">Damage</option><option value="repair">Repair</option><option value="other">Other</option></select></div><div class="field" style="margin-top:10px"><label>Image</label><input id="imageFile" type="file" accept="image/*" capture="environment"></div><div class="modal-actions"><button id="uploadImageSubmit" class="btn blue">Compress & Upload</button></div><div id="imageUploadStatus" style="font-size:11px;color:var(--muted);margin-top:8px"></div>`,()=>{
-      $('uploadImageSubmit').addEventListener('click',async()=>{const file=$('imageFile').files?.[0];if(!file)return toast('Choose an image first.','error');const btn=$('uploadImageSubmit');await withBusy(btn,'Uploading...',async()=>{try{await uploadAssetImage(assetId,file,$('imageType').value,s=>$('imageUploadStatus').textContent=s);invalidateAssetDetail(assetId);toast('Image uploaded.');closeModal();scheduleSync('image-uploaded',20);openAsset(assetId,{force:true});}catch(err){$('imageUploadStatus').textContent=humanError(err);}});});
+  function openImageUpload(assetId,source=''){
+    if(!isAuthenticated()) return withAccess('STAFF',()=>openImageUpload(assetId,source));
+    openModal('Add Asset Photos',`<div class="field"><label>Image type</label><select id="imageType"><option value="main">Main Photo</option><option value="serial_label">Serial / Device Label</option><option value="condition">Condition</option><option value="damage">Damage</option><option value="repair">Repair</option><option value="other" selected>Additional Photo</option></select></div><div id="detailPhotoPicker"></div><div class="modal-actions"><button id="uploadImageSubmit" class="btn blue">Upload selected photos</button></div><div id="imageUploadStatus" role="status" aria-live="polite"></div>`,()=>{
+      const picker=AssetPhotoPicker.mount($('detailPhotoPicker'),{onError:message=>toast(message,'error')});
+      state.modalCleanup=()=>picker.dispose();
+      $('uploadImageSubmit').addEventListener('click',async()=>{
+        const pending=picker.items.filter(item=>!item.uploaded);
+        if(!pending.length)return toast('Take a photo or choose from your gallery first.','error');
+        const btn=$('uploadImageSubmit'),imageType=$('imageType');
+        await withBusy(btn,'Uploading...',async()=>{
+          setPhotoOperationBusy(true);picker.setBusy(true);imageType.disabled=true;
+          try{
+            for(const item of pending){
+              await uploadAssetImage(assetId,item.file,imageType.value,message=>{const status=$('imageUploadStatus');if(status)status.textContent=message;});
+              picker.markUploaded(item);invalidateAssetDetail(assetId);
+            }
+            toast('Photos uploaded.');closeModal();scheduleSync('image-uploaded',20);openAsset(assetId,{force:true});
+          }catch(err){
+            const status=$('imageUploadStatus');if(status)status.textContent='Uploaded photos are kept. Retry only the remaining photos. '+humanError(err);
+          }finally{picker.setBusy(false);setPhotoOperationBusy(false);}
+        });
+      });
+      if(source)$('detailPhotoPicker').querySelector(source==='camera'?'[data-photo-camera]':'[data-photo-gallery]').click();
     });
+  }
+  function setPhotoOperationBusy(busy){
+    $('modalWrap').classList.toggle('locked',busy);$('modalCloseBtn').disabled=busy;
+    const cancel=$('cancelAssetForm');if(cancel)cancel.disabled=busy;
   }
   async function uploadAssetImage(assetId,file,type,statusCb=()=>{},guestUploadToken=''){
     statusCb('Compressing image...'); const {full,thumb}=await AssetImage.prepareForStorage(file); statusCb(`Uploading ${Math.round(full.size/1024)} KB...`);
@@ -1904,7 +1993,7 @@
     $('mergeExactScan')?.addEventListener('click',()=>withAccess('STAFF',()=>openManualMerge(a)));
   }
 
-  function resetScannerResult(){
+  function resetScannerResult({restartCamera=true}={}){
     $('scanResult').innerHTML='<div class="empty-state compact">Ready for another scan.</div>';
     state.lastRecognition=null;
     state.scanFile=null;
@@ -1912,7 +2001,7 @@
     setScannerBusy(false);
     if(state.cameraStream)setupBarcodeDetector(); else resetScannerPreview();
     setScannerStage('camera');
-    if(window.matchMedia('(max-width:760px)').matches && !state.cameraStream)startCamera();
+    if(restartCamera&&window.matchMedia('(max-width:760px)').matches && !state.cameraStream)startCamera();
   }
 
   function normalizeCodeValue(value){return String(value||'').toUpperCase().replace(/[^A-Z0-9]/g,'');}
@@ -1953,6 +2042,10 @@
   }
   function showUniversalRecognition(){
     const session=recognitionState(),proposal=recognitionProposal();
+    const editing=document.activeElement;
+    const editingField=editing?.dataset?.universalField;
+    const editingSpecs=editing?.id==='v27Specs';
+    const selection=editingField||editingSpecs?[editing.selectionStart,editing.selectionEnd]:null;
     const incoming=recognitionIncoming();
     const hasPhotos=session.photos.length>0;
     const running=session.photos.some(x=>x.processing);
@@ -1960,7 +2053,7 @@
     const photoHtml=session.photos.map((x,i)=>`<div class="v27-photo"><img src="${esc(x.url)}" alt="Source photo ${i+1}"><div><b>Image ${i+1}</b><small>${esc(x.processing?'Processing…':x.error?'Needs review':x.ai?'AI + OCR':x.observation?'OCR':'No OCR text')}</small></div><button type="button" class="v27-remove" data-remove-image="${esc(x.id)}" title="Remove this source" ${running?'disabled':''}>×</button></div>`).join('');
     const core=[['category','Category'],['brand','Brand'],['model','Model'],['serial','Serial number']].map(([k,label])=>{
       const original=proposal.fields[k];
-      return `<label class="v27-edit-field"><span>${label}</span><input data-universal-field="${k}" value="${esc(incoming[k]||'')}" placeholder="Not detected — enter manually"><small>${original?.evidence?`Image ${esc(original.source_image.split('_')[1]||'?')} · ${esc(original.status)} · ${esc(original.evidence.slice(0,95))}`:'Not detected; manual confirmation required'}</small></label>`;
+      return `<label class="v27-edit-field"><span>${label}</span><input data-universal-field="${k}" value="${esc(incoming[k]||'')}" placeholder="Not detected — enter manually"><div class="input-suggestions">${(proposal.suggestions?.[k]||[]).slice(0,3).filter(x=>x.value!==incoming[k]).map(x=>`<button type="button" class="btn light sm" data-recognition-suggestion="${esc(k)}" data-value="${esc(x.value)}" title="${esc(x.reason||x.evidence)}">${esc(x.value)}</button>`).join('')}</div><small>${Object.hasOwn(session.overrides,k)?'Manual entry':original?.evidence?`Image ${esc(original.source_image.split('_')[1]||'?')} · ${esc(original.status)} · ${esc(original.evidence.slice(0,95))}`:'Not detected; manual confirmation required'}</small></label>`;
     }).join('');
     const conflictHtml=proposal.conflicts.length?`<section class="v27-conflicts"><b>Review conflicting values (${proposal.conflicts.length})</b><p>Choose the correct value for each discrepancy before creating or updating an asset.</p>${proposal.conflicts.map(c=>`<div class="v27-conflict"><label>${esc(c.label.replace(/_/g,' '))}</label><select data-conflict="${esc(c.id)}"><option value="">Choose a source value…</option>${c.options.map(o=>`<option value="${esc(o.value)}" ${c.resolved&&session.resolutions[c.id]===o.value?'selected':''}>${esc(o.value)} — ${esc(o.source_image)}</option>`).join('')}</select></div>`).join('')}</section>`:'';
     const attrRows=proposal.attributes.map(a=>`<tr><td>${esc(a.label||a.key)}</td><td>${esc(a.value)}</td><td>${esc(a.source_image)}<small class="v27-value-evidence">${esc(a.evidence||'OCR observation')}</small></td></tr>`).join('');
@@ -1972,7 +2065,7 @@
     const sourceCount=session.photos.length;
     const pendingTarget=state.scanUpdateTarget;
     $('scanResult').innerHTML=`<div class="result-card v27-result"><div class="recognition-badges"><span class="recognition-badge">Universal recognition V2.7</span><span class="recognition-badge">${sourceCount} photo${sourceCount===1?'':'s'}</span>${running?'<span class="recognition-badge warn">Processing · preliminary fields visible</span>':''}</div><strong>One asset · multiple evidence sources</strong>${recognitionStatusHtml()}
-      <div class="v27-photo-strip">${photoHtml}</div><div class="v27-photo-actions"><button id="v27AddPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>+ Add another photo</button><button id="v27CameraPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Take another photo</button><button id="v27Reset" class="btn light sm" type="button">${running?'Cancel recognition':'Start new asset'}</button></div>
+      <div class="v27-photo-strip">${photoHtml}</div><div class="v27-photo-actions"><button id="v27AddPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Choose from gallery</button><button id="v27CameraPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Take photo</button><button id="v27Reset" class="btn light sm" type="button">${running?'Cancel recognition':'Start new asset'}</button></div>
       ${errors}${conflictHtml}
       <div class="v27-core"><h4>Review the main information</h4><div class="v27-fields">${core}</div></div>
       ${idRows?`<details class="v27-evidence-block" open><summary>Additional identifiers (${proposal.identifiers.length})</summary><div class="v27-table-wrap"><table><thead><tr><th>Type</th><th>Value</th><th>Source</th></tr></thead><tbody>${idRows}</tbody></table></div></details>`:''}
@@ -1986,6 +2079,10 @@
       ${pendingTarget?'<button id="v27UpdateTarget" class="btn primary" type="button">Review changes</button>':`<button id="v27Create" class="btn primary" type="button">${session.matches.length?'Create separate asset anyway':'Review & Create Asset'}</button>`}
       <button id="v27FindMatch" class="btn light" type="button">Find existing asset</button></div></div>`;
     setScannerStage('result');
+    bindInputAssistance($('scanResult'));
+    $$('[data-recognition-suggestion]').forEach(button=>button.addEventListener('click',()=>{
+      session.overrides[button.dataset.recognitionSuggestion]=button.dataset.value;showUniversalRecognition();scheduleUniversalMatches();
+    }));
     $('v27AddPhoto')?.addEventListener('click',()=>$('scannerFile')?.click());
     $('v27CameraPhoto')?.addEventListener('click',()=>$('scannerCameraFile')?.click());
     $('v27Reset')?.addEventListener('click',resetScannerResult);
@@ -2001,8 +2098,12 @@
       else delete session.resolutions[el.dataset.conflict];
       showUniversalRecognition();updateUniversalMatches();
     }));
-    $$('[data-universal-field]').forEach(el=>el.addEventListener('change',()=>{session.overrides[el.dataset.universalField]=el.value.trim();updateUniversalMatches();}));
-    $('v27Specs')?.addEventListener('change',e=>{session.overrides.specifications=e.target.value;});
+    $$('[data-universal-field]').forEach(el=>el.addEventListener('input',()=>{session.overrides[el.dataset.universalField]=el.value.trim();scheduleUniversalMatches();}));
+    $('v27Specs')?.addEventListener('input',e=>{session.overrides.specifications=e.target.value;});
+    if(selection){
+      const replacement=editingSpecs?$('v27Specs'):document.querySelector(`[data-universal-field="${editingField}"]`);
+      replacement?.focus({preventScroll:true});replacement?.setSelectionRange(...selection);
+    }
     const blocked=running||unresolved;
     ['v27Create','v27UpdateTarget','v27FindMatch'].forEach(id=>{const el=$(id);if(el)el.disabled=blocked;});
     const getIncoming=()=>{
@@ -2022,6 +2123,12 @@
     $$('[data-v27-match]').forEach(btn=>btn.addEventListener('click',()=>{
       const m=session.matches[Number(btn.dataset.v27Match)];if(m)withAccess('STAFF',()=>openScanReconcile(m.asset,getIncoming(),recognitionPhotos()));
     }));
+  }
+  let universalMatchTimer;
+  function scheduleUniversalMatches(){
+    const session=state.recognitionSession;clearTimeout(universalMatchTimer);
+    if(session)session.matchVersion++;
+    universalMatchTimer=setTimeout(()=>{if(state.recognitionSession===session)updateUniversalMatches();},400);
   }
   async function updateUniversalMatches(){
     const session=state.recognitionSession;if(!session)return;
@@ -2049,6 +2156,7 @@
     setScannerBusy(true);showUniversalRecognition();
     try{
       const codePromise=window.AssetCode?.scanFile?AssetCode.scanFile(file).catch(e=>{console.warn('Barcode not recognized',e);return null;}):Promise.resolve(null);
+      const inputEngine=await window.AssetInput?.ready();
       let ocr;
       try{
         const image=await AssetImage.prepareForOcr(file);
@@ -2056,7 +2164,8 @@
       }catch(err){item.error='OCR unavailable: '+humanError(err)+'. Retake or enter manually.';}
       if(state.recognitionSession!==session)return;
       if(ocr?.text){
-        item.ocr=ocr;item.observation=window.AssetRecognition.fromOcr(ocr,item.id);
+        item.ocr=ocr;item.observation=window.AssetRecognition.fromOcr(ocr,item.id,inputEngine?.analyze(ocr.text,{categories:state.refs.categories}));
+        if(!inputEngine)item.warning='Local recognition data is unavailable; review OCR suggestions carefully.';
         item.steps.ocr='done';
       }else item.steps.ocr='skipped';
       // Partial fields appear now, without waiting for Groq.
@@ -2066,8 +2175,8 @@
         try{
           const r=await AssetAPI.post('interpretOcrUniversal',{text:ocr.text,base_fields_json:JSON.stringify(ocr.fields||{}),source_image:item.id});
           if(state.recognitionSession!==session)return;
-          item.ai=r.result;
-          item.observation=window.AssetRecognition.attachAi(item.observation,item.ai);
+          item.ai={...r.result,attributes:(r.result?.attributes||[]).map(a=>inputEngine?inputEngine.canonicalAttribute(a):a)};
+          item.observation=window.AssetRecognition.attachAi(item.observation,item.ai,(field,value)=>inputEngine?.canonical(field,value,{categories:state.refs.categories})||'');
           item.steps.ai='done';
         }catch(err){item.steps.ai='skipped';item.warning='Groq unavailable; OCR fallback retained ('+humanError(err)+').';}
         showUniversalRecognition();
@@ -2271,7 +2380,7 @@
 
   function monitorOnline(){ const paint=()=>{$('offlineBar').classList.toggle('hidden',navigator.onLine);};window.addEventListener('online',()=>{paint();backgroundSync('online',{force:true});});window.addEventListener('offline',paint);paint(); }
   async function checkRemoteVersion(){
-    try{const r=await fetch(`./version.json?t=${Date.now()}`,{cache:'no-store'});const v=await r.json();state.latestVersion=v;const available=!!v.version&&v.version!==APP_VERSION;$('updateBtn').classList.toggle('hidden',!available);if(available)$('updateBtn').title=`Update ${APP_VERSION} → ${v.version}`;}
+    try{const r=await fetch(`./version.json?t=${Date.now()}`,{cache:'no-store'});const v=await r.json();state.latestVersion=v;const available=!!v.version&&(v.version!==APP_VERSION||(v.build&&v.build!==BUILD_ID));$('updateBtn').classList.toggle('hidden',!available);if(available)$('updateBtn').title=`Update ${APP_VERSION} → ${v.build||v.version}`;}
     catch(err){console.warn('Version check failed',err);}
   }
   async function applyAppUpdate(){

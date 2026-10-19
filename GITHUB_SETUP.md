@@ -1,5 +1,7 @@
 # GitHub repository setup
 
+This records the original import at commit `0f19c8e`. Subsequent application changes are documented in [LOCAL_INPUT_AND_PHOTOS.md](docs/LOCAL_INPUT_AND_PHOTOS.md); the original byte-for-byte preservation statement below applies to that import commit.
+
 ## Imported snapshot
 
 Source: owner-supplied `JCP_AssetHub_V2_7_PREVIEW.zip`.
