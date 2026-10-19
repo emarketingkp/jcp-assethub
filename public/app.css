@@ -552,6 +552,12 @@ body.modal-open .mobile-nav,body.drawer-open .mobile-nav{opacity:0;transform:tra
 .v27-photo-actions .btn{min-height:34px}
 .v27-core,.v27-evidence-block,.v27-conflicts{border:1px solid #e2e8f0;border-radius:13px;padding:12px;background:#fff;min-width:0}
 .v27-core h4{margin:0 0 10px;font-size:13px;color:#173458}
+.v27-barcode-help{font-size:12px;color:var(--muted);margin:0 0 8px}
+.v27-barcode-status{display:block;font-size:11px;color:var(--muted);margin-bottom:6px}
+.v27-barcode-row{display:flex;align-items:center;gap:10px;justify-content:space-between;padding:10px 0;border-top:1px solid #e2e8f0}
+.v27-barcode-row>div{min-width:0;overflow-wrap:anywhere}
+.v27-barcode-row b{font-size:13px}.v27-barcode-row small{display:block;font-size:11px;color:var(--muted)}
+.v27-barcode-row .btn{flex-shrink:0;white-space:normal;max-width:110px}
 .v27-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}
 .v27-edit-field{min-width:0;display:flex;flex-direction:column;gap:4px}
 .v27-edit-field>span{font-size:11px;color:#526176;font-weight:800}

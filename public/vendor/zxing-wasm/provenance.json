@@ -1,0 +1,18 @@
+{
+  "package": "zxing-wasm",
+  "version": "3.1.5",
+  "upstream": "https://github.com/Sec-ant/zxing-wasm/tree/v3.1.5",
+  "zxingCppCommit": "2ecec3f5be0ee803f6e14a5a2c7028c0cfe525b4",
+  "files": {
+    "reader.js": {
+      "sha256": "228e6d8ccb841c544386eeafd5f18294d3e4aa0e7aa20419bc51a0009b9d3c17",
+      "bytes": 36583,
+      "gzipBytes": 12787
+    },
+    "zxing_reader.wasm": {
+      "sha256": "aecc1876de036c62c8419f67a5e1a16b1698a325bcd190aa84810d516e263931",
+      "bytes": 966895,
+      "gzipBytes": 415050
+    }
+  }
+}

@@ -54,12 +54,31 @@
     // Keep small originals, but shrink typical phone photos before OCR transport.
     // This keeps label text readable while avoiding multi-megabyte mobile POST payloads.
     if(file.size <= 2 * 1024 * 1024) return fileToDataUrl(file);
-    const lighter = await resize(file,2400,'image/jpeg',.90);
+    let lighter = await resize(file,2400,'image/jpeg',.90);
+    // At most two compression retries; bound the upload without enlarging images.
+    if(lighter.size>2*1024*1024)lighter=await resize(lighter,2000,'image/jpeg',.80);
+    if(lighter.size>2*1024*1024)lighter=await resize(lighter,1600,'image/jpeg',.72);
+    if(lighter.size>2*1024*1024)throw new Error('Photo is too large for OCR. Crop to the label and retry.');
     return fileToDataUrl(lighter);
   }
 
+  function canCaptureStill(stream){
+    return !!(stream?.getVideoTracks?.()[0] && window.ImageCapture?.prototype?.takePhoto);
+  }
+  async function captureStill(stream){
+    if(!canCaptureStill(stream))throw new Error('Use the phone camera to take a full-resolution photo.');
+    const capture=new ImageCapture(stream.getVideoTracks()[0]);
+    let timer;
+    try{
+      // takePhoto captures a still from the camera sensor, not the video preview.
+      const blob=await Promise.race([capture.takePhoto(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Camera capture timed out.')),6000);})]);
+      if(!blob?.size)throw new Error('Camera returned an empty photo.');
+      return new File([blob],'device-label-'+Date.now()+'.jpg',{type:blob.type||'image/jpeg'});
+    }finally{clearTimeout(timer);}
+  }
+
   async function videoFrameToFile(video, name='camera-label.jpg'){
-    const w = video.videoWidth || 1920, h = video.videoHeight || 1080;
+    const w = video.videoWidth, h = video.videoHeight;
     if(!w || !h) throw new Error('Camera frame is not ready.');
     const canvas = document.createElement('canvas');
     canvas.width=w; canvas.height=h;
@@ -68,5 +87,5 @@
     return new File([blob], name, {type:'image/jpeg'});
   }
 
-  window.AssetImage = {fileToDataUrl,resize,blobToBase64,prepareForStorage,prepareForOcr,videoFrameToFile};
+  window.AssetImage = {fileToDataUrl,resize,blobToBase64,prepareForStorage,prepareForOcr,videoFrameToFile,canCaptureStill,captureStill};
 })();

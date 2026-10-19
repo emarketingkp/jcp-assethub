@@ -3,7 +3,7 @@
   const options=window.__mockOptions||{};
   const refs={sites:[{site_id:'SITE-TEST',name:'Test Site',active:true}],areas:[{area_id:'AREA-TEST',site_id:'SITE-TEST',name:'Test Area',active:true}],categories:window.__fixtureCategories,brands:[],custom_fields:[],assignees:[],locations:[],users:[]};
   const user={name:'Test Staff',username:'test-staff',role:options.role||'STAFF'};
-  const state=window.__mock={calls:[],assets:[],uploadAttempts:0,failNextUpload:false,failUploadAt:0,aiRelease:null};
+  const state=window.__mock={calls:[],assets:[],uploadAttempts:0,failNextUpload:false,failUploadAt:0,aiRelease:null,ocrRelease:null};
   const pixel='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jgE0AAAAASUVORK5CYII=';
   const clone=x=>structuredClone(x);
   const api={getUrl:()=>'/test-backend',setUrl(){},getToken:()=>user.role==='GUEST'?'':'test-session',setToken(){},getLastTiming:()=>null};
@@ -20,7 +20,11 @@
   };
   api.post=async(action,params={})=>{
     state.calls.push({action,params:clone(params)});
-    if(action==='ocr')return {result:{text:options.ocrText||'Brand: Ricoh\nCategory: Printer\nModel: TEST-100\nSerial: O01I2345\nRAM: 8 GB',fields:{brand:'HP',category:'Desktop PC'}}};
+    if(action==='ocr'){
+      const result={result:{text:options.ocrText||'Brand: Ricoh\nCategory: Printer\nModel: TEST-100\nSerial: O01I2345\nRAM: 8 GB',fields:{brand:'HP',category:'Desktop PC'}}};
+      if(options.ocrDelayed)return new Promise(resolve=>{state.ocrRelease=()=>resolve(result);});
+      return result;
+    }
     if(action==='interpretOcrUniversal'){
       if(options.aiDelayed)return new Promise(resolve=>{state.aiRelease=()=>resolve({result:{fields:{brand:{value:'Ricoh',evidence:'Brand: Ricoh',status:'supported'}}}});});
       throw new Error('Simulated provider outage');

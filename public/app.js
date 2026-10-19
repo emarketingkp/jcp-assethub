@@ -16,7 +16,7 @@
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
   const APP_VERSION = '2.7';
-  const BUILD_ID = '2.7-input-photos-1';
+  const BUILD_ID = '2.7-still-barcodes-1';
   const ASSET_BASE_URL = 'https://assets.jcpmalaysia.com/';
   const CACHE_BOOT = 'jcp_assethub_cache_boot_v1';
   const CACHE_ASSETS = 'jcp_assethub_cache_assets_v1';
@@ -1852,16 +1852,23 @@
     scanner.classList.toggle('scanner-show-result',stage==='result');
     scanner.classList.toggle('scanner-processing',stage==='processing');
   }
+  let preferNativePhoto=false,cameraGeneration=0;
   async function captureMobileFrame(){
     const video=$('scannerVideo');
-    if(!video?.videoWidth||!state.cameraStream) return $('scannerCameraFile')?.click();
-    const canvas=document.createElement('canvas');
-    canvas.width=video.videoWidth;canvas.height=video.videoHeight;
-    canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
-    const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.93));
-    if(!blob){toast('Could not capture image. Try Gallery.','error');return;}
-    const file=new File([blob],'device-label-'+Date.now()+'.jpg',{type:'image/jpeg'});
-    showScannerPhotoPreview(file); setScannerStage('processing');
+    if(preferNativePhoto||!video?.videoWidth||!AssetImage.canCaptureStill(state.cameraStream)){
+      // Keep the native picker inside this user gesture (required by mobile Safari).
+      stopCamera();return $('scannerCameraFile')?.click();
+    }
+    const stream=state.cameraStream;setScannerBusy(true);
+    let file;
+    try{file=await AssetImage.captureStill(stream);}
+    catch{
+      preferNativePhoto=true;
+      toast('Still capture unavailable. Tap Take photo again to use your phone camera.','error');
+      return;
+    }finally{setScannerBusy(false);}
+    if(state.cameraStream!==stream)return;
+    showScannerPhotoPreview(file);setScannerStage('processing');
     try{await processScanFile(file);}catch(err){toast(humanError(err),'error');setScannerStage('result');}
   }
   async function toggleMobileTorch(){
@@ -1893,6 +1900,7 @@
 
   async function startCamera(){
     if(state.cameraStream){stopCamera();return;}
+    const generation=++cameraGeneration;
     resetScannerPreview();
     const btn=$('startCameraBtn');
     if(!navigator.mediaDevices?.getUserMedia){
@@ -1901,12 +1909,16 @@
     }
     await withBusy(btn,'Starting...',async()=>{
       try{
-        state.cameraStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+        const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
+        if(generation!==cameraGeneration||state.route!=='scanner'){stream.getTracks().forEach(track=>track.stop());return;}
+        state.cameraStream=stream;
         $('scannerVideo').srcObject=state.cameraStream; await $('scannerVideo').play();
         $('scannerPlaceholder').classList.add('hidden');
         // On phones the shutter controls recognition. Desktop keeps V1.9 live QR detection.
         if(!window.matchMedia('(max-width:760px)').matches)setupBarcodeDetector();
       }catch(err){
+        if(generation!==cameraGeneration)return;
+        if(state.cameraStream)stopCamera();
         $('scanHint').textContent='Live preview is unavailable. Tap the shutter to use your phone camera or choose Gallery.';
         console.warn('Camera preview unavailable; native capture remains available:',err);
       }
@@ -1915,6 +1927,7 @@
   }
 
   function stopCamera(){
+    cameraGeneration++;
     if(state.scanTimer)clearInterval(state.scanTimer);
     state.scanTimer=null;
     if(state.cameraStream){state.cameraStream.getTracks().forEach(t=>t.stop());state.cameraStream=null;}
@@ -1997,7 +2010,7 @@
     $('scanResult').innerHTML='<div class="empty-state compact">Ready for another scan.</div>';
     state.lastRecognition=null;
     state.scanFile=null;
-    if(state.recognitionSession){state.recognitionSession.photos.forEach(x=>{try{URL.revokeObjectURL(x.url);}catch(_){}});state.recognitionSession=null;}
+    if(state.recognitionSession){state.recognitionSession.photos.forEach(x=>{x.codeAbort?.abort();try{URL.revokeObjectURL(x.url);}catch(_){}});state.recognitionSession=null;}
     setScannerBusy(false);
     if(state.cameraStream)setupBarcodeDetector(); else resetScannerPreview();
     setScannerStage('camera');
@@ -2024,7 +2037,12 @@
   }
   function recognitionProposal(){
     const r=recognitionState();
-    return window.AssetRecognition.consolidate(r.photos.filter(x=>x.observation).map(x=>x.observation),r.resolutions);
+    const observations=r.photos.map(photo=>{
+      const observation=photo.observation||window.AssetRecognition.fromOcr({text:''},photo.id);
+      const identifiers=(photo.codes||[]).filter(c=>c.kind==='asset_id').map(c=>({type:'asset_id',value:c.assetId,evidence:c.value,source_image:photo.id,status:'supported'}));
+      return {...observation,identifiers:[...observation.identifiers,...identifiers]};
+    });
+    return window.AssetRecognition.consolidate(observations,r.resolutions);
   }
   function recognitionIncoming(){
     return window.AssetRecognition.toIncoming(recognitionProposal(),recognitionState().overrides);
@@ -2062,11 +2080,14 @@
     const raw=session.photos.filter(p=>p.ocr?.text).map(p=>`<h5>${esc(p.id)}</h5><pre>${esc(p.ocr.text)}</pre>`).join('');
     const matches=session.matches.map((m,i)=>`<div class="scan-match-card"><div class="scan-match-copy"><b>${esc(assetDisplayName(m.asset))}</b><small>${esc(m.asset.asset_id)} · ${esc(m.asset.site_name||'No site')} · ${esc(m.asset.area_name||'')}</small><small>${esc((m.reasons||[]).join(' · '))}</small>${m.conflicts?.length?`<small>Conflicts: ${esc(m.conflicts.join(', '))}</small>`:''}</div><button type="button" class="btn light sm" data-v27-match="${i}" ${running||unresolved?'disabled':''}>Review match</button></div>`).join('');
     const errors=session.photos.filter(x=>x.error||x.warning).map(x=>`<div class="scan-warning">${esc(x.id)}: ${esc(x.error||x.warning)}</div>`).join('');
+    const barcodeCandidates=session.photos.flatMap((photo,index)=>(photo.codes||[]).map(code=>({...code,photo:index+1})));
+    const barcodeHtml=`<section class="v27-core v27-barcodes" aria-label="Detected barcodes"><h4>Barcode observations · confirm before using</h4><p class="v27-barcode-help">A barcode can identify a model, part or warranty page. Use it as a serial only after checking the device label.</p>${session.photos.map((photo,index)=>`<small class="v27-barcode-status">Image ${index+1}: ${photo.codeBusy?'Checking barcodes on this device…':photo.codeWarning?esc(photo.codeWarning):(photo.codes?.length?'Barcode search complete.':'No readable barcode. Try a closer label photo or enter the serial manually.')}</small>`).join('')}${barcodeCandidates.map((code,index)=>`<div class="v27-barcode-row"><div><b>${esc(code.value)}</b><small>Image ${code.photo} · ${esc(code.format)} · ${esc(code.label)}</small></div>${code.kind==='candidate'?`<button type="button" class="btn light sm" data-barcode-candidate="${index}">Use as serial</button>`:''}</div>`).join('')}</section>`;
     const sourceCount=session.photos.length;
     const pendingTarget=state.scanUpdateTarget;
     $('scanResult').innerHTML=`<div class="result-card v27-result"><div class="recognition-badges"><span class="recognition-badge">Universal recognition V2.7</span><span class="recognition-badge">${sourceCount} photo${sourceCount===1?'':'s'}</span>${running?'<span class="recognition-badge warn">Processing · preliminary fields visible</span>':''}</div><strong>One asset · multiple evidence sources</strong>${recognitionStatusHtml()}
       <div class="v27-photo-strip">${photoHtml}</div><div class="v27-photo-actions"><button id="v27AddPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Choose from gallery</button><button id="v27CameraPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Take photo</button><button id="v27Reset" class="btn light sm" type="button">${running?'Cancel recognition':'Start new asset'}</button></div>
       ${errors}${conflictHtml}
+      ${barcodeHtml}
       <div class="v27-core"><h4>Review the main information</h4><div class="v27-fields">${core}</div></div>
       ${idRows?`<details class="v27-evidence-block" open><summary>Additional identifiers (${proposal.identifiers.length})</summary><div class="v27-table-wrap"><table><thead><tr><th>Type</th><th>Value</th><th>Source</th></tr></thead><tbody>${idRows}</tbody></table></div></details>`:''}
       ${attrRows?`<details class="v27-evidence-block" open><summary>Technical attributes (${proposal.attributes.length})</summary><div class="v27-table-wrap"><table><thead><tr><th>Attribute</th><th>Value</th><th>Source</th></tr></thead><tbody>${attrRows}</tbody></table></div></details>`:''}
@@ -2083,12 +2104,20 @@
     $$('[data-recognition-suggestion]').forEach(button=>button.addEventListener('click',()=>{
       session.overrides[button.dataset.recognitionSuggestion]=button.dataset.value;showUniversalRecognition();scheduleUniversalMatches();
     }));
+    $$('[data-barcode-candidate]').forEach(button=>button.addEventListener('click',()=>{
+      const code=barcodeCandidates[Number(button.dataset.barcodeCandidate)];
+      if(code?.kind!=='candidate')return;
+      const current=recognitionIncoming().serial;
+      if(current&&current!==code.serialCandidate&&!confirm(`Replace the reviewed serial ${current} with ${code.serialCandidate}? Check the printed label first.`))return;
+      session.overrides.serial=code.serialCandidate;
+      showUniversalRecognition();scheduleUniversalMatches();
+    }));
     $('v27AddPhoto')?.addEventListener('click',()=>$('scannerFile')?.click());
     $('v27CameraPhoto')?.addEventListener('click',()=>$('scannerCameraFile')?.click());
     $('v27Reset')?.addEventListener('click',resetScannerResult);
     $$('[data-remove-image]').forEach(btn=>btn.addEventListener('click',()=>{
       const idx=session.photos.findIndex(x=>x.id===btn.dataset.removeImage);
-      if(idx<0)return;const [removed]=session.photos.splice(idx,1);URL.revokeObjectURL(removed.url);
+      if(idx<0)return;const [removed]=session.photos.splice(idx,1);removed.codeAbort?.abort();URL.revokeObjectURL(removed.url);
       session.matches=[];session.overrides={};session.resolutions={};
       if(!session.photos.length)return resetScannerResult();
       showUniversalRecognition();updateUniversalMatches();
@@ -2150,12 +2179,22 @@
     if(session.photos.some(x=>x.file.name===file.name && x.file.size===file.size && x.file.lastModified===file.lastModified))return toast('That image is already in this session.','error');
     if(session.photos.length>=6)return toast('Up to six photos per recognition session. Remove one to add another.','error');
     const id='image_'+String(session.photos.length+1).padStart(2,'0')+'_'+Date.now().toString(36);
-    const item={id,file,url:URL.createObjectURL(file),steps:{captured:'done',ocr:'busy',ai:'pending',matched:'pending'},processing:true,ocr:null,observation:null,ai:null,error:'',warning:''};
+    const item={id,file,url:URL.createObjectURL(file),steps:{captured:'done',ocr:'busy',ai:'pending',matched:'pending'},processing:true,ocr:null,observation:null,ai:null,error:'',warning:'',codes:[],codeBusy:true,codeWarning:'',codeAbort:new AbortController()};
     session.photos.push(item);
     state.scanFile=session.photos[0]?.file||file;
     setScannerBusy(true);showUniversalRecognition();
     try{
-      const codePromise=window.AssetCode?.scanFile?AssetCode.scanFile(file).catch(e=>{console.warn('Barcode not recognized',e);return null;}):Promise.resolve(null);
+      const codePromise=(window.AssetCode?.scanAll?AssetCode.scanAll(file,{
+        signal:item.codeAbort.signal,
+        onUpdate:({codes,warning})=>{
+          if(state.recognitionSession!==session||item.codeAbort.signal.aborted)return;
+          item.codes=codes;if(warning)item.codeWarning=warning;
+          showUniversalRecognition();
+        }
+      }):Promise.resolve([])).catch(()=>{item.codeWarning='Barcode reader unavailable. Enter the serial manually.';return [];}).finally(()=>{
+        item.codeBusy=false;
+        if(state.recognitionSession===session)showUniversalRecognition();
+      });
       const inputEngine=await window.AssetInput?.ready();
       let ocr;
       try{
@@ -2181,14 +2220,8 @@
         }catch(err){item.steps.ai='skipped';item.warning='Groq unavailable; OCR fallback retained ('+humanError(err)+').';}
         showUniversalRecognition();
       }
-      item.code=await codePromise;
+      await codePromise;
       if(state.recognitionSession!==session)return;
-      if(item.code && window.AssetCode?.extractAssetId?.(item.code.value)){
-        // JCP Asset ID is meaningful; generic manufacturer barcodes are not serials.
-        const codeValue=window.AssetCode.extractAssetId(item.code.value);
-        item.observation=item.observation||window.AssetRecognition.fromOcr({text:'',fields:{}},item.id);
-        item.observation.identifiers.push({type:'asset_id',value:codeValue,evidence:String(item.code.value),source_image:item.id,status:'supported'});
-      }
       item.steps.matched='busy';showUniversalRecognition();
       await updateUniversalMatches();
       item.steps.matched='done';
