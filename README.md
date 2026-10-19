@@ -5,7 +5,7 @@ JCP AssetHub, a mobile-first asset management application built with Firebase Ho
 
 This repository includes the source from `JCP_AssetHub_V2_7_PREVIEW.zip`. The owner reports that V2.7 is deployed. The supplied archive has not been compared against that deployment; its original release documents describe the earlier preview status.
 
-Local input assistance and clearer camera/gallery controls were published to Firebase Hosting on 2026-10-19 (build `2.7-input-photos-1`). This branch adds still-photo capture and confirmed barcode candidates; that patch has not been deployed. See [scanner changes, validation limits and isolated release procedure](docs/STILL_CAPTURE_AND_BARCODES.md), the [grouping design proposal](docs/ASSET_GROUPING_PROPOSAL.md), and [earlier input/photo implementation notes](docs/LOCAL_INPUT_AND_PHOTOS.md).
+Production Hosting was last updated on 2026-10-19 to build `2.7-still-barcodes-1`. This branch adds equipment sets, a grouped register and reviewed multiple-unit entry; it has not been deployed. See [grouping implementation and the owner's Apps Script rollout](docs/GROUPS_AND_SETS.md), [scanner changes and validation limits](docs/STILL_CAPTURE_AND_BARCODES.md), and [earlier input/photo implementation notes](docs/LOCAL_INPUT_AND_PHOTOS.md).
 
 - `public/`: Firebase Hosting frontend.
 - `apps-script/`: Google Apps Script backend and manifest.
@@ -24,7 +24,7 @@ npm test
 npx playwright install chromium
 npm run test:browser
 for file in public/*.js; do node --check "$file" || exit; done
-node --check < apps-script/Code.gs
+for file in apps-script/*.gs; do node --check < "$file" || exit; done
 ```
 
 GitHub Actions runs these checks on pushes and pull requests. Browser tests use the real frontend with a synthetic backend and image fixtures. They do not verify the live deployment, physical phone cameras, real AI responses, or Sheets/Drive writes.

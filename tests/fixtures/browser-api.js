@@ -3,16 +3,17 @@
   const options=window.__mockOptions||{};
   const refs={sites:[{site_id:'SITE-TEST',name:'Test Site',active:true}],areas:[{area_id:'AREA-TEST',site_id:'SITE-TEST',name:'Test Area',active:true}],categories:window.__fixtureCategories,brands:[],custom_fields:[],assignees:[],locations:[],users:[]};
   const user={name:'Test Staff',username:'test-staff',role:options.role||'STAFF'};
-  const state=window.__mock={calls:[],assets:[],uploadAttempts:0,failNextUpload:false,failUploadAt:0,aiRelease:null,ocrRelease:null};
+  const state=window.__mock={calls:[],assets:cloneInitial(),uploadAttempts:0,failNextUpload:false,failUploadAt:0,aiRelease:null,ocrRelease:null,loseBatchReply:!!options.loseBatchReply&&!sessionStorage.getItem('test-batch-reply-lost')};
+  function cloneInitial(){return structuredClone(options.assets||[]);}
   const pixel='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jgE0AAAAASUVORK5CYII=';
   const clone=x=>structuredClone(x);
   const api={getUrl:()=>'/test-backend',setUrl(){},getToken:()=>user.role==='GUEST'?'':'test-session',setToken(){},getLastTiming:()=>null};
   api.get=async(action,params={})=>{
     state.calls.push({action,params:clone(params)});
-    if(action==='bootstrap')return {success:true,version:'2.7',user,references:clone(refs),dashboard:{},authenticated:user.role!=='GUEST',ai_ocr_enabled:!!options.ai};
-    if(action==='sync')return {sync:{assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}};
-    if(action==='suggestMatchesV27')return {matches:[]};
-    if(action==='listAssets')return {rows:clone(state.assets)};
+    if(action==='bootstrap')return {success:true,version:'2.7',features:{asset_groups:options.grouping===false?0:1},user,references:clone(refs),dashboard:{},authenticated:user.role!=='GUEST',ai_ocr_enabled:!!options.ai};
+    if(action==='sync')return {sync:{version:'2.7',features:{asset_groups:options.grouping===false?0:1},user,authenticated:user.role!=='GUEST',assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}};
+    if(action==='suggestMatchesV27')return {matches:clone(options.matches||[])};
+    if(action==='listAssets')return {assets:clone(state.assets)};
     if(action==='getAsset')return {asset:clone(state.assets.find(a=>a.asset_id===params.asset_id))};
     if(action==='getImageData')return {data:{data_url:pixel}};
     if(action==='diagnostics')return {diagnostics:{status:'online',components:{}}};
@@ -20,6 +21,11 @@
   };
   api.post=async(action,params={})=>{
     state.calls.push({action,params:clone(params)});
+    if(action==='saveAssetBatch'){
+      const reply=await window.__assetBatchBridge(params);state.assets=reply.assets;
+      if(state.loseBatchReply){state.loseBatchReply=false;sessionStorage.setItem('test-batch-reply-lost','1');throw new Error('Simulated lost reply after the real backend saved');}
+      return {result:reply.result};
+    }
     if(action==='ocr'){
       const result={result:{text:options.ocrText||'Brand: Ricoh\nCategory: Printer\nModel: TEST-100\nSerial: O01I2345\nRAM: 8 GB',fields:{brand:'HP',category:'Desktop PC'}}};
       if(options.ocrDelayed)return new Promise(resolve=>{state.ocrRelease=()=>resolve(result);});

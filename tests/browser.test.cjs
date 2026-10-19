@@ -6,6 +6,7 @@ const {chromium}=require('playwright');
 const {test}=require('node:test');
 const data=require('../public/data/input-knowledge.json');
 const bwip=require('bwip-js');
+const {createHarness}=require('./fixtures/sheets-harness.cjs');
 const root=path.resolve(__dirname,'../public');
 const types={'.html':'text/html','.js':'text/javascript','.json':'application/json','.css':'text/css','.png':'image/png','.wasm':'application/wasm','.webmanifest':'application/manifest+json'};
 const pixel=require('node:fs').readFileSync(path.join(root,'assets/icon-192.png'));
@@ -24,6 +25,8 @@ test('browser regressions on mobile and desktop',async t=>{
   const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox']});
   async function start(options={},viewport={width:390,height:844}){
     const context=await browser.newContext({viewport,serviceWorkers:'block'});
+    const backend=createHarness(options);
+    await context.exposeFunction('__assetBatchBridge',params=>({result:backend.request(params),assets:backend.read('Assets')}));
     await context.addInitScript(({options,categories})=>{
       window.__mockOptions=options;window.__fixtureCategories=categories;
       // Native capture is exercised with a file fixture, without granting real camera access.
@@ -35,7 +38,7 @@ test('browser regressions on mobile and desktop',async t=>{
     page.setDefaultTimeout(7000);
     await page.goto(base);await page.waitForFunction(()=>window.AssetInput?.current&&window.__mock);
     await page.locator('#appLoading').waitFor({state:'hidden'});
-    return {page,context,errors};
+    return {page,context,errors,backend};
   }
   async function scan(page){
     await page.locator('[data-mobile-route="scanner"]').click();
@@ -67,7 +70,136 @@ test('browser regressions on mobile and desktop',async t=>{
     },{linear:'data:image/png;base64,'+linear.toString('base64'),qr:'data:image/png;base64,'+qr.toString('base64')});
     return {name:'synthetic-multiple-codes.png',mimeType:'image/png',buffer:Buffer.from(uri.split(',')[1],'base64')};
   }
+  const stock=(id,extra={})=>({asset_id:id,category:'Monitor',category_name:'Monitor',category_id:'CAT-MON',brand:'Sample',model:'M-10',specifications:'Size: 24 inch',serial:'',site_id:'SITE-TEST',site:'Test Site',site_name:'Test Site',area:'Test Area',area_name:'Test Area',status:'Active',updated_at:'2026-01-01T00:00:00.000Z',...extra});
+  async function startSameBatch(page,count=2){
+    await page.locator('[data-mobile-route="assets"]').click();await page.locator('#addAssetGroupBtn').click();await page.locator('[data-batch-mode="same"]').click();
+    for(const [key,value]of Object.entries({category:'Monitor',brand:'Sample',model:'M-10',part_code:'SHARED-10',area:'Test Area'}))await page.locator(`[data-batch-common="${key}"]`).fill(value);
+    await page.locator('[data-batch-common="site_id"]').selectOption('SITE-TEST');
+    if(count!==2){await page.locator('#batchQuantity').fill(String(count));await page.locator('#batchQuantity').press('Tab');}
+  }
   try{
+    await t.test('grouped register renders each physical unit once and searches inside collapsed sets',async()=>{
+      const assets=[stock('JCP-AS-0001',{serial:'MON-001'}),stock('JCP-AS-0002',{serial:'MON-002'}),stock('JCP-AS-0003'),stock('JCP-PC-0001',{category:'Desktop PC',model:'PC-1',set_id:'SET-EXAMPLE00000001',set_name:'Marketing station'}),stock('JCP-KB-0001',{category:'Keyboard',brand:'',model:'',set_id:'SET-EXAMPLE00000001',set_name:'Marketing station'})];
+      const {page,context,errors}=await start({assets});
+      try{
+        await page.locator('[data-mobile-route="assets"]').click();await page.locator('.asset-group').first().waitFor();
+        assert.equal(await page.locator('.asset-group').count(),2);assert.equal(await page.locator('.group-unit').count(),0);
+        assert.match(await page.locator('#assetScopeCount').textContent(),/5 matching physical items · 2 display rows/);
+        await page.locator('#assetSearch').fill('MON-002');await page.locator('.group-unit').waitFor();
+        assert.equal(await page.locator('.group-unit').count(),1);assert.match(await page.locator('.asset-group summary').textContent(),/1 of 3 loaded/);
+        await page.locator('.group-unit [data-asset]').click();await page.locator('#drawerId').filter({hasText:'JCP-AS-0002'}).waitFor();await page.locator('#closeDrawerBtn').click();
+        await page.locator('#assetSearch').fill('');await page.locator('#assetGroupToggle').uncheck();
+        assert.equal(await page.locator('.asset-group').count(),0);assert.equal(await page.locator('#assetList [data-asset]').count(),5);
+        await page.locator('#assetGridViewBtn').click();await page.waitForFunction(()=>document.querySelectorAll('#assetList .asset-grid-card').length===5);
+        await checkNoOverflow(page);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('same-model batch reviews blank/different serials and sends shared part codes to specifications',async()=>{
+      const {page,context,errors,backend}=await start();
+      try{
+        await startSameBatch(page,3);await page.locator('[data-unit="0"][data-unit-field="serial"]').fill('001O0I1234');await page.locator('[data-unit="2"][data-unit-field="serial"]').fill('002O0I1234');
+        await page.locator('#batchEntryForm [type="submit"]').click();
+        assert.equal(backend.read('Assets').length,0);assert(await page.locator('#batchSave').isDisabled());assert.match(await page.locator('.group-review').textContent(),/1 new units have no recorded serial/);
+        await page.locator('#batchConfirm').check();await page.locator('#batchSave').click();await page.locator('#modalWrap').waitFor({state:'hidden'});
+        const rows=backend.read('Assets');assert.equal(rows.length,3);assert.deepEqual(rows.map(r=>r.serial),['001O0I1234','','002O0I1234']);assert(rows.every(r=>r.specifications==='Part Number: SHARED-10'));
+        assert.equal(await page.locator('.asset-group').count(),1);assert.match(await page.locator('#assetScopeCount').textContent(),/3 matching physical items · 1 display row/);
+        await page.locator('[data-group-add]').click();assert.equal(await page.locator('[data-batch-common="brand"]').inputValue(),'Sample');assert.equal(await page.locator('[data-unit-field="serial"]').inputValue(),'');
+        assert.equal(await page.locator('[data-batch-common="site_id"]').inputValue(),'');assert.equal(await page.locator('[data-batch-common="area"]').inputValue(),'');
+        await checkNoOverflow(page);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('PC set can reuse an existing PC, then rename and remove components without extra records',async()=>{
+      const initial=stock('JCP-PC-0001',{category:'Desktop PC',model:'PC-1',serial:'PC-0001',area:'Original area',area_name:'Original area',assigned_to:'Original owner'});
+      const {page,context,errors,backend}=await start({assets:[initial]});
+      try{
+        await page.locator('[data-mobile-route="assets"]').click();await page.locator('#addAssetGroupBtn').click();await page.locator('[data-batch-mode="set"]').click();
+        await page.locator('#batchSetName').fill('Marketing PC 01');await page.locator('[data-batch-common="site_id"]').selectOption('SITE-TEST');await page.locator('[data-batch-common="area"]').fill('New bench');
+        await page.locator('#batchPcPreset').click();assert.equal(await page.locator('.batch-unit').count(),4);
+        await page.locator('[data-unit-source="0"]').selectOption('existing');await page.locator('[data-unit="0"][data-unit-field="existing_asset_id"]').fill(initial.asset_id);await page.locator('[data-unit="0"][data-unit-field="existing_asset_id"]').press('Tab');
+        await page.locator('[data-unit="1"][data-unit-field="serial"]').fill('MON-0001');await checkNoOverflow(page);
+        await fs.mkdir(path.resolve('test-results'),{recursive:true});await page.screenshot({path:path.resolve('test-results/mobile-set-entry.png'),fullPage:true});
+        await page.locator('#batchEntryForm [type="submit"]').click();assert.match(await page.locator('.group-review').textContent(),/3 new records · 1 existing items/);
+        await page.locator('#batchConfirm').check();await page.locator('#batchSave').click();await page.locator('#modalWrap').waitFor({state:'hidden'});
+        let rows=backend.read('Assets');assert.equal(rows.length,4);assert.equal(new Set(rows.map(r=>r.set_id)).size,1);assert.equal(rows[0].area,'Original area');assert.equal(rows[0].assigned_to,'Original owner');assert.equal(rows[0].serial,'PC-0001');
+        assert.equal(await page.locator('.asset-group').count(),1);assert.equal(await page.locator('.group-unit').count(),4);await checkNoOverflow(page);
+        await page.locator('#toast .toast-close').click();
+        await page.screenshot({path:path.resolve('test-results/mobile-equipment-set.png'),fullPage:true,style:'#toast,#mobileNav{visibility:hidden!important}'});
+        await page.locator('[data-group-rename]').click();await page.locator('#batchSetName').fill('Marketing PC renamed');await page.locator('#batchEntryForm [type="submit"]').click();await page.locator('#batchConfirm').check();await page.locator('#batchSave').click();await page.locator('#modalWrap').waitFor({state:'hidden'});
+        assert(backend.read('Assets').every(a=>a.set_name==='Marketing PC renamed'));
+        await page.locator(`summary[aria-label="Actions for ${initial.asset_id}"]`).click();await page.locator(`[data-unlink-asset="${initial.asset_id}"]`).click();await page.locator('#batchEntryForm [type="submit"]').click();await page.locator('#batchConfirm').check();await page.locator('#batchSave').click();await page.locator('#modalWrap').waitFor({state:'hidden'});
+        rows=backend.read('Assets');assert.equal(rows.length,4);assert.equal(rows[0].set_id,'');assert.equal(rows.filter(a=>a.set_id).length,3);assert.equal(backend.read('Movements').length,0);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('lost batch reply survives reload and resumes the same real backend request',async()=>{
+      const {page,context,errors,backend}=await start({loseBatchReply:true});
+      try{
+        await startSameBatch(page);await page.locator('#batchEntryForm [type="submit"]').click();await page.locator('#batchConfirm').check();await page.locator('#batchSave').click();
+        await page.waitForFunction(()=>document.querySelector('#batchSaveStatus').textContent.includes('Save not confirmed'));
+        assert.equal(backend.read('Assets').length,2);assert(await page.locator('#batchReviewBack').isDisabled());
+        const request=await page.evaluate(()=>JSON.parse(localStorage.getItem('jcp_assethub_pending_group_v1:test-staff')).request_id);
+        await page.reload();await page.locator('#appLoading').waitFor({state:'hidden'});await page.waitForFunction(()=>document.querySelector('#profileRole').textContent==='STAFF');await page.locator('[data-mobile-route="assets"]').click();await page.locator('#addAssetGroupBtn').click();await page.locator('#batchResume').click();
+        assert.equal(await page.locator('[data-batch-mode]').count(),0);await page.locator('#batchConfirm').check();await page.locator('#batchSave').click();await page.locator('#modalWrap').waitFor({state:'hidden'});
+        assert.equal(backend.read('Assets').length,2);assert.equal(backend.read('AssetBatches').length,1);assert.equal(backend.read('AssetBatches')[0].request_id,request);
+        assert.equal(await page.evaluate(()=>localStorage.getItem('jcp_assethub_pending_group_v1:test-staff')),null);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('repeated serials are blocked before saving; server rejection leaves drafts editable',async()=>{
+      const {page,context,errors,backend}=await start();
+      try{
+        await startSameBatch(page);for(const i of [0,1])await page.locator(`[data-unit="${i}"][data-unit-field="serial"]`).fill('SAME-SERIAL');
+        await page.locator('#batchEntryForm [type="submit"]').click();assert.match(await page.locator('#batchEntryError').textContent(),/same serial/);assert.equal(backend.read('Assets').length,0);
+        await page.locator('[data-unit="1"][data-unit-field="serial"]').fill('OTHER-SERIAL');await page.locator('#batchEntryForm [type="submit"]').click();
+        backend.seed('Assets',[stock('JCP-AS-9999',{serial:'OTHER-SERIAL'})]);
+        await page.locator('#batchConfirm').check();await page.locator('#batchSave').click();await page.waitForFunction(()=>document.querySelector('#batchSaveStatus').textContent.includes('Nothing was written'));
+        assert.equal(backend.read('Assets').length,1);assert.equal(backend.read('AssetBatches').length,0);assert.equal(await page.evaluate(()=>localStorage.getItem('jcp_assethub_pending_group_v1:test-staff')),null);
+        await page.locator('#batchReviewBack').click();assert.equal(await page.locator('[data-unit="0"][data-unit-field="serial"]').inputValue(),'SAME-SERIAL');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('old backends keep grouping views but disable new writes; guests must sign in',async()=>{
+      const old=await start({grouping:false,assets:[stock('A'),stock('B')]});
+      try{
+        await old.page.locator('[data-mobile-route="assets"]').click();assert.equal(await old.page.locator('.asset-group').count(),1);await old.page.locator('#addAssetGroupBtn').click();
+        assert(await old.page.locator('[data-batch-mode="same"]').isDisabled());assert.match(await old.page.locator('.group-intro').textContent(),/updated Apps Script/);assert.equal(old.backend.writes.length,0);
+      }finally{await old.context.close();}
+      const guest=await start({role:'GUEST'});
+      try{await guest.page.locator('[data-mobile-route="assets"]').click();await guest.page.locator('#addAssetGroupBtn').click();await guest.page.locator('#loginForm').waitFor();assert.equal(guest.backend.writes.length,0);}
+      finally{await guest.context.close();}
+    });
+    await t.test('large groups render units lazily, preserve counts and avoid detail/photo requests',async()=>{
+      const assets=Array.from({length:1000},(_,i)=>stock('JCP-AS-'+String(i+1).padStart(4,'0'),{serial:i?'':'REPEATED'}));assets[1].serial='REPEATED';
+      const {page,context,errors}=await start({assets});
+      try{
+        await page.locator('[data-mobile-route="assets"]').click();await page.locator('.asset-group').waitFor();assert.equal(await page.locator('.group-unit').count(),0);
+        assert.match(await page.locator('#assetScopeCount').textContent(),/1000 matching physical items · 1 display row/);
+        await page.locator('.asset-group summary').click();await page.locator('.group-unit').first().waitFor();assert.equal(await page.locator('.group-unit').count(),25);assert.match(await page.locator('.asset-group summary').textContent(),/Repeated serials/);
+        await page.getByRole('button',{name:'Show more units',exact:true}).click();assert.equal(await page.locator('.group-unit').count(),50);
+        await page.locator('#assetSearch').fill('REPEATED');assert.equal(await page.locator('.group-duplicate').count(),2);
+        assert.equal(await page.evaluate(()=>window.__mock.calls.filter(c=>['getAsset','getImageData'].includes(c.action)).length),0);await checkNoOverflow(page);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('scans with a different serial describe related model units without a duplicate-create prompt',async()=>{
+      const {page,context,errors}=await start({matches:[{asset:stock('JCP-AS-0001',{brand:'Ricoh',model:'TEST-100',serial:'DIFFERENT'}),reasons:['same brand','same model'],score:80}]});
+      try{await scan(page);assert.match(await page.locator('#scanResult').textContent(),/different serials/);assert.equal(await page.locator('#v27Create').textContent(),'Review & Create Asset');await page.locator('#v27Create').click();await page.locator('#assetForm').waitFor();assert.deepEqual(errors,[]);}
+      finally{await context.close();}
+    });
+    await t.test('desktop grouped view and cloning retain shared specs without copying per-unit identifiers',async()=>{
+      const assets=[stock('A',{serial:'001',specifications:'RAM: 8 GB\nMAC: AA:BB:CC:DD:EE:FF\nHostname: Station-A'}),stock('B',{serial:'002',specifications:'RAM: 8 GB\nMAC: AA:BB:CC:DD:EE:00\nHostname: Station-B'})];
+      const {page,context,errors}=await start({assets},{width:1440,height:1000});
+      try{
+        await page.locator('.nav-btn[data-route="assets"]').click();await page.locator('.asset-group summary').click();await page.locator('.group-unit').first().waitFor();assert.equal(await page.locator('.group-unit').count(),2);
+        await checkNoOverflow(page);await page.screenshot({path:path.resolve('test-results/desktop-grouped-assets.png'),fullPage:true});await page.locator('[data-group-add]').click();
+        assert.equal(await page.locator('[data-batch-common="specifications"]').inputValue(),'RAM: 8 GB');assert.equal(await page.locator('[data-unit-field="serial"]').inputValue(),'');await checkNoOverflow(page);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('offline review does not queue or submit a batch and can save once after reconnecting',async()=>{
+      const {page,context,errors,backend}=await start();
+      try{
+        await startSameBatch(page);await page.locator('#batchEntryForm [type="submit"]').click();await page.locator('#batchConfirm').check();await context.setOffline(true);await page.locator('#batchSave').click();
+        assert.match(await page.locator('#batchSaveStatus').textContent(),/internet connection/);assert.equal(backend.read('Assets').length,0);assert.equal(backend.read('AssetBatches').length,0);
+        assert.equal(await page.evaluate(()=>localStorage.getItem('jcp_assethub_pending_group_v1:test-staff')),null);
+        await context.setOffline(false);await page.locator('#batchSave').click();await page.locator('#modalWrap').waitFor({state:'hidden'});assert.equal(backend.read('Assets').length,2);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
     await t.test('real local decoder finds a warranty QR and linear identifier in the same image',async()=>{
       const {page,context,errors}=await start();
       try{
@@ -239,7 +371,7 @@ test('browser regressions on mobile and desktop',async t=>{
         },base64);
         assert((await decode()).some(c=>c.serialCandidate==='001O0I1234'));
         await page.waitForFunction(async()=>{
-          const cache=await caches.open('jcp-assethub-v2.7-still-barcodes-1');return !!(await cache.match('./vendor/zxing-wasm/zxing_reader.wasm'));
+          const keys=await caches.keys(),name=keys.find(k=>k.startsWith('jcp-assethub-v2.7-'));const cache=await caches.open(name);return !!(await cache.match('./vendor/zxing-wasm/zxing_reader.wasm'));
         });
         await context.setOffline(true);await page.reload();await page.waitForFunction(()=>window.AssetCode);
         assert((await decode()).some(c=>c.serialCandidate==='001O0I1234'));

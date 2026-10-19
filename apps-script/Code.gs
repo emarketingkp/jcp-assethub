@@ -41,14 +41,15 @@ const SHEETS = {
   CUSTOM_VALUES: 'CustomValues',
   MOVEMENTS: 'Movements',
   ACTIVITY: 'ActivityLog',
-  ASSET_PRIVATE: 'AssetPrivate'
+  ASSET_PRIVATE: 'AssetPrivate',
+  ASSET_BATCHES: 'AssetBatches'
 };
 
 const SCHEMA = {
   Assets: [
     'asset_id','category_id','category','brand','model','serial','specifications',
     'site_id','site','area_id','area','exact_location','assigned_to','status',
-    'main_image_id','drive_folder_id','created_at','updated_at','created_by','updated_by','retired_at','source_ref'
+    'main_image_id','drive_folder_id','created_at','updated_at','created_by','updated_by','retired_at','source_ref','set_id','set_name'
   ],
   AssetImages: [
     'image_id','asset_id','image_type','drive_file_id','thumbnail_file_id','file_name',
@@ -72,7 +73,8 @@ const SCHEMA = {
     'to_site','to_area','to_location','to_assigned','moved_by','moved_at','note'
   ],
   ActivityLog: ['timestamp','user','role','action','asset_id','before_json','after_json','details'],
-  AssetPrivate: ['asset_id','mobile_number','register_owner','account_number','amount_paid','updated_at','updated_by']
+  AssetPrivate: ['asset_id','mobile_number','register_owner','account_number','amount_paid','updated_at','updated_by'],
+  AssetBatches: ['request_id','actor','fingerprint','plan_json','state','created_at','updated_at']
 };
 
 function setupDatabase() {
@@ -217,6 +219,7 @@ function doPost(e) {
 
     // Operational changes require Staff or Admin.
     const user = requireUser_(p.token, 'STAFF');
+    if (action === 'saveAssetBatch') return postReply_(p, {success:true, result:saveAssetBatch_(p,user), user:user});
     if (action === 'interpretOcr') return postReply_(p, {success:true, result:interpretOcrFields_(p.text,p.base_fields_json,user),user:user});
     if (action === 'interpretOcrUniversal') return postReply_(p, {success:true, result:interpretUniversalOcr_(p.text,p.base_fields_json,p.source_image,user),user:user});
     if (action === 'createMaintenance') return postReply_(p, {success:true, row:createMaintenance_(p, user), user:user});
@@ -224,14 +227,14 @@ function doPost(e) {
     if (action === 'startAudit') return postReply_(p, {success:true, row:startAudit_(p, user), user:user});
     if (action === 'verifyAuditAsset') return postReply_(p, {success:true, row:verifyAuditAsset_(p, user), user:user});
     if (action === 'completeAudit') return postReply_(p, {success:true, row:completeAudit_(p.audit_id, user), user:user});
-    if (action === 'updateAsset') return postReply_(p, {success:true, asset:updateAsset_(p, user), user:user});
-    if (action === 'setMainImage') return postReply_(p,{success:true,asset:setMainImage_(p,user),user:user});
-    if (action === 'reconcileAsset') return postReply_(p, {success:true, asset:reconcileAsset_(p, user), user:user});
-    if (action === 'mergeAssets') return postReply_(p, {success:true, result:mergeAssets_(p, user), user:user});
+    if (action === 'updateAsset') return postReply_(p, {success:true, asset:withAssetWriteLock_(()=>updateAsset_(p, user)), user:user});
+    if (action === 'setMainImage') return postReply_(p,{success:true,asset:withAssetWriteLock_(()=>setMainImage_(p,user)),user:user});
+    if (action === 'reconcileAsset') return postReply_(p, {success:true, asset:withAssetWriteLock_(()=>reconcileAsset_(p, user)), user:user});
+    if (action === 'mergeAssets') return postReply_(p, {success:true, result:withAssetWriteLock_(()=>mergeAssets_(p, user)), user:user});
 
     // Destructive/configuration actions require Admin.
     requireRole_(user, 'ADMIN');
-    if (action === 'retireAsset') return postReply_(p, {success:true, asset:retireAsset_(p.asset_id, user), user:user});
+    if (action === 'retireAsset') return postReply_(p, {success:true, asset:withAssetWriteLock_(()=>retireAsset_(p.asset_id, user)), user:user});
     if (action === 'deleteImage') return postReply_(p, {success:true, deleted:deleteImage_(p.image_id, user), user:user});
     if (action === 'replaceImage') return postReply_(p, {success:true, image:replaceImage_(p, user), user:user});
     if (action === 'adminSave') return postReply_(p, {success:true, row:adminSave_(p, user), user:user});
@@ -264,6 +267,7 @@ function bootstrapPayload_(token) {
     guest_can_add:true,
     authenticated:authenticated,
     version:APP_VERSION,
+    features:typeof groupingFeatures_==='function'?groupingFeatures_():{asset_groups:0},
     ai_ocr_enabled:!!SCRIPT_PROPERTIES.getProperty('GROQ_API_KEY'),
     user:user,
     references:Object.assign({}, base.references, {users:users})
@@ -378,6 +382,7 @@ function syncChanges_(p, user) {
   return {
     server_time:serverTime,
     version:APP_VERSION,
+    features:typeof groupingFeatures_==='function'?groupingFeatures_():{asset_groups:0},
     authenticated:String(user && user.role || '').toUpperCase()!=='GUEST',
     write_auth_required:AUTH_REQUIRED,
     assets:changedAssets,
@@ -538,16 +543,19 @@ function normalizeIdentifier_(value) {
 
 function extractAssetIdFromCode_(value) {
   const raw = String(value || '').trim();
-  if (!raw) return '';
-  const direct = raw.match(/\bJCP-[A-Z0-9]{1,8}-\d{1,8}\b/i);
-  if (direct) return direct[0].toUpperCase();
+  const pattern=/^JCP-[A-Z0-9]{1,8}-\d{1,16}$/i;
+  if(pattern.test(raw))return raw.toUpperCase();
+  const tagged=raw.match(/^JCP-ASSET\s*:\s*(JCP-[A-Z0-9]{1,8}-\d{1,16})$/i);
+  if(tagged)return tagged[1].toUpperCase();
+  // Apps Script does not consistently expose the browser URL constructor.
   try {
-    const u = new URL(raw);
-    const q = u.searchParams.get('asset');
-    if (q && /^JCP-[A-Z0-9]{1,8}-\d{1,8}$/i.test(q)) return q.toUpperCase();
+    if(/^https?:\/\/[^\s/?#]+[/?#]/i.test(raw)){
+      const query=raw.split('#')[0].split('?')[1]||'',match=query.match(/(?:^|&)asset=([^&]*)/);
+      const id=match?decodeURIComponent(match[1].replace(/\+/g,' ')):'';
+      if(pattern.test(id))return id.toUpperCase();
+    }
   } catch (_) {}
-  const tagged = raw.match(/^JCP-ASSET\s*:\s*(JCP-[A-Z0-9]{1,8}-\d{1,8})$/i);
-  return tagged ? tagged[1].toUpperCase() : '';
+  return '';
 }
 
 function matchIdentifier_(value) {
@@ -725,6 +733,7 @@ function mergeAssets_(p,user) {
   const source=findByKey_(SHEETS.ASSETS,'asset_id',sourceId);
   const target=findByKey_(SHEETS.ASSETS,'asset_id',targetId);
   if(!source || !target) throw new Error('One of the selected assets does not exist.');
+  if(source.set_id&&source.set_id!==target.set_id)throw new Error('SET_MEMBERSHIP_CONFLICT: Remove the source item from its equipment set before merging into a different set or ungrouped record.');
   if(String(source.status)==='Merged' || String(target.status)==='Merged') throw new Error('A merged record cannot be merged again.');
 
   const choices=parseJsonObject_(p.choices_json);
@@ -1799,7 +1808,7 @@ function listObjects_(name) {
 
 function appendObject_(name, obj) {
   const sheet = getSheet_(name); const h=headers_(sheet);
-  sheet.appendRow(h.map(k=>obj[k] == null ? '' : obj[k]));
+  sheet.appendRow(h.map(k=>literalCellValue_(obj[k] == null ? '' : obj[k])));
   clearRequestCache_(name);
   return obj;
 }
@@ -1807,7 +1816,7 @@ function appendObject_(name, obj) {
 function appendObjectsBatch_(name, objects) {
   if (!objects || !objects.length) return [];
   const sheet = getSheet_(name); const h=headers_(sheet);
-  const rows=objects.map(obj=>h.map(k=>obj[k] == null ? '' : obj[k]));
+  const rows=objects.map(obj=>h.map(k=>literalCellValue_(obj[k] == null ? '' : obj[k])));
   sheet.getRange(sheet.getLastRow()+1,1,rows.length,h.length).setValues(rows);
   clearRequestCache_(name);
   return objects;
@@ -1822,13 +1831,24 @@ function updateByComposite_(name,keys,patch) {
     let ok=true; Object.keys(keys).forEach(k=>{ if(String(data[r][idx[k]])!==String(keys[k])) ok=false; });
     if(ok){
       const current=rowToObject_(h,data[r]); const next=Object.assign({},current,patch);
-      sheet.getRange(r+1,1,1,h.length).setValues([h.map(k=>next[k] == null ? '' : next[k])]);
+      // Image/legacy writers must not restore stale set membership from a full row
+      // snapshot. Write contiguous spans, excluding set fields absent from this patch.
+      const protectedCell=i=>name===SHEETS.ASSETS&&['set_id','set_name'].includes(h[i])&&!Object.prototype.hasOwnProperty.call(patch,h[i]);
+      let start=0;
+      for(let end=0;end<=h.length;end++){
+        if(end<h.length&&!protectedCell(end))continue;
+        if(end>start)sheet.getRange(r+1,start+1,1,end-start).setValues([h.slice(start,end).map(k=>literalCellValue_(next[k] == null ? '' : next[k]))]);
+        start=end+1;
+      }
       clearRequestCache_(name);
       return next;
     }
   }
   throw new Error('Row not found in '+name+'.');
 }
+
+function literalCellValue_(value){return typeof value==='string'&&/^\s*=/.test(value)?"'"+value:value;}
+function withAssetWriteLock_(action){const lock=LockService.getScriptLock();lock.waitLock(10000);try{clearRequestCache_(SHEETS.ASSETS);return action();}finally{lock.releaseLock();}}
 
 function upsertByKey_(name,key,value,obj) { const existing=findByKey_(name,key,value); return existing ? updateByKey_(name,key,value,obj) : appendObject_(name,obj); }
 function seedObjects_(name,rows,key){ rows.forEach(r=>{ if(!findByKey_(name,key,r[key])) appendObject_(name,r); }); }

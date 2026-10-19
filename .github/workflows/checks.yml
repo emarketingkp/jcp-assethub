@@ -27,7 +27,9 @@ jobs:
           for file in public/*.js; do
             node --check "$file"
           done
-          node --check < apps-script/Code.gs
+          for file in apps-script/*.gs; do
+            node --check < "$file"
+          done
       - name: Install Chromium for browser regressions
         run: npx playwright install --with-deps chromium
       - name: Run mobile and desktop browser regressions

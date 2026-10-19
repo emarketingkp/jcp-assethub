@@ -108,6 +108,8 @@
 
       <section id="page-assets" class="page">
         <div class="page-head"><div><div class="eyebrow">Asset register</div><h1>Assets</h1><p>Photos, device information, placement, assignment and extensible custom information.</p></div><div class="actions"><button id="addAssetBtn" class="btn primary"><svg class="ico sm"><use href="#i-plus"/></svg>Add Asset</button></div></div>
+        <div class="asset-group-tools"><label><input type="checkbox" id="assetGroupToggle" checked> Group sets and identical models</label><button id="addAssetGroupBtn" class="btn light">Add multiple / set</button></div>
+        <div id="assetScopeCount" class="asset-scope" role="status" aria-live="polite"></div>
         <div class="asset-toolbar">
           <div class="asset-search-inline"><svg class="ico sm"><use href="#i-search"/></svg><input id="assetSearch" placeholder="Search ID, model, serial, location or person" autocomplete="off"></div>
           <button id="assetDateBtn" class="toolbar-icon-btn" type="button" aria-label="Filter assets by date" title="Date filter"><svg class="ico"><use href="#i-calendar"/></svg><span id="assetDateBadge" class="control-badge hidden">1</span></button>
@@ -235,6 +237,8 @@
 <script defer src="./photo-picker.js"></script>
 <script defer src="./input-assist.js"></script>
 <script defer src="./code-scanner.js"></script>
+<script defer src="./asset-groups.js"></script>
+<script defer src="./group-entry.js"></script>
 <script defer src="./recognition-v27.js"></script>
 <script defer src="./app.js"></script>
 </body>

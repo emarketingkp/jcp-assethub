@@ -7,6 +7,7 @@
     cameraStream:null,scanTimer:null,barcodeDetector:null,scanFile:null,recognitionSession:null,scanUpdateTarget:null,imageCache:new Map(),assetDetails:new Map(),detailRequests:new Map(),activeAuditId:'',
     adminMode:false,diagnostics:null,deepLinkHandled:false,lastRecognition:null,latestVersion:null,modalRestoreFocus:null,
     assetView:localStorage.getItem('jcp_assethub_asset_view')||'list',
+    assetGrouping:localStorage.getItem('jcp_assethub_asset_grouping')!=='off',groupOpen:new Set(),groupUnitLimits:new Map(),groupPageLimit:50,
     sync:{inFlight:false,lastCursor:localStorage.getItem('jcp_assethub_sync_cursor')||'',lastStarted:0,lastCompleted:0},
     indicator:{jobs:new Map(),next:0},passiveJobs:0,openAssetId:'',
     cacheHydrated:false,reportCacheKey:'',
@@ -16,7 +17,7 @@
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
   const APP_VERSION = '2.7';
-  const BUILD_ID = '2.7-still-barcodes-1';
+  const BUILD_ID = '2.7-asset-groups-1';
   const ASSET_BASE_URL = 'https://assets.jcpmalaysia.com/';
   const CACHE_BOOT = 'jcp_assethub_cache_boot_v1';
   const CACHE_ASSETS = 'jcp_assethub_cache_assets_v1';
@@ -40,7 +41,7 @@
   function safeBootCache(data){
     if(!data)return null;
     const refs={...(data.references||{}),users:[]};
-    return {success:true,version:data.version,guest_can_add:true,authenticated:false,ai_ocr_enabled:!!data.ai_ocr_enabled,write_auth_required:data.write_auth_required,user:{name:'Guest',username:'guest',email:'',role:'GUEST'},references:refs,dashboard:data.dashboard||{},legacy_import:data.legacy_import||null};
+    return {success:true,version:data.version,features:data.features||{},guest_can_add:true,authenticated:false,ai_ocr_enabled:!!data.ai_ocr_enabled,write_auth_required:data.write_auth_required,user:{name:'Guest',username:'guest',email:'',role:'GUEST'},references:refs,dashboard:data.dashboard||{},legacy_import:data.legacy_import||null};
   }
 
 
@@ -199,6 +200,7 @@
     try{
       const r=await AssetAPI.get('sync',{since:state.sync.lastCursor||''});
       const d=r.sync||{};
+      if(d.features){state.boot={...(state.boot||{}),features:d.features};cacheWrite(CACHE_BOOT,safeBootCache(state.boot));}
       const openAssetChanged=!!state.openAssetId&&(d.assets||[]).some(a=>String(a.asset_id)===String(state.openAssetId));
       (d.assets||[]).forEach(a=>{markDetailStaleFromSummary(a);state.assets=upsertByKey(state.assets,publicAssetSummary(a),'asset_id');});
       if(d.removed_asset_ids?.length)state.assets=removeByIds(state.assets,d.removed_asset_ids,'asset_id');
@@ -275,7 +277,7 @@
   function esc(v){ return String(v ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function assetDisplayName(a){
     const brand=String(a?.brand||'').trim(),model=String(a?.model||'').trim();
-    if(!brand)return model||'Unknown device';
+    if(!brand)return model||a?.category_name||a?.category||'Unknown device';
     return model.toLowerCase().startsWith(brand.toLowerCase()+' ')?model:[brand,model].filter(Boolean).join(' ');
   }
   function icon(id, cls=''){ return `<svg class="ico ${cls}"><use href="#i-${id}"/></svg>`; }
@@ -597,6 +599,9 @@
     $('maintenanceFilterBtn').addEventListener('click',openMaintenanceFilters);
     $('maintenanceMobileSort').addEventListener('change',()=>{const [key,dir]=$('maintenanceMobileSort').value.split(':');state.maintenanceSort={key,dir};renderMaintenance();});
     $('addAssetBtn').addEventListener('click',()=>openAssetForm());
+    $('addAssetGroupBtn').addEventListener('click',()=>withAccess('STAFF',()=>openGroupEntry()));
+    $('assetGroupToggle').checked=state.assetGrouping;
+    $('assetGroupToggle').addEventListener('change',()=>{state.assetGrouping=$('assetGroupToggle').checked;localStorage.setItem('jcp_assethub_asset_grouping',state.assetGrouping?'on':'off');state.groupPageLimit=50;renderAssets();});
     $('reportIssueBtn').addEventListener('click',()=>withAccess('STAFF',()=>openIssueForm()));
     $$('[data-action="find"]').forEach(b=>b.addEventListener('click',()=>{setRoute('assets');$('assetSearch').focus();}));
     $$('[data-action="reportIssue"]').forEach(b=>b.addEventListener('click',()=>withAccess('STAFF',()=>openIssueForm())));
@@ -638,7 +643,7 @@
     $('modalCloseBtn').classList.toggle('hidden',options.closeable===false);
     wrap.classList.remove('hidden'); document.body.classList.add('modal-open');
     if(onReady) onReady();
-    requestAnimationFrame(()=>{ const target=wrap.querySelector('input:not([type=hidden]),select,textarea,button:not(#modalCloseBtn)'); target?.focus?.(); });
+    requestAnimationFrame(()=>{if(wrap.contains(document.activeElement)&&document.activeElement.id!=='modalCloseBtn')return;const target=wrap.querySelector('input:not([type=hidden]),select,textarea,button:not(#modalCloseBtn)');target?.focus?.();});
   }
   function closeModal(){
     const wrap=$('modalWrap'); if(wrap.classList.contains('hidden'))return;
@@ -847,9 +852,33 @@
     }finally{if(indicatorId)endIndicator(indicatorId);else if(showedCache)endPassiveSync();}
   }
   function assetSkeletonHtml(count=5){return Array.from({length:count},()=>`<div class="skeleton-row"><i></i><div><b></b><span></span></div><em></em></div>`).join('');}
+  let groupedIndexSource=null,groupedIndex=null;
+  function assetGroupingIndex(){if(groupedIndexSource!==state.assets){groupedIndex=AssetGroups.buildIndex(state.assets);groupedIndexSource=state.assets;}return groupedIndex;}
+  function openGroupEntry(options={}){
+    AssetGroupEntry.open({assets:state.assets,refs:state.refs,actor:state.user?.username||state.user?.email||'',enabled:!!state.boot?.features?.asset_groups,api:AssetAPI,
+      host:{openModal,closeModal,toast,humanError,setBusy:setPhotoOperationBusy},...options,onSaved:result=>{
+        const rows=new Map(state.assets.map(a=>[String(a.asset_id),a]));result.assets.forEach(a=>{rows.set(String(a.asset_id),publicAssetSummary(a));invalidateAssetDetail(a.asset_id);});state.assets=[...rows.values()];
+        cacheWrite(CACHE_ASSETS,state.assets);window.AssetStore?.set?.(STORE_KEYS.assets,state.assets);refreshDerivedReferences();
+        if(result.set_id)state.groupOpen.add('set:'+result.set_id);else if(result.assets[0])state.groupOpen.add('model:'+AssetGroups.modelKey(result.assets[0]));
+        closeModal();closeDrawer();setRoute('assets');renderAssets();scheduleSync('asset-group-saved',6500);
+      }});
+  }
+  function groupUnitHtml(a,index){
+    const duplicate=index.serials.get(AssetGroups.serialKey(a.serial))?.length>1;
+    return `<div class="group-unit"><button type="button" data-asset="${esc(a.asset_id)}"><b>${esc(assetDisplayName(a))}</b><small>${esc(a.asset_id)} · Serial: ${esc(a.serial||'Not recorded')}</small><small>${esc([a.site_name,a.area_name,a.exact_location,a.assigned_to].filter(Boolean).join(' · '))}</small>${duplicate?'<span class="group-duplicate">Repeated serial · review records</span>':''}</button><div>${statusBadge(a.status)}${a.set_id&&isAuthenticated()?`<details class="group-unit-menu"><summary aria-label="Actions for ${esc(a.asset_id)}">⋯</summary><button type="button" class="btn light sm" data-unlink-asset="${esc(a.asset_id)}">Remove from set</button></details>`:''}</div></div>`;
+  }
+  function groupCardHtml(entry,i,index){
+    const a=entry.assets[0],isSet=entry.kind==='set',title=isSet?(a.set_name||'Unnamed set'):entry.kind==='unmarked'?([a.category_name||a.category,AssetGroups.template(a).brand,AssetGroups.template(a).model].filter(Boolean).join(' · ')):assetDisplayName(a);
+    const sites=new Set(entry.assets.map(r=>[r.site_name,r.area_name].filter(Boolean).join(' / ')).filter(Boolean));
+    const locations=sites.size===1?[...sites][0]:sites.size+' locations';
+    const statuses=new Map();entry.assets.forEach(a=>statuses.set(a.status||'Unrecorded',(statuses.get(a.status||'Unrecorded')||0)+1));
+    const statusSummary=[...statuses].map(([name,count])=>count+' '+name).join(' · ');
+    const missing=entry.assets.filter(r=>!r.serial).length,duplicates=entry.assets.filter(r=>index.serials.get(AssetGroups.serialKey(r.serial))?.length>1).length;
+    return `<details class="asset-group" data-group-index="${i}"><summary><span class="asset-group-chevron" aria-hidden="true">›</span><span class="asset-group-copy"><small>${isSet?'Equipment set':entry.kind==='unmarked'?'Product details incomplete':'Same model'}</small><b>${esc(title)}</b><span>${entry.assets.length<entry.total?entry.assets.length+' of '+entry.total+' loaded':entry.assets.length} ${isSet?'components':'units'} · ${esc(locations)}${missing?' · '+missing+' without serial':''}</span><span>${esc(statusSummary)}</span>${entry.kind==='unmarked'?'<em>Grouped for display; exact model is unconfirmed.</em>':''}${duplicates?'<em>Repeated serials need review</em>':''}</span><span class="asset-group-count">${entry.assets.length}</span></summary><div class="asset-group-content"></div></details>`;
+  }
   function renderAssets(){
     const box=$('assetList'), header=$('assetListHeader');
-    if(!state.assets.length){ header.innerHTML=''; box.innerHTML='<div class="empty-state">No assets found.</div>'; return; }
+    if(!state.assets.length){ header.innerHTML='';$('assetScopeCount').textContent='0 loaded physical items'; box.innerHTML='<div class="empty-state">No assets found.</div>'; return; }
     const q=$('assetSearch').value.trim().toLowerCase();
     const f=state.assetFilters;
     let rows=state.assets.filter(a=>{
@@ -860,16 +889,37 @@
       if(f.assigned&&!String(a.assigned_to||'').toLowerCase().includes(f.assigned.toLowerCase()))return false;
       if(f.location&&!String(a.exact_location||'').toLowerCase().includes(f.location.toLowerCase()))return false;
       if((f.dateFrom||f.dateTo)&&!dateWithin(a[f.dateField]||a.updated_at,f.dateFrom,f.dateTo))return false;
-      if(q&&!([a.asset_id,a.category_name,a.brand,a.model,a.serial,a.site_name,a.area_name,a.assigned_to,a.exact_location].join(' ').toLowerCase().includes(q)))return false;
+      if(q&&!([a.asset_id,a.category_name,a.brand,a.model,a.serial,a.site_name,a.area_name,a.assigned_to,a.exact_location,a.set_name,a.set_id].join(' ').toLowerCase().includes(q)))return false;
       return true;
     });
     rows=sortAssets(rows);
-    const listMode=state.assetView!=='grid';
-    box.className=listMode?'asset-list mode-list':'asset-list mode-grid';
-    header.classList.toggle('hidden',!listMode);
-    header.innerHTML=listMode?assetHeaderHtml():'';
-    box.innerHTML=rows.length?(listMode?rows.map(assetListRowHtml).join(''):rows.map(assetGridCardHtml).join('')):'<div class="empty-state">No matching assets.</div>';
-    $$('#assetList [data-asset]').forEach(b=>b.addEventListener('click',()=>openAsset(b.dataset.asset)));
+    const index=assetGroupingIndex(),entries=AssetGroups.project(rows,index,{grouped:state.assetGrouping}),visible=entries.slice(0,state.groupPageLimit);
+    const listMode=state.assetView!=='grid',hasGroups=entries.some(e=>e.kind!=='asset');
+    box.className=(listMode?'asset-list mode-list':'asset-list mode-grid')+(state.assetGrouping?' grouped-register':'');
+    header.classList.toggle('hidden',!listMode||hasGroups);
+    header.innerHTML=listMode&&!hasGroups?assetHeaderHtml():'';
+    $('assetScopeCount').textContent=AssetGroups.uniqueAssets(rows).length+' matching physical items · '+entries.length+' display row'+(entries.length===1?'':'s')+' · '+index.all.length+' loaded items. Counts follow the current filters.';
+    box.innerHTML=rows.length?visible.map((entry,i)=>entry.kind==='asset'?(listMode?assetListRowHtml(entry.assets[0]):assetGridCardHtml(entry.assets[0])):groupCardHtml(entry,i,index)).join(''):'<div class="empty-state">No matching assets.</div>';
+    if(entries.length>visible.length){const more=document.createElement('button');more.className='btn light group-load-more';more.textContent='Show more ('+(entries.length-visible.length)+' rows remaining)';more.addEventListener('click',()=>{state.groupPageLimit+=50;renderAssets();});box.append(more);}
+    const bindUnits=(root,outerOnly=false)=>{
+      root.querySelectorAll('[data-asset]').forEach(b=>{if(!outerOnly||!b.closest('.asset-group'))b.addEventListener('click',()=>openAsset(b.dataset.asset));});
+      root.querySelectorAll('[data-unlink-asset]').forEach(b=>{if(!outerOnly||!b.closest('.asset-group'))b.addEventListener('click',()=>withAccess('STAFF',()=>{const a=index.all.find(r=>r.asset_id===b.dataset.unlinkAsset);openGroupEntry({mode:'detach',set:{id:a.set_id,name:a.set_name},units:[{existing_asset_id:a.asset_id,source:'existing'}]});}));});
+    };
+    box.querySelectorAll('[data-group-index]').forEach(details=>{
+      const entry=visible[Number(details.dataset.groupIndex)],first=entry.assets[0];
+      const paint=()=>{
+        const limit=state.groupUnitLimits.get(entry.key)||25,body=details.querySelector('.asset-group-content');
+        body.innerHTML=`<div class="group-actions">${isAuthenticated()?(entry.kind==='set'?'<button data-group-add class="btn light sm">Add new</button><button data-group-link class="btn light sm">Link existing</button><button data-group-rename class="btn light sm">Rename</button>':'<button data-group-add class="btn light sm">Add units</button>'):''}</div>`+entry.assets.slice(0,limit).map(a=>groupUnitHtml(a,index)).join('');
+        bindUnits(body);
+        body.querySelector('[data-group-add]')?.addEventListener('click',()=>openGroupEntry(entry.kind==='set'?{mode:'set',set:{id:first.set_id,name:first.set_name},units:[{source:'new'}]}:{mode:'same',template:AssetGroups.template(first)}));
+        body.querySelector('[data-group-link]')?.addEventListener('click',()=>openGroupEntry({mode:'attach',set:{id:first.set_id,name:first.set_name},units:[{source:'existing'}]}));
+        body.querySelector('[data-group-rename]')?.addEventListener('click',()=>openGroupEntry({mode:'rename',set:{id:first.set_id,name:first.set_name},units:(index.sets.get(first.set_id)||[]).map(a=>({existing_asset_id:a.asset_id,source:'existing'}))}));
+        if(entry.assets.length>limit){const more=document.createElement('button');more.className='btn light sm';more.textContent='Show more units';more.addEventListener('click',()=>{state.groupUnitLimits.set(entry.key,limit+25);paint();});body.append(more);}
+      };
+      details.addEventListener('toggle',()=>{if(details.open){state.groupOpen.add(entry.key);if(!details.querySelector('.group-unit'))paint();}else state.groupOpen.delete(entry.key);});
+      if(q||state.groupOpen.has(entry.key)){details.open=true;paint();}
+    });
+    bindUnits(box,true);
     $$('#assetListHeader [data-sort]').forEach(b=>b.addEventListener('click',()=>setAssetSort(b.dataset.sort)));
     updateAssetToolbarState(); hydrateThumbs(box);
   }
@@ -994,7 +1044,7 @@
   }
   function activityIcon(a){ a=String(a); if(a.includes('ISSUE')||a.includes('MAINTENANCE'))return'tools'; if(a.includes('AUDIT'))return'check'; if(a.includes('IMAGE'))return'image'; if(a.includes('LOGIN'))return'user'; return'box'; }
   function activityLabel(a){ return String(a||'Activity').replaceAll('_',' ').toLowerCase().replace(/\b\w/g,c=>c.toUpperCase()); }
-  function activityDetails(s){ if(!s)return''; try{const o=JSON.parse(s);return Object.values(o).filter(v=>typeof v!=='boolean').slice(0,2).map(esc).join(' · ');}catch{return esc(String(s).slice(0,90));} }
+  function activityDetails(s){ if(!s)return''; try{const o=JSON.parse(s);if(o.summary)return esc(o.summary)+(o.set_name?' · '+esc(o.set_name):'');return Object.values(o).filter(v=>typeof v!=='boolean').slice(0,2).map(esc).join(' · ');}catch{return esc(String(s).slice(0,90));} }
 
   async function fetchAssetDetail(id,{label='Refreshing asset…'}={}){
     const key=String(id||'');
@@ -1047,6 +1097,15 @@
     const pd=a.private_details||null;
     const privateSection=pd&&Object.values(pd).some(Boolean)?`<div class="detail-section staff-private-section"><div class="staff-private-head"><div><h3>Staff-only information</h3><small>Visible only to signed-in Staff and Admin.</small></div><span class="private-badge">STAFF / ADMIN</span></div><div class="detail-grid"><div class="detail-field"><label>Mobile number</label><div>${esc(pd.mobile_number||'—')}</div></div><div class="detail-field"><label>Registered owner</label><div>${esc(pd.register_owner||'—')}</div></div><div class="detail-field"><label>Account number</label><div>${esc(pd.account_number||'—')}</div></div><div class="detail-field"><label>Amount paid</label><div>${esc(pd.amount_paid||'—')}</div></div></div></div>`:'';
     $('drawerBody').innerHTML=`<div class="detail-hero"><div id="drawerMainPhoto" class="detail-photo">${icon(catIcon(a.category_name),'xl')}</div><div class="detail-title"><h2>${esc(assetDisplayName(a))}</h2><p>${esc(a.asset_id)} · ${esc(a.category_name)}</p>${statusBadge(a.status)}<div class="actions asset-primary-actions" style="margin-top:10px"><button id="editAssetDrawer" class="btn blue sm">${icon('edit','sm')}Edit Asset</button><button id="reportAssetIssue" class="btn light sm">${icon('tools','sm')}Report Issue</button></div><details class="asset-drawer-more"><summary>More actions</summary><div class="actions"><button id="moveAssetDrawer" class="btn light sm">${icon('pin','sm')}Move / Assign</button><button id="assetQrBtn" class="btn light sm">${icon('scan','sm')}QR Label</button>${isAuthenticated()?`<button id="scanUpdateDrawer" class="btn light sm">${icon('scan','sm')}Scan to Update</button>`:''}${isAuthenticated()?`<button id="mergeAssetDrawer" class="btn light sm">${icon('refresh','sm')}Merge / Reconcile</button>`:''}</div></details></div></div><div class="detail-section"><h3>Placement & assignment</h3><div class="detail-grid"><div class="detail-field"><label>Site</label><div>${esc(a.site_name||'—')}</div></div><div class="detail-field"><label>Area</label><div>${esc(a.area_name||'—')}</div></div><div class="detail-field"><label>Exact location</label><div>${esc(a.exact_location||'—')}</div></div><div class="detail-field"><label>Assigned to</label><div>${esc(a.assigned_to||'—')}</div></div></div></div><div class="detail-section"><h3>Device information</h3><div class="detail-grid"><div class="detail-field"><label>Serial</label><div>${esc(a.serial||'—')}</div></div><div class="detail-field"><label>Specifications</label><div>${esc(a.specifications||'—')}</div></div>${custom}</div></div>${privateSection}<div class="detail-section"><div class="panel-head"><div><h3>Images</h3><small>Main, label, condition, damage and repair photos.</small></div><div class="photo-picker-actions"><button id="addAssetImage" class="btn light sm">${icon('camera','sm')}Take photo</button><button id="addAssetGallery" class="btn light sm">${icon('image','sm')}Choose from gallery</button></div></div><div id="drawerGallery" class="gallery"></div></div><div class="detail-section"><h3>Maintenance</h3><div>${(a.maintenance||[]).slice(0,5).map(m=>`<div class="ref-row"><div><b>${esc(m.issue)}</b><small>${esc(m.status)} · ${esc(nowText(m.reported_at))}</small></div>${isAuthenticated()?`<button class="btn light sm" data-drawer-maint="${esc(m.maintenance_id)}">${icon('edit','sm')}Edit</button>`:''}</div>`).join('')||'<div class="empty-state compact">No maintenance history.</div>'}</div></div><div class="detail-section"><h3>Movement history</h3><div>${(a.movements||[]).slice(0,5).map(m=>`<div class="ref-row"><div><b>${esc(m.from_site||'—')} → ${esc(m.to_site||'—')}</b><small>${esc(m.from_area||'')} → ${esc(m.to_area||'')} · ${esc(nowText(m.moved_at))}</small></div></div>`).join('')||'<div class="empty-state compact">No movement history.</div>'}</div></div><div class="detail-section"><h3>Activity log</h3><div>${(a.activity||[]).slice(0,8).map(x=>`<div class="ref-row"><div><b>${esc(activityLabel(x.action))}</b><small>${esc(x.user||'Guest')} · ${esc(nowText(x.timestamp))}</small></div></div>`).join('')||'<div class="empty-state compact">No activity yet.</div>'}</div></div>`;
+    const groupInfo=document.createElement('div');groupInfo.className='group-detail';
+    groupInfo.innerHTML=`${a.set_id?`<b>Equipment set: ${esc(a.set_name||a.set_id)}</b><small>This item's serial, placement and history belong to this unit.</small><button id="viewAssetSet" class="btn light sm">Show set in asset list</button>`:'<small>This item is not assigned to an equipment set.</small>'}${isAuthenticated()?'<button id="linkDrawerSet" class="btn light sm">'+(a.set_id?'Remove from set':'Add to equipment set')+'</button>':''}`;
+    $('drawerBody').querySelector('.detail-hero').after(groupInfo);
+    $('viewAssetSet')?.addEventListener('click',()=>{closeDrawer();$('assetSearch').value=a.set_name||a.set_id;setRoute('assets');renderAssets();});
+    $('linkDrawerSet')?.addEventListener('click',()=>openGroupEntry({mode:a.set_id?'detach':'attach',set:a.set_id?{id:a.set_id,name:a.set_name}:undefined,units:[{existing_asset_id:a.asset_id,source:'existing'}]}));
+    if(isAuthenticated()){
+      const another=document.createElement('button');another.id='addAnotherDrawer';another.className='btn light sm';another.textContent='Add same model';another.addEventListener('click',()=>openGroupEntry({mode:'same',template:AssetGroups.template(a)}));
+      $('drawerBody').querySelector('.asset-drawer-more .actions').append(another);
+    }
     // Keep the essential placement visible; collapse supporting detail only on phones.
     if(window.matchMedia('(max-width:760px)').matches){
       const sections=Array.from($('drawerBody').querySelectorAll(':scope > .detail-section'));
@@ -1236,7 +1295,7 @@
   }
   function assetFormHtml(a={}){
     const catValue=a.category_name||a.category||''; const site=a.site_id||''; const area=a.area_name||a.area||'';
-    return `<form id="assetForm" class="form-grid">${a.asset_id?`<div class="field full asset-form-scan-action"><div><b>Update from a device photo</b><small>Scan a label or Windows specifications screen, then review differences before saving.</small></div><button type="button" id="scanUpdateAsset" class="btn light">${icon('scan','sm')} Scan to update</button></div>`:''}<div class="field"><label>Category</label>${editablePicker("assetCategory","category",catValue,state.refs.categories.map(x=>x.name),"Enter category")}<small>You can type a new device type. Admin can later add it to the master category list.</small></div><div class="field"><label>Brand</label>${editablePicker("assetBrand","brand",a.brand||"",[...state.refs.brands,...(window.AssetInput?.current?.brands()||[])],"Enter brand")}</div><div class="field"><label>Model</label><input name="model" value="${esc(a.model||'')}" autocomplete="off" required></div><div class="field"><label>Serial number</label><input name="serial" value="${esc(a.serial||'')}"></div><div class="field"><label>Site</label><select name="site_id" id="assetSite" required><option value="">Select site</option>${state.refs.sites.map(x=>`<option value="${esc(x.site_id)}" ${String(x.site_id)===String(site)?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div><div class="field"><label>Area / Department</label>${editablePicker("assetArea","area",area,[],"Enter area / department")}</div><div class="field"><label>Status</label><select name="status">${['Active','Spare','Faulty','Under Repair','Missing','Retired'].map(s=>`<option ${String(a.status||'Active')===s?'selected':''}>${s}</option>`).join('')}</select></div><details class="asset-form-extra field full"><summary>Additional information <small>Location, assignment and specifications</small></summary><div class="asset-form-extra-grid form-grid"><div class="field"><label>Exact location <span style="font-weight:500">(optional)</span></label><input name="exact_location" list="locationOptions" value="${esc(a.exact_location||'')}" placeholder="e.g. DTF A3 Station"><datalist id="locationOptions">${state.refs.locations.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field"><label>Assigned person / team <span style="font-weight:500">(optional)</span></label><input name="assigned_to" list="assigneeOptions" value="${esc(a.assigned_to||'')}" placeholder="Person or team"><datalist id="assigneeOptions">${state.refs.assignees.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field full"><label>Specifications</label><textarea name="specifications" rows="3">${esc(a.specifications||'')}</textarea></div><div class="field"><label>Movement note <span style="font-weight:500">(only if placement changes)</span></label><input name="movement_note" placeholder="Optional reason"></div></div></details>${state.refs.custom_fields.some(f=>String(f.required)==='true'||f.required===true)?`<div id="customFieldsForm" class="field full"><span class="label">Required custom information</span><div class="form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>String(f.required)==='true'||f.required===true))}</div></div>`:''}${state.refs.custom_fields.some(f=>!(String(f.required)==='true'||f.required===true))?`<details class="asset-form-extra field full"><summary>Other custom information</summary><div class="asset-form-extra-grid form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>!(String(f.required)==='true'||f.required===true)))}</div></details>`:''}<section class="field full asset-form-photos"><h3>Photos</h3><p>${a._scanFiles?.length||a._scanFile?'Scan photos are included. ':''}Take photos or choose from your gallery. These attach to this asset without restarting recognition.</p><div id="assetPhotoPicker"></div><small>Photos are compressed before upload. Review the selected photos below.</small></section><div id="assetSaveStatus" class="asset-save-status" role="status" aria-live="polite"></div><div class="field full"><div class="modal-actions">${a.asset_id&&a.status!=='Retired'&&isAdmin()?'<button type="button" id="retireAssetBtn" class="btn danger">Retire Asset</button>':''}<button type="button" id="cancelAssetForm" class="btn light">Cancel</button><button type="submit" class="btn blue">${a.asset_id?'Save Changes':'Create Asset'}</button></div></div></form>`;
+    return `<form id="assetForm" class="form-grid">${a.asset_id?`<div class="field full asset-form-scan-action"><div><b>Update from a device photo</b><small>Scan a label or Windows specifications screen, then review differences before saving.</small></div><button type="button" id="scanUpdateAsset" class="btn light">${icon('scan','sm')} Scan to update</button></div>`:''}<div class="field"><label>Category</label>${editablePicker("assetCategory","category",catValue,state.refs.categories.map(x=>x.name),"Enter category")}<small>You can type a new device type. Admin can later add it to the master category list.</small></div><div class="field"><label>Brand</label>${editablePicker("assetBrand","brand",a.brand||"",[...state.refs.brands,...(window.AssetInput?.current?.brands()||[])],"Enter brand")}</div><div class="field"><label>Model</label><input name="model" value="${esc(a.model||'')}" autocomplete="off" ${a.asset_id&&!a.model?'':'required'}></div><div class="field"><label>Serial number</label><input name="serial" value="${esc(a.serial||'')}"></div><div class="field"><label>Site</label><select name="site_id" id="assetSite" required><option value="">Select site</option>${state.refs.sites.map(x=>`<option value="${esc(x.site_id)}" ${String(x.site_id)===String(site)?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div><div class="field"><label>Area / Department</label>${editablePicker("assetArea","area",area,[],"Enter area / department")}</div><div class="field"><label>Status</label><select name="status">${['Active','Spare','Faulty','Under Repair','Missing','Retired'].map(s=>`<option ${String(a.status||'Active')===s?'selected':''}>${s}</option>`).join('')}</select></div><details class="asset-form-extra field full"><summary>Additional information <small>Location, assignment and specifications</small></summary><div class="asset-form-extra-grid form-grid"><div class="field"><label>Exact location <span style="font-weight:500">(optional)</span></label><input name="exact_location" list="locationOptions" value="${esc(a.exact_location||'')}" placeholder="e.g. DTF A3 Station"><datalist id="locationOptions">${state.refs.locations.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field"><label>Assigned person / team <span style="font-weight:500">(optional)</span></label><input name="assigned_to" list="assigneeOptions" value="${esc(a.assigned_to||'')}" placeholder="Person or team"><datalist id="assigneeOptions">${state.refs.assignees.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field full"><label>Specifications</label><textarea name="specifications" rows="3">${esc(a.specifications||'')}</textarea></div><div class="field"><label>Movement note <span style="font-weight:500">(only if placement changes)</span></label><input name="movement_note" placeholder="Optional reason"></div></div></details>${state.refs.custom_fields.some(f=>String(f.required)==='true'||f.required===true)?`<div id="customFieldsForm" class="field full"><span class="label">Required custom information</span><div class="form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>String(f.required)==='true'||f.required===true))}</div></div>`:''}${state.refs.custom_fields.some(f=>!(String(f.required)==='true'||f.required===true))?`<details class="asset-form-extra field full"><summary>Other custom information</summary><div class="asset-form-extra-grid form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>!(String(f.required)==='true'||f.required===true)))}</div></details>`:''}<section class="field full asset-form-photos"><h3>Photos</h3><p>${a._scanFiles?.length||a._scanFile?'Scan photos are included. ':''}Take photos or choose from your gallery. These attach to this asset without restarting recognition.</p><div id="assetPhotoPicker"></div><small>Photos are compressed before upload. Review the selected photos below.</small></section><div id="assetSaveStatus" class="asset-save-status" role="status" aria-live="polite"></div><div class="field full"><div class="modal-actions">${a.asset_id&&a.status!=='Retired'&&isAdmin()?'<button type="button" id="retireAssetBtn" class="btn danger">Retire Asset</button>':''}<button type="button" id="cancelAssetForm" class="btn light">Cancel</button><button type="submit" class="btn blue">${a.asset_id?'Save Changes':'Create Asset'}</button></div></div></form>`;
   }
   function customFieldsHtml(existing,fields=state.refs.custom_fields){ const map={}; existing.forEach(x=>map[x.field_id]=x.value); return fields.map(f=>{ const v=map[f.field_id]||''; const req=String(f.required)==='true'||f.required===true?'required':''; if(f.field_type==='select'){let opts=[];try{opts=JSON.parse(f.options_json||'[]')}catch{} return `<div class="field"><label>${esc(f.label)}</label><select data-custom="${esc(f.field_id)}" ${req}><option value="">—</option>${opts.map(o=>`<option ${String(o)===String(v)?'selected':''}>${esc(o)}</option>`).join('')}</select></div>`;} if(f.field_type==='boolean') return `<div class="field"><label>${esc(f.label)}</label><select data-custom="${esc(f.field_id)}" ${req}><option value="">—</option><option value="Yes" ${v==='Yes'?'selected':''}>Yes</option><option value="No" ${v==='No'?'selected':''}>No</option></select></div>`; return `<div class="field"><label>${esc(f.label)}</label><input type="${['date','number'].includes(f.field_type)?f.field_type:'text'}" data-custom="${esc(f.field_id)}" value="${esc(v)}" ${req}></div>`; }).join('')||'<div class="empty-state compact">No custom fields configured.</div>'; }
   function openAssetForm(asset={}){
@@ -2093,7 +2152,8 @@
       ${attrRows?`<details class="v27-evidence-block" open><summary>Technical attributes (${proposal.attributes.length})</summary><div class="v27-table-wrap"><table><thead><tr><th>Attribute</th><th>Value</th><th>Source</th></tr></thead><tbody>${attrRows}</tbody></table></div></details>`:''}
       <details class="v27-evidence-block"><summary>Specifications text · editable before save</summary><textarea id="v27Specs" rows="5" aria-label="Approved specifications">${esc(incoming.specifications)}</textarea></details>
       <details class="v27-evidence-block"><summary>Source evidence and raw OCR</summary>${raw||'<p>OCR text unavailable.</p>'}</details>
-      ${session.matches.length?`<div class="scan-match-zone"><div class="scan-match-heading"><b>Possible existing assets (${session.matches.length})</b><small>These records were not modified. Review before creating a duplicate.</small></div>${matches}</div>`:''}
+      ${session.matches.length?`<div class="scan-match-zone"><div class="scan-match-heading"><b>Check existing units (${session.matches.length})</b><small>A similar model alone does not prove this is the same physical item. Verify the JCP tag or serial before updating.</small></div>${matches}</div>`:''}
+      ${session.relatedModels?.length?`<div class="scan-ai-note">${session.relatedModels.length} similar-model records have different serials. They are separate units; the asset list can show them together.</div>`:''}
       ${pendingTarget?`<div class="scan-target-panel"><b>Scan to update: ${esc(pendingTarget.asset_id)}</b><small>Compare only changed or missing fields before approval.</small></div>`:''}
       ${unresolved?'<div class="scan-warning conflict-box">Conflicting source values need explicit resolution before the next step.</div>':''}
       <div class="scan-match-primary"><b>${pendingTarget?'Review changes to selected asset':'Confirm information before saving'}</b><small>${running?'You can inspect preliminary information while processing finishes.':'No record will be created or changed until you review and submit.'}</small>
@@ -2169,7 +2229,9 @@
     try{
       const result=await AssetAPI.get('suggestMatchesV27',{...incoming,identifiers_json:JSON.stringify(ids)});
       if(state.recognitionSession!==session||currentVersion!==session.matchVersion)return;
-      session.matches=Array.isArray(result.matches)?result.matches:[];
+      const candidates=Array.isArray(result.matches)?result.matches:[];
+      session.matches=candidates.filter(m=>AssetGroups.matchKind(m,incoming)!=='different_unit');
+      session.relatedModels=candidates.filter(m=>AssetGroups.matchKind(m,incoming)==='different_unit');
       showUniversalRecognition();
     }catch(err){console.warn('Optional match suggestions unavailable',err);}
   }
