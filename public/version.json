@@ -1,7 +1,7 @@
 {
   "version": "2.7",
-  "build": "2.7-input-photos-1",
+  "build": "2.7-still-barcodes-1",
   "released": "2026-10-19",
-  "name": "Local input suggestions and clearer photo controls",
-  "notes": "Cached recognition dictionary, brand aliases, evidence-based suggestions, camera/gallery controls and safe photo retries. Compatible with the V2.7 backend."
+  "name": "Still photos and confirmed barcode candidates",
+  "notes": "Sensor still capture with native camera fallback, bounded local barcode search, progressive observations and explicit serial approval. Compatible with the V2.7 backend."
 }

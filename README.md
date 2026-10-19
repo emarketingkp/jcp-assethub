@@ -5,7 +5,7 @@ JCP AssetHub, a mobile-first asset management application built with Firebase Ho
 
 This repository includes the source from `JCP_AssetHub_V2_7_PREVIEW.zip`. The owner reports that V2.7 is deployed. The supplied archive has not been compared against that deployment; its original release documents describe the earlier preview status.
 
-The latest changes add local input assistance and clearer camera/gallery controls. These changes have not been deployed. See [implementation and isolated testing notes](docs/LOCAL_INPUT_AND_PHOTOS.md).
+Local input assistance and clearer camera/gallery controls were published to Firebase Hosting on 2026-10-19 (build `2.7-input-photos-1`). This branch adds still-photo capture and confirmed barcode candidates; that patch has not been deployed. See [scanner changes, validation limits and isolated release procedure](docs/STILL_CAPTURE_AND_BARCODES.md), the [grouping design proposal](docs/ASSET_GROUPING_PROPOSAL.md), and [earlier input/photo implementation notes](docs/LOCAL_INPUT_AND_PHOTOS.md).
 
 - `public/`: Firebase Hosting frontend.
 - `apps-script/`: Google Apps Script backend and manifest.
@@ -16,7 +16,7 @@ The latest changes add local input assistance and clearer camera/gallery control
 
 ## Local checks
 
-Use Node.js 24. Unit/mock tests have no external dependencies. Install the pinned development dependencies to run browser tests.
+Use Node.js 24 and install the pinned development dependencies for the unit, vendor-integrity and browser checks.
 
 ```sh
 npm ci

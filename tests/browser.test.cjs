@@ -5,8 +5,9 @@ const path=require('node:path');
 const {chromium}=require('playwright');
 const {test}=require('node:test');
 const data=require('../public/data/input-knowledge.json');
+const bwip=require('bwip-js');
 const root=path.resolve(__dirname,'../public');
-const types={'.html':'text/html','.js':'text/javascript','.json':'application/json','.css':'text/css','.png':'image/png','.webmanifest':'application/manifest+json'};
+const types={'.html':'text/html','.js':'text/javascript','.json':'application/json','.css':'text/css','.png':'image/png','.wasm':'application/wasm','.webmanifest':'application/manifest+json'};
 const pixel=require('node:fs').readFileSync(path.join(root,'assets/icon-192.png'));
 const image=name=>({name,mimeType:'image/png',buffer:pixel});
 const server=http.createServer(async(req,res)=>{
@@ -54,7 +55,196 @@ test('browser regressions on mobile and desktop',async t=>{
     const wrap=page.locator('#modalWrap');
     if(await wrap.isVisible())assert(await page.locator('#modalBody').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'Modal overflows horizontally');
   }
+  async function barcodeFixture(page){
+    const linear=await bwip.toBuffer({bcid:'code128',text:'001O0I1234',scale:3,height:16,includetext:true,paddingwidth:20,paddingheight:15,backgroundcolor:'FFFFFF'});
+    const qr=await bwip.toBuffer({bcid:'qrcode',text:'https://example.test/warranty',scale:3,paddingwidth:10,paddingheight:10,backgroundcolor:'FFFFFF'});
+    const uri=await page.evaluate(async({linear,qr})=>{
+      const load=src=>new Promise(resolve=>{const img=new Image();img.onload=()=>resolve(img);img.src=src;});
+      const [a,b]=await Promise.all([load(linear),load(qr)]);
+      const canvas=document.createElement('canvas');canvas.width=Math.max(a.width,b.width)+80;canvas.height=a.height+b.height+100;
+      const ctx=canvas.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(a,40,30);ctx.drawImage(b,40,a.height+60);
+      return canvas.toDataURL('image/png');
+    },{linear:'data:image/png;base64,'+linear.toString('base64'),qr:'data:image/png;base64,'+qr.toString('base64')});
+    return {name:'synthetic-multiple-codes.png',mimeType:'image/png',buffer:Buffer.from(uri.split(',')[1],'base64')};
+  }
   try{
+    await t.test('real local decoder finds a warranty QR and linear identifier in the same image',async()=>{
+      const {page,context,errors}=await start();
+      try{
+        const fixture=await barcodeFixture(page);
+        const cdp=await context.newCDPSession(page);await cdp.send('Emulation.setCPUThrottlingRate',{rate:4});
+        const result=await page.evaluate(async base64=>{
+          window.BarcodeDetector=undefined;
+          const file=await (await fetch('data:image/png;base64,'+base64)).blob();
+          const started=performance.now();let ticks=0;const heartbeat=setInterval(()=>ticks++,10);
+          const codes=await AssetCode.scanAll(file);clearInterval(heartbeat);
+          return {codes,ticks,ms:performance.now()-started};
+        },fixture.buffer.toString('base64'));
+        assert(result.codes.some(c=>c.kind==='link'&&c.value==='https://example.test/warranty'));
+        assert(result.codes.some(c=>c.kind==='candidate'&&c.serialCandidate==='001O0I1234'));
+        assert(result.ticks>0,'Barcode decoding blocked the main thread');
+        console.log('Local worker barcode cold scan at 4x CPU slowdown:',JSON.stringify({ms:result.ms,mainThreadTicks:result.ticks}));
+        assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('native detection retains multiple codes and publishes before a stalled fallback',async()=>{
+      const {page,context,errors}=await start();
+      try{
+        await context.route('**/barcode-worker.js',route=>route.fulfill({body:'self.onmessage=()=>{};',contentType:'text/javascript'}));
+        const result=await page.evaluate(async()=>{
+          window.BarcodeDetector=class{
+            static async getSupportedFormats(){return ['qr_code','code_128'];}
+            async detect(){return [{rawValue:'https://example.test/warranty',format:'qr_code'},{rawValue:'001O0I1234',format:'code_128'}];}
+          };
+          const file=await(await fetch('./assets/icon-192.png')).blob();let first=[];
+          const codes=await AssetCode.scanAll(file,{budgetMs:150,onUpdate:r=>{if(!first.length)first=r.codes;}});
+          return {codes,first};
+        });
+        assert.equal(result.first.length,2);assert.equal(result.codes.length,2);
+        assert(result.codes.some(c=>c.serialCandidate==='001O0I1234'));assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('large phone-image OCR preparation enforces dimensions and upload bytes',async()=>{
+      const {page,context,errors}=await start();
+      try{
+        const result=await page.evaluate(async()=>{
+          const c=document.createElement('canvas');c.width=2600;c.height=1900;const ctx=c.getContext('2d'),pixels=ctx.createImageData(c.width,c.height);
+          let seed=12345;const random=()=>{seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;return seed&255;};
+          for(let i=0;i<pixels.data.length;i+=4){pixels.data[i]=random();pixels.data[i+1]=random();pixels.data[i+2]=random();pixels.data[i+3]=255;}
+          ctx.putImageData(pixels,0,0);const original=await new Promise(resolve=>c.toBlob(resolve,'image/png'));
+          const uri=await AssetImage.prepareForOcr(original),prepared=await(await fetch(uri)).blob(),bitmap=await createImageBitmap(prepared);
+          const result={original:original.size,prepared:prepared.size,width:bitmap.width,height:bitmap.height,type:prepared.type};bitmap.close();return result;
+        });
+        assert(result.original>2*1024*1024);assert(result.prepared<=2*1024*1024);assert(result.width<=2400&&result.height<=2400);
+        assert(Math.abs(result.width/result.height-2600/1900)<.002);assert.equal(result.type,'image/jpeg');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('barcode candidates arrive before OCR and require approval; late OCR retains the approved serial',async()=>{
+      const {page,context,errors}=await start({ocrDelayed:true,ai:true});
+      try{
+        const fixture=await barcodeFixture(page);
+        await page.locator('[data-mobile-route="scanner"]').click();await page.locator('#scannerFile').setInputFiles(fixture);
+        const use=page.getByRole('button',{name:'Use as serial',exact:true});await use.waitFor();
+        assert.equal(await use.count(),1,'Warranty URL must not have a serial action');
+        assert.equal(await page.locator('[data-universal-field="serial"]').inputValue(),'');
+        assert(await page.locator('#v27Create').isDisabled());
+        assert.equal(await page.evaluate(()=>window.__mock.calls.some(c=>c.action==='createAsset'||c.action==='updateAsset')),false);
+        await use.click();assert.equal(await page.locator('[data-universal-field="serial"]').inputValue(),'001O0I1234');
+        await page.evaluate(()=>window.__mock.ocrRelease());
+        await page.waitForFunction(()=>!document.querySelector('#v27Create').disabled);
+        assert.equal(await page.locator('[data-universal-field="serial"]').inputValue(),'001O0I1234');
+        await page.locator('[data-universal-field="serial"]').fill('MANUAL-SERIAL');
+        page.once('dialog',dialog=>dialog.dismiss());await use.click();
+        assert.equal(await page.locator('[data-universal-field="serial"]').inputValue(),'MANUAL-SERIAL');
+        page.once('dialog',dialog=>dialog.accept());await use.click();
+        assert.equal(await page.locator('[data-universal-field="serial"]').inputValue(),'001O0I1234');
+        await checkNoOverflow(page);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('cancelled recognition ignores late OCR and cannot leak candidates into the next asset',async()=>{
+      const {page,context,errors}=await start({ocrDelayed:true});
+      try{
+        const fixture=await barcodeFixture(page);
+        await page.locator('[data-mobile-route="scanner"]').click();await page.locator('#scannerFile').setInputFiles(fixture);
+        await page.waitForFunction(()=>window.__mock.ocrRelease);await page.locator('#v27Reset').click();
+        await page.evaluate(()=>window.__mock.ocrRelease());
+        await page.locator('#scannerFile').setInputFiles(image('next-asset.png'));
+        await page.waitForFunction(()=>window.__mock.calls.filter(c=>c.action==='ocr').length===2);
+        await page.evaluate(()=>window.__mock.ocrRelease());
+        await page.waitForFunction(()=>!document.querySelector('#v27Create').disabled);
+        assert.equal(await page.locator('[data-barcode-candidate]').count(),0);
+        assert.equal(await page.locator('[data-universal-field="serial"]').inputValue(),'O01I2345');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('barcode timeout and missing worker keep manual entry usable',async()=>{
+      const {page,context}=await start();
+      try{
+        await context.route('**/barcode-worker.js',route=>route.fulfill({body:'self.onmessage=()=>{};',contentType:'text/javascript'}));
+        const result=await page.evaluate(async()=>{
+          const file=await (await fetch('./assets/icon-192.png')).blob();let warning='';
+          const start=performance.now();await AssetCode.scanAll(file,{budgetMs:100,onUpdate:r=>{warning=r.warning||warning;}});
+          return {warning,ms:performance.now()-start};
+        });
+        assert.match(result.warning,/time limit/);assert(result.ms<1500);
+        await page.evaluate(()=>{window.Worker=undefined;});await scan(page);
+        assert.match(await page.locator('.v27-barcodes').textContent(),/reader unavailable/);
+        assert.equal(await page.locator('[data-universal-field="serial"]').inputValue(),'O01I2345');
+      }finally{await context.close();}
+    });
+    await t.test('mobile shutter uses sensor still dimensions rather than preview dimensions',async()=>{
+      const {page,context,errors}=await start();
+      try{
+        await page.evaluate(()=>{
+          navigator.mediaDevices.getUserMedia=async()=>{
+            const preview=document.createElement('canvas');preview.width=320;preview.height=240;preview.getContext('2d').fillRect(0,0,320,240);return preview.captureStream(10);
+          };
+          window.ImageCapture=class{
+            async takePhoto(){
+              const still=document.createElement('canvas');still.width=1800;still.height=1200;const ctx=still.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,1800,1200);
+              return new Promise(resolve=>still.toBlob(resolve,'image/jpeg',.95));
+            }
+          };
+        });
+        await page.locator('[data-mobile-route="scanner"]').click();await page.waitForFunction(()=>document.querySelector('#scannerVideo').videoWidth===320);
+        await page.locator('#captureBtn').click();await page.waitForFunction(()=>window.__mock.calls.some(c=>c.action==='ocr'));
+        const dimensions=await page.evaluate(async()=>{const uri=window.__mock.calls.find(c=>c.action==='ocr').params.image;const bitmap=await createImageBitmap(await(await fetch(uri)).blob());const result=[bitmap.width,bitmap.height];bitmap.close();return result;});
+        assert.deepEqual(dimensions,[1800,1200]);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('unsupported and failed still capture offer native camera without saving a preview frame',async()=>{
+      for(const failure of [false,true]){
+        const {page,context,errors}=await start();
+        try{
+          await page.evaluate(failure=>{
+            navigator.mediaDevices.getUserMedia=async()=>{const c=document.createElement('canvas');c.width=320;c.height=240;c.getContext('2d').fillRect(0,0,320,240);return c.captureStream(10);};
+            window.ImageCapture=failure?class{async takePhoto(){throw new Error('Driver failure');}}:undefined;
+          },failure);
+          await page.locator('[data-mobile-route="scanner"]').click();await page.waitForFunction(()=>document.querySelector('#scannerVideo').videoWidth===320);
+          if(failure){await page.locator('#captureBtn').click();await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('Tap Take photo again'));}
+          const chooser=page.waitForEvent('filechooser');await page.locator('#captureBtn').click();const opened=await chooser;
+          assert.equal(await opened.element().getAttribute('capture'),'environment');
+          assert.equal(await page.evaluate(()=>window.__mock.calls.some(c=>c.action==='ocr')),false);assert.deepEqual(errors,[]);
+        }finally{await context.close();}
+      }
+    });
+    await t.test('closing the scanner releases a camera that finishes opening late',async()=>{
+      const {page,context,errors}=await start();
+      try{
+        await page.evaluate(()=>{navigator.mediaDevices.getUserMedia=()=>new Promise(resolve=>{window.__cameraResolve=()=>resolve({getTracks:()=>[{stop(){window.__cameraStopped=true;}}]});});});
+        await page.locator('[data-mobile-route="scanner"]').click();await page.waitForFunction(()=>window.__cameraResolve);
+        await page.locator('#mobileScannerClose').click();await page.evaluate(()=>window.__cameraResolve());
+        await page.waitForFunction(()=>window.__cameraStopped);assert.equal(await page.locator('#scannerVideo').evaluate(video=>video.srcObject),null);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('aborting a barcode search terminates a stalled worker promptly',async()=>{
+      const {page,context,errors}=await start();
+      try{
+        await context.route('**/barcode-worker.js',route=>route.fulfill({body:'self.onmessage=()=>{};',contentType:'text/javascript'}));
+        const elapsed=await page.evaluate(async()=>{
+          window.BarcodeDetector=undefined;const file=await(await fetch('./assets/icon-192.png')).blob();
+          const controller=new AbortController(),start=performance.now();const search=AssetCode.scanAll(file,{signal:controller.signal});
+          setTimeout(()=>controller.abort(),50);
+          await search;return performance.now()-start;
+        });
+        assert(elapsed<1000);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('barcode worker and WASM decode offline after a successful online scan',async()=>{
+      const context=await browser.newContext({viewport:{width:390,height:844}}),page=await context.newPage();
+      try{
+        await context.route('https://**',route=>route.abort());await page.goto(base);await page.waitForFunction(()=>navigator.serviceWorker.controller&&window.AssetCode);
+        const fixture=await barcodeFixture(page),base64=fixture.buffer.toString('base64');
+        const decode=async()=>page.evaluate(async base64=>{
+          window.BarcodeDetector=undefined;const file=await(await fetch('data:image/png;base64,'+base64)).blob();return AssetCode.scanAll(file);
+        },base64);
+        assert((await decode()).some(c=>c.serialCandidate==='001O0I1234'));
+        await page.waitForFunction(async()=>{
+          const cache=await caches.open('jcp-assethub-v2.7-still-barcodes-1');return !!(await cache.match('./vendor/zxing-wasm/zxing_reader.wasm'));
+        });
+        await context.setOffline(true);await page.reload();await page.waitForFunction(()=>window.AssetCode);
+        assert((await decode()).some(c=>c.serialCandidate==='001O0I1234'));
+      }finally{await context.close();}
+    });
     await t.test('scanned form accumulates camera/gallery photos and opens details after save',async()=>{
       const {page,context,errors}=await start();
       try{
