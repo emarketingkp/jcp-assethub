@@ -1,7 +1,8 @@
-const CACHE = 'jcp-assethub-v2.7';
+const CACHE = 'jcp-assethub-v2.7-input-photos-1';
 const CORE = [
   './','./index.html','./app.css','./store.js','./api-config.js','./api.js','./image.js','./code-scanner.js','./recognition-v27.js','./app.js',
-  './manifest.webmanifest','./assets/icon-192.png','./assets/icon-512.png'
+  './manifest.webmanifest','./assets/icon-192.png','./assets/icon-512.png',
+  './photo-picker.js','./input-assist.js','./data/input-knowledge.json'
 ];
 
 self.addEventListener('install', event => {

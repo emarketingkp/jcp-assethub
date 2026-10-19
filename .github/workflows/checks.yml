@@ -11,16 +11,15 @@ permissions:
 jobs:
   source-checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Run included mock tests
-        run: |
-          node tests/recognition.test.js
-          node tests/backend-mock.test.js
+      - run: npm ci
+      - name: Run unit and existing mock tests
+        run: npm test
       - name: Check frontend and backend syntax
         shell: bash
         run: |
@@ -29,3 +28,7 @@ jobs:
             node --check "$file"
           done
           node --check < apps-script/Code.gs
+      - name: Install Chromium for browser regressions
+        run: npx playwright install --with-deps chromium
+      - name: Run mobile and desktop browser regressions
+        run: npm run test:browser

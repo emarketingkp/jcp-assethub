@@ -16,8 +16,10 @@
     const lines=value(text).split(/\r?\n/);
     return lines.find(s=>norm(s).includes(match))?.trim().slice(0,230)||'';
   }
-  function fromOcr(ocr,source_image){
-    const raw=value(ocr?.text), rawFields=ocr?.fields||{};
+  function fromOcr(ocr,source_image,local=null){
+    const raw=value(ocr?.text), rawFields={...(ocr?.fields||{})};
+    // Replace broad legacy guesses when the validated local dictionary is available.
+    if(local){delete rawFields.category;delete rawFields.brand;delete rawFields.specifications;}
     const fields={},identifiers=[],attributes=[];
     ['category','brand','model','serial'].forEach(k=>{
       const v=value(rawFields[k]);if(!v)return;
@@ -59,7 +61,22 @@
       // An OCR parser's summary is only fallback context; AI maps individual attributes.
       attributes.push({...entry(spec,'Legacy OCR text parsing',source_image,'inferred'),key:'ocr_specification_summary',label:'Additional OCR specifications'});
     }
-    return {version:'2.7',source_image,provider:'OCR',raw_text:raw,fields,identifiers,attributes};
+    const alternatives=[];
+    if(local){
+      delete fields.brand;delete fields.category;
+      for(const [k,it]of Object.entries(local.fields)){
+        fields[k]={...it,source_image};
+        for(let i=attributes.length-1;i>=0;i--)if(attributes[i].evidence===it.evidence)attributes.splice(i,1);
+      }
+      for(const it of local.attributes){
+        for(let i=attributes.length-1;i>=0;i--)if(attributes[i].evidence===it.evidence)attributes.splice(i,1);
+        attributes.push({...it,source_image});
+      }
+      for(const [field,items]of Object.entries(local.suggestions))for(const it of items){
+        if(it.reason==='Different labeled value; review')alternatives.push({field,item:{...it,source_image}});
+      }
+    }
+    return {version:'2.7',source_image,provider:local?'Local dictionary + OCR':'OCR',raw_text:raw,fields,identifiers,attributes,alternatives,suggestions:local?.suggestions||{},localAssisted:!!local};
   }
   function aiEvidenceValid(item,raw,{allowCategoryInference=false}={}){
     const v=value(item?.value),ev=value(item?.evidence),normalized=norm(raw);
@@ -67,12 +84,22 @@
     if(!normalized.includes(norm(v)))return allowCategoryInference && item?.status==='inferred';
     return true;
   }
-  function attachAi(observation,ai){
-    const merged={...observation,fields:{...observation.fields},identifiers:[...observation.identifiers],attributes:[...observation.attributes],provider:'Groq + OCR'};
+  function attachAi(observation,ai,canonical=null){
+    const merged={...observation,fields:{...observation.fields},identifiers:[...observation.identifiers],attributes:[...observation.attributes],alternatives:[...(observation.alternatives||[])],suggestions:{...(observation.suggestions||{})},provider:'Groq + OCR'};
     for(const k of CORE){
       const it=ai?.fields?.[k]; if(!aiEvidenceValid(it,observation.raw_text,{allowCategoryInference:k==='category'}))continue;
       if(k==='serial' && it.status!=='supported')continue;
-      merged.fields[k]={...it,source_image:observation.source_image};
+      const normalized=canonical&&['category','brand'].includes(k)?canonical(k,it.value):it.value;
+      const incoming={...it,value:normalized||it.value,origin:'ai',source_image:observation.source_image};
+      const current=merged.fields[k];
+      if(observation.localAssisted&&k==='category'&&(!normalized||(!current&&it.status==='inferred'))){
+        merged.suggestions[k]=[...(merged.suggestions[k]||[]),{...incoming,reason:'AI suggestion; confirm category'}];continue;
+      }
+      if(current?.origin&&norm(current.value)!==norm(incoming.value)){
+        merged.alternatives.push({field:k,item:incoming});continue;
+      }
+      // Retain the more direct local evidence when AI agrees with it.
+      if(!current?.origin)merged.fields[k]=incoming;
     }
     for(const kind of ['identifiers','attributes']){
       for(const it of ai?.[kind]||[]){
@@ -85,7 +112,7 @@
     return merged;
   }
   function consolidate(observations,resolutions={}){
-    const fields={},identifiers=[],attributes=[],conflicts=[],evidence={};
+    const fields={},identifiers=[],attributes=[],conflicts=[],evidence={},suggestions={};
     function combine(kind,label,item,identity){
       if(!item?.value)return;
       const id=kind+':'+identity;
@@ -97,6 +124,11 @@
     const detailedAttributes=observations.some(o=>(o.attributes||[]).some(a=>a.key!=='ocr_specification_summary'));
     for(const obs of observations){
       for(const k of CORE)if(obs.fields?.[k])combine('field',k,obs.fields[k],k);
+      for(const alt of obs.alternatives||[])combine('field',alt.field,alt.item,alt.field);
+      for(const [field,items]of Object.entries(obs.suggestions||{})){
+        suggestions[field]||=[];
+        for(const item of items)if(!suggestions[field].some(x=>norm(x.value)===norm(item.value)))suggestions[field].push({...item,source_image:obs.source_image});
+      }
       for(const it of obs.identifiers||[])combine('id',it.type,it,it.type);
       for(const it of obs.attributes||[]){
         if(detailedAttributes&&it.key==='ocr_specification_summary')continue;
@@ -117,7 +149,7 @@
       const legacy=attributes.filter(a=>a.key==='ocr_specification_summary');
       cleaned.push(...legacy);
     }
-    return {fields,identifiers,attributes:cleaned,conflicts,evidence,hasUnresolved:conflicts.some(x=>!x.resolved),sourceCount:observations.length};
+    return {fields,identifiers,attributes:cleaned,conflicts,evidence,suggestions,hasUnresolved:conflicts.some(x=>!x.resolved),sourceCount:observations.length};
   }
   function specifications(proposal){
     const lines=[];
