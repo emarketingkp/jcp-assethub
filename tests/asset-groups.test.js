@@ -38,3 +38,8 @@ test('unit-specific typed identifiers do not split otherwise identical model gro
   const rows=[a('A',{specifications:'RAM: 8 GB\nMAC: AA:BB:CC:DD:EE:FF\nHostname: Station-A'}),a('B',{specifications:'RAM: 8 GB\nMAC: AA:BB:CC:DD:EE:00\nHostname: Station-B'})];
   assert.equal(G.project(rows,G.buildIndex(rows)).length,1);
 });
+test('serial list import preserves exact strings and blank units, and rejects oversized lists',()=>{
+  assert.deepEqual(G.parseSerialList('001O0I1234\r\n\r\n00012345678901234567890\r\n'),[{serial:'001O0I1234'},{serial:''},{serial:'00012345678901234567890'}]);
+  for(const input of ['', '\n ',Array(26).fill('A').join('\n'),'A'.repeat(81)])assert.throws(()=>G.parseSerialList(input));
+  assert.deepEqual(G.parseSerialList('001ABC,002ABC'),[{serial:'001ABC,002ABC'}],'A comma is not assumed to separate serials');
+});
