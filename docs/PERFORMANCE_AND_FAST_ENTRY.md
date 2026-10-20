@@ -2,7 +2,8 @@
 
 Build: `2.7-fast-entry-1`. Based on the merged equipment grouping change.
 Frontend changes only; no new Apps Script deployment, schema, permissions or
-dependencies. Production Hosting has not been changed by this work.
+dependencies. Released to production Hosting on 2026-10-20 as version
+`48f33716821493cc`; all 27 application files and backend grouping were verified.
 
 ## What changed
 

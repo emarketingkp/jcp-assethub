@@ -83,5 +83,15 @@
     });
   }
 
-  window.AssetStore={get,set,remove,clear};
+  async function probe(){
+    const key='health:'+crypto.randomUUID(),value=crypto.randomUUID();
+    try{
+      const db=await openDb();await set(key,value);
+      if(await get(key)!==value)return {state:'warning',message:'Browser storage could not retain the test value. Offline cache is not verified.'};
+      await remove(key);
+      if(await get(key)!==null)return {state:'warning',message:'Browser storage cleanup failed.'};
+      return {state:'ok',message:(db?'IndexedDB':'localStorage fallback')+' read, write and cleanup verified. In-memory state alone is not an offline cache.'};
+    }finally{await remove(key);}
+  }
+  window.AssetStore={get,set,remove,clear,probe};
 })();

@@ -168,7 +168,7 @@ function doGet(e) {
     const p = (e && e.parameter) || {};
     const action = p.action || 'ping';
     if (action === 'ping') return json_({success:true, message:'JCP AssetHub API online', version:APP_VERSION});
-    if (action === 'diagnostics') return json_({success:true, diagnostics:diagnostics_(p.frontend_version)});
+    if (action === 'diagnostics') return json_({success:true, diagnostics:diagnostics_(p.frontend_version,p.component,p.token)});
     if (action === 'matchIdentifier') return json_({success:true, match:matchIdentifier_(p.value), user:optionalUser_(p.token)});
     if (action === 'suggestMatches') return json_({success:true, matches:suggestAssetMatches_(p), user:optionalUser_(p.token)});
     if (action === 'suggestMatchesV27') return json_({success:true, matches:suggestUniversalMatches_(p), user:optionalUser_(p.token)});
@@ -219,6 +219,7 @@ function doPost(e) {
 
     // Operational changes require Staff or Admin.
     const user = requireUser_(p.token, 'STAFF');
+    if (action === 'testScanConnection') return postReply_(p, {success:true, check:testScanConnection_(p.service,user)});
     if (action === 'saveAssetBatch') return postReply_(p, {success:true, result:saveAssetBatch_(p,user), user:user});
     if (action === 'interpretOcr') return postReply_(p, {success:true, result:interpretOcrFields_(p.text,p.base_fields_json,user),user:user});
     if (action === 'interpretOcrUniversal') return postReply_(p, {success:true, result:interpretUniversalOcr_(p.text,p.base_fields_json,p.source_image,user),user:user});
@@ -268,7 +269,7 @@ function bootstrapPayload_(token) {
     authenticated:authenticated,
     version:APP_VERSION,
     features:typeof groupingFeatures_==='function'?groupingFeatures_():{asset_groups:0},
-    ai_ocr_enabled:!!SCRIPT_PROPERTIES.getProperty('GROQ_API_KEY'),
+    ai_ocr_enabled:!!String(SCRIPT_PROPERTIES.getProperty('GROQ_API_KEY')||'').trim(),
     user:user,
     references:Object.assign({}, base.references, {users:users})
   });
@@ -382,6 +383,7 @@ function syncChanges_(p, user) {
   return {
     server_time:serverTime,
     version:APP_VERSION,
+    ai_ocr_enabled:!!String(SCRIPT_PROPERTIES.getProperty('GROQ_API_KEY')||'').trim(),
     features:typeof groupingFeatures_==='function'?groupingFeatures_():{asset_groups:0},
     authenticated:String(user && user.role || '').toUpperCase()!=='GUEST',
     write_auth_required:AUTH_REQUIRED,
@@ -994,79 +996,143 @@ function mainImageMap_() {
   return map;
 }
 
-function diagnostics_(frontendVersion) {
-  const components = {};
-  components.api = {ok:true,label:'Apps Script API',message:'Reachable',version:APP_VERSION};
-  components.version = {
-    ok:!frontendVersion || String(frontendVersion) === String(APP_VERSION),
-    label:'App version',
-    message:frontendVersion ? ('Frontend ' + frontendVersion + ' / Backend ' + APP_VERSION) : ('Backend ' + APP_VERSION),
-    frontend_version:String(frontendVersion || ''),backend_version:APP_VERSION
-  };
+function connectionResult_(label,state,message,started,code) {
+  return {label:label,state:state,ok:state==='ok',warning:['warning','not_tested','disabled','info','checking'].includes(state),message:message,code:code||'',checked_at:new Date().toISOString(),elapsed_ms:Math.max(0,Date.now()-started)};
+}
 
-  try {
-    if (!SPREADSHEET_ID) throw new Error('SPREADSHEET_ID Script Property is not configured.');
-    const ss = getSpreadsheet_();
-    const names = ss.getSheets().map(s=>s.getName());
-    const missing = Object.keys(SCHEMA).filter(name=>!names.includes(name));
-    components.sheets = {
-      ok:missing.length===0,label:'Google Sheets',
-      message:missing.length ? ('Missing tabs: ' + missing.join(', ')) : ('Connected: ' + ss.getName()),
-      missing_sheets:missing
-    };
-  } catch (err) {
-    components.sheets = {ok:false,label:'Google Sheets',message:String(err.message || err)};
+// Configuration is not connectivity. Individual reads let the browser publish
+// each result as it completes. No probe writes to Sheets, Drive or asset history.
+function diagnostics_(frontendVersion,component,token) {
+  const started=Date.now(),components={};
+  const result=(label,state,message,code)=>connectionResult_(label,state,message,started,code);
+  const selected=String(component||'');
+  if(selected&&!['api','sheets','drive','auth'].includes(selected))throw new Error('Invalid diagnostic component.');
+  if(!selected||selected==='api'){
+    components.api=result('Apps Script API','ok','Backend replied to this request.');
+    components.version=result('App version',!frontendVersion||String(frontendVersion)===APP_VERSION?'ok':'error','Frontend '+String(frontendVersion||'unknown')+' / backend '+APP_VERSION+' (compatibility comparison).');
+    const ocr=!!String(SCRIPT_PROPERTIES.getProperty('OCR_API_KEY')||'').trim(),ai=!!String(SCRIPT_PROPERTIES.getProperty('GROQ_API_KEY')||'').trim();
+    components.ocr=Object.assign(result('OCR.Space',ocr?'not_tested':'error',ocr?'Key configured; a provider request has not been tested.':'OCR key is not configured.','OCR_CONFIGURATION'),{configured:ocr,evidence:'configuration'});
+    components.ai=Object.assign(result('Groq AI',ai?'not_tested':'disabled',ai?'Key configured; model and structured output have not been tested.':'AI is not configured. Local OCR parsing remains available.','AI_CONFIGURATION'),{configured:ai,evidence:'configuration'});
   }
-
-  try {
-    if (!DRIVE_FOLDER_ID || /PASTE|PUT_YOUR/i.test(DRIVE_FOLDER_ID)) throw new Error('DRIVE_FOLDER_ID is not configured.');
-    const folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
-    components.drive = {ok:true,label:'Google Drive',message:'Connected: ' + folder.getName()};
-  } catch (err) {
-    components.drive = {ok:false,label:'Google Drive',message:String(err.message || err)};
+  if(!selected||selected==='sheets'){
+    try{
+      const ss=getSpreadsheet_(),names=ss.getSheets().map(s=>s.getName()),missing=Object.keys(SCHEMA).filter(name=>!names.includes(name));
+      if(missing.length)components.sheets=result('Google Sheets','error','Missing required tabs: '+missing.join(', '),'SHEETS_SCHEMA');
+      else{
+        const headers=headers_(ss.getSheetByName(SHEETS.ASSETS));
+        components.sheets=result('Google Sheets',headers.includes('asset_id')?'ok':'error',headers.includes('asset_id')?'Asset headers read successfully. Write access was not tested.':'Assets tab is missing the asset_id header.','SHEETS_READ');
+      }
+    }catch(_){components.sheets=result('Google Sheets','error','Could not read the configured spreadsheet. Check deployment permissions and Script Properties.','SHEETS_UNAVAILABLE');}
   }
+  if(!selected||selected==='drive'){
+    try{
+      if(!DRIVE_FOLDER_ID)throw new Error('Missing folder');
+      DriveApp.getFolderById(DRIVE_FOLDER_ID).getName();
+      components.drive=result('Google Drive','ok','Configured folder metadata read successfully. Upload/write access was not tested.','DRIVE_READ');
+    }catch(_){components.drive=result('Google Drive','error','Could not read the configured folder. Check deployment permissions and Script Properties.','DRIVE_UNAVAILABLE');}
+  }
+  if(!selected||selected==='api'||selected==='auth'){
+    try{
+      if(token){const user=requireUser_(token,'STAFF');components.auth=result('Session','ok','Active '+String(user.role)+' session verified by the backend.','SESSION_VERIFIED');}
+      else components.auth=result('Session','info','Browsing as Guest. AI and provider tests require Staff/Admin sign-in.','GUEST');
+    }catch(_){components.auth=result('Session','error','Session is expired, disabled or invalid. Sign in again.','SESSION_EXPIRED');}
+  }
+  const core=['api','version','sheets','drive'];
+  const failed=Object.keys(components).some(k=>core.includes(k)&&components[k].state==='error');
+  return {ok:!failed,status:failed?'issues':Object.values(components).some(c=>['error','warning','not_tested','disabled'].includes(c.state))?'warning':'online',diagnostics_version:2,version:APP_VERSION,checked_at:new Date().toISOString(),components:components};
+}
 
-  const key = PropertiesService.getScriptProperties().getProperty('OCR_API_KEY');
-  components.ocr = key
-    ? {ok:true,label:'OCR API',message:'OCR_API_KEY configured (provider call tested when you scan).'}
-    : {ok:false,label:'OCR API',message:'OCR_API_KEY is missing in Script Properties.',warning:true};
+function providerHttpError_(service,http,providerCode) {
+  const ai=service==='ai',prefix=ai?'AI':'OCR',name=ai?'Groq':'OCR.Space';
+  if(ai&&['model_not_found','model_decommissioned'].includes(providerCode))return 'AI_MODEL_UNAVAILABLE: The configured Groq model is unavailable. Ask the administrator to check GROQ_MODEL.';
+  if(ai&&['json_validate_failed','json_schema_failed'].includes(providerCode))return 'AI_SCHEMA_REJECTED: Groq rejected the structured output. OCR fallback retained.';
+  if(http===401||http===403)return prefix+'_AUTH: '+name+' rejected its key or access permissions.';
+  if(http===429)return prefix+'_RATE_LIMIT_PROVIDER: '+name+' quota/rate limit reached. Retry later.';
+  if(http===413)return prefix+'_IMAGE_TOO_LARGE: The provider rejected the image size.';
+  if(http===400||http===404||http===422)return prefix+'_REQUEST_REJECTED: '+name+' rejected the request'+(ai?', configured model or structured-output settings':' or image')+' (HTTP '+http+').';
+  return prefix+'_HTTP_'+http+': '+name+' returned HTTP '+http+'. Retry later; manual entry remains available.';
+}
 
-  components.ai = SCRIPT_PROPERTIES.getProperty('GROQ_API_KEY')
-    ? {ok:true,label:'AI OCR field mapping',message:'Groq key configured. A successful scan is needed to verify the AI model call.'}
-    : {ok:true,label:'AI OCR field mapping',message:'GROQ_API_KEY not configured; OCR parser remains active.'};
+function groqResponseJson_(payload,key) {
+  let response;
+  try{response=UrlFetchApp.fetch('https://api.groq.com/openai/v1/responses',{method:'post',contentType:'application/json',muteHttpExceptions:true,headers:{Authorization:'Bearer '+key},payload:JSON.stringify(payload)});}
+  catch(_){throw new Error('AI_TRANSPORT: Groq could not be reached or timed out. OCR fallback retained.');}
+  const status=response.getResponseCode();
+  if(status<200||status>=300){
+    let code='';try{code=String(JSON.parse(response.getContentText()).error?.code||'');}catch(_){}
+    throw new Error(providerHttpError_('ai',status,code));
+  }
+  let answer;
+  try{answer=JSON.parse(response.getContentText());}catch(_){throw new Error('AI_INVALID_JSON: Groq returned an unreadable response. OCR fallback retained.');}
+  if(!answer||typeof answer!=='object'||Array.isArray(answer))throw new Error('AI_INVALID_JSON: Groq returned an invalid response envelope. OCR fallback retained.');
+  if(answer.incomplete_details?.reason==='max_output_tokens')throw new Error('AI_OUTPUT_LIMIT: Groq did not finish its response within the output budget. OCR fallback retained.');
+  if(answer.status==='incomplete'||answer.incomplete_details?.reason)throw new Error('AI_INCOMPLETE: Groq did not complete its structured response. OCR fallback retained.');
+  const content=(Array.isArray(answer.output)?answer.output:[]).flatMap(o=>o&&Array.isArray(o.content)?o.content:[]).filter(c=>c&&typeof c==='object');
+  if(content.some(c=>c.type==='refusal'))throw new Error('AI_REFUSED: Groq declined this request. OCR fallback retained.');
+  const output=content.find(c=>c.type==='output_text');
+  try{return JSON.parse(output.text);}catch(_){throw new Error('AI_INVALID_JSON: Groq returned no valid structured mapping. OCR fallback retained.');}
+}
 
-  components.auth = {
-    ok:true,label:'Access control',
-    message:AUTH_REQUIRED ? 'Guest: read + add new asset · Staff: edit/move/maintenance/audit · Admin: configure/delete' : 'Authentication disabled'
-  };
+const CONNECTION_OCR_SAMPLE_ = 'data:image/png;base64,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';
 
-  const hardFailures = ['api','version','sheets','drive'].filter(k=>!components[k].ok);
-  return {
-    ok:hardFailures.length===0,
-    status:hardFailures.length ? 'issues' : (components.ocr.ok ? 'online' : 'warning'),
-    version:APP_VERSION,
-    checked_at:new Date().toISOString(),
-    components:components
-  };
+// Explicit Staff-only checks share a 90-second cache across accounts, tied to
+// the configured key/model without exposing them. They never store user OCR.
+function testScanConnection_(service,user) {
+  if(!roleAtLeast_(user,'STAFF'))throw new Error('AUTH_REQUIRED');
+  if(!['ocr','ai'].includes(service))throw new Error('Invalid scanning service.');
+  const started=Date.now(),label=service==='ai'?'Groq AI':'OCR.Space';
+  const key=String(SCRIPT_PROPERTIES.getProperty(service==='ai'?'GROQ_API_KEY':'OCR_API_KEY')||'').trim();
+  if(!key)return Object.assign(connectionResult_(label,service==='ai'?'disabled':'error','Provider key is not configured.',started,'NOT_CONFIGURED'),{evidence:'configuration'});
+  const cache=CacheService.getScriptCache(),cacheKey='connection_probe_v1_'+hash_(service+'\n'+key+'\n'+String(SCRIPT_PROPERTIES.getProperty('GROQ_MODEL')||'')).slice(0,45);
+  const lock=LockService.getScriptLock();lock.waitLock(5000);
+  try{
+    const cached=cache.get(cacheKey);
+    if(cached){try{return Object.assign(JSON.parse(cached),{cached:true});}catch(_){}}
+    cache.put(cacheKey,JSON.stringify(connectionResult_(label,'checking','Another provider test is still running. Retry shortly.',started,'PROBE_IN_PROGRESS')),360);
+  }finally{lock.releaseLock();}
+  let check;
+  try{
+    if(service==='ai'){
+      const mapping=interpretUniversalOcr_('Brand: JCP Test Brand\nModel: TEST-CHECK-01\nSerial: CHECK001234','{}','connection_test',user,{diagnostic:true});
+      const valid=mapping.fields.model?.value==='TEST-CHECK-01'&&mapping.fields.serial?.value==='CHECK001234';
+      check=connectionResult_(label,valid?'ok':'warning',valid?'Configured model returned supported fields using the real scan schema. Photo accuracy still depends on OCR evidence.':'Groq answered, but the expected supported test fields were missing.',started,valid?'AI_TEST_OK':'AI_TEST_FIELDS');
+    }else{
+      const result=runOcr_(CONNECTION_OCR_SAMPLE_);
+      const valid=/CHECK/i.test(result.text)&&/1234/.test(result.text);
+      check=connectionResult_(label,valid?'ok':'warning',valid?'Provider read the built-in test image. Staff-photo accuracy still needs checking.':'Provider answered but did not read the expected test text.',started,valid?'OCR_TEST_OK':'OCR_TEST_TEXT');
+    }
+  }catch(err){
+    const message=String(err.message||'');
+    const safe=/^(?:AI|OCR)_[A-Z0-9_]+:/.test(message)?message:'Provider test failed. Check the service configuration and retry.';
+    check=connectionResult_(label,'error',safe,started,safe.split(':')[0]);
+  }
+  check.evidence='provider_test';
+  try{cache.put(cacheKey,JSON.stringify(check),90);}catch(_){}
+  return check;
 }
 
 function runOcr_(base64Image) {
   if (!base64Image || !/^data:image\//.test(base64Image)) throw new Error('No valid image received.');
   const key = PropertiesService.getScriptProperties().getProperty('OCR_API_KEY');
   if (!key) throw new Error('OCR_API_KEY is not set in Apps Script Project Settings.');
-  const response = UrlFetchApp.fetch('https://api.ocr.space/parse/image', {
+  let response;
+  try{response = UrlFetchApp.fetch('https://api.ocr.space/parse/image', {
     method:'post', muteHttpExceptions:true,
     payload:{apikey:key,language:'eng',isOverlayRequired:'false',scale:'true',OCREngine:'2',base64Image:base64Image}
-  });
+  });}catch(_){throw new Error('OCR_TRANSPORT: OCR.Space could not be reached or timed out. Manual entry remains available.');}
   const status = response.getResponseCode();
   const body = response.getContentText();
-  if (status < 200 || status >= 300) throw new Error('OCR HTTP ' + status + ': ' + body.slice(0,180));
-  const data = JSON.parse(body);
+  if (status < 200 || status >= 300) throw new Error(providerHttpError_('ocr',status));
+  let data;try{data=JSON.parse(body);}catch(_){throw new Error('OCR_INVALID_JSON: OCR.Space returned an unreadable response.');}
+  if(!data||typeof data!=='object'||Array.isArray(data)||(data.ParsedResults!=null&&!Array.isArray(data.ParsedResults)))throw new Error('OCR_INVALID_SCHEMA: OCR.Space returned an invalid response.');
   if (data.IsErroredOnProcessing) {
-    const msg = Array.isArray(data.ErrorMessage) ? data.ErrorMessage.join(' ') : data.ErrorMessage;
-    throw new Error(msg || 'OCR processing failed.');
+    const reason=JSON.stringify([data.ErrorMessage,data.ErrorDetails]);
+    if(/invalid.{0,20}(?:api.?key|key)|(?:api.?key|key).{0,20}invalid|unauthori/i.test(reason))throw new Error(providerHttpError_('ocr',401));
+    if(/rate.?limit|quota|request.{0,15}limit|maximum.{0,20}requests/i.test(reason))throw new Error(providerHttpError_('ocr',429));
+    if(/file.{0,10}size|too.large/i.test(reason))throw new Error(providerHttpError_('ocr',413));
+    throw new Error('OCR_PROCESSING: OCR.Space could not process this image. Check image quality, provider quota and key configuration.');
   }
-  const text = (data.ParsedResults || []).map(r=>r.ParsedText || '').join('\n').trim();
+  const text = (data.ParsedResults || []).map(r=>r&&typeof r.ParsedText==='string'?r.ParsedText:'').join('\n').trim();
   return {text:text, fields:parseDeviceText_(text)};
 }
 
@@ -1200,15 +1266,8 @@ function interpretOcrFields_(ocrText,baseFieldsJson,user){
     max_output_tokens:1200,
     text:{format:{type:'json_schema',name:'assethub_label',strict:true,schema:{type:'object',additionalProperties:false,properties:properties,required:names.concat(['confidence'])}}}
   };
-  const res=UrlFetchApp.fetch('https://api.groq.com/openai/v1/responses',{
-    method:'post',contentType:'application/json',muteHttpExceptions:true,
-    headers:{Authorization:'Bearer '+apiKey},payload:JSON.stringify(payload)
-  });
-  if(res.getResponseCode()<200||res.getResponseCode()>=300) throw new Error('AI mapping unavailable (HTTP '+res.getResponseCode()+'). Use OCR results manually.');
-  const body=JSON.parse(res.getContentText());
-  const output=(body.output||[]).flatMap(o=>o.content||[]).find(c=>c.type==='output_text');
-  if(!output||!output.text) throw new Error('AI returned no structured mapping.');
-  const parsed=JSON.parse(output.text);
+  const parsed=groqResponseJson_(payload,apiKey);
+  if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new Error('AI_INVALID_SCHEMA: Groq returned an invalid mapping.');
   // Keep exact identifiers only if present in OCR evidence. The AI cannot fabricate or silently alter them.
   const compact=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
   const source=compact(raw);
@@ -3382,7 +3441,7 @@ function json_(obj){ return ContentService.createTextOutput(JSON.stringify(obj))
 
 // V2.7 universal OCR interpreter. This does not modify records; saving remains
 // through explicit create/reconcile paths. All output is evidence-constrained.
-function interpretUniversalOcr_(ocrText,baseFieldsJson,sourceImage,user){
+function interpretUniversalOcr_(ocrText,baseFieldsJson,sourceImage,user,options){
   if(!roleAtLeast_(user,'STAFF'))throw new Error('AUTH_REQUIRED');
   const key=String(SCRIPT_PROPERTIES.getProperty('GROQ_API_KEY')||'').trim();
   if(!key)throw new Error('AI_MAPPING_NOT_CONFIGURED');
@@ -3390,15 +3449,17 @@ function interpretUniversalOcr_(ocrText,baseFieldsJson,sourceImage,user){
   if(raw.length<8)throw new Error('NOT_ENOUGH_OCR_TEXT');
   const prior=parseJsonObject_(baseFieldsJson);
   const source=String(sourceImage||'image_01').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,45)||'image_01';
-  const actor=String(user.username||user.user_id||'staff').slice(0,50);
-  const limitKey='ocr_ai_v27_'+Utilities.base64EncodeWebSafe(actor).slice(0,60);
-  const lock=LockService.getScriptLock();lock.waitLock(5000);
-  try{
-    const cache=CacheService.getScriptCache();
-    const count=Number(cache.get(limitKey)||0);
-    if(count>=30)throw new Error('AI_RATE_LIMIT_LOCAL: Use OCR fields or retry later.');
-    cache.put(limitKey,String(count+1),3600);
-  }finally{lock.releaseLock();}
+  if(!options?.diagnostic){
+    const actor=String(user.username||user.user_id||'staff').slice(0,50);
+    const limitKey='ocr_ai_v27_'+Utilities.base64EncodeWebSafe(actor).slice(0,60);
+    const lock=LockService.getScriptLock();lock.waitLock(5000);
+    try{
+      const cache=CacheService.getScriptCache();
+      const count=Number(cache.get(limitKey)||0);
+      if(count>=30)throw new Error('AI_RATE_LIMIT_LOCAL: Use OCR fields or retry later.');
+      cache.put(limitKey,String(count+1),3600);
+    }finally{lock.releaseLock();}
+  }
   const entry={type:'object',additionalProperties:false,properties:{
     name:{type:'string'},value:{type:'string'},evidence:{type:'string'},status:{type:'string',enum:['supported','inferred','not_detected']}
   },required:['name','value','evidence','status']};
@@ -3433,20 +3494,8 @@ function interpretUniversalOcr_(ocrText,baseFieldsJson,sourceImage,user){
     max_output_tokens:2300,
     text:{format:{type:'json_schema',name:'universal_assethub_v27',strict:true,schema:schema}}
   };
-  const response=UrlFetchApp.fetch('https://api.groq.com/openai/v1/responses',{
-    method:'post',contentType:'application/json',muteHttpExceptions:true,
-    headers:{Authorization:'Bearer '+key},payload:JSON.stringify(payload)
-  });
-  const http=response.getResponseCode();
-  if(http===429)throw new Error('AI_RATE_LIMIT_PROVIDER: Keep OCR results; try again later.');
-  if(http<200||http>=300)throw new Error('AI_HTTP_'+http+': OCR fallback available.');
-  let parsed;
-  try{
-    const answer=JSON.parse(response.getContentText());
-    const output=(answer.output||[]).flatMap(o=>o.content||[]).find(c=>c.type==='output_text');
-    parsed=JSON.parse(output.text);
-  }catch(_){throw new Error('AI_INVALID_JSON: OCR fallback available.');}
-  if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new Error('AI_INVALID_SCHEMA');
+  const parsed=groqResponseJson_(payload,key);
+  if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new Error('AI_INVALID_SCHEMA: Groq returned an invalid mapping. OCR fallback retained.');
   const result={version:'2.7',source_image:source,provider:'Groq',fields:{},identifiers:[],attributes:[],review_required:true};
   const norm=v=>String(v||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
   const compactRaw=norm(raw);
@@ -3471,7 +3520,7 @@ function interpretUniversalOcr_(ocrText,baseFieldsJson,sourceImage,user){
     }
     result.fields[field]={value:value,evidence:evidence,source_image:source,status:status};
   });
-  if(!Array.isArray(parsed.identifiers)||!Array.isArray(parsed.attributes))throw new Error('AI_INVALID_SCHEMA');
+  if(!Array.isArray(parsed.identifiers)||!Array.isArray(parsed.attributes))throw new Error('AI_INVALID_SCHEMA: Groq returned an invalid mapping. OCR fallback retained.');
   const types=['imei','imei2','mac','service_tag','part_number','regulatory_id','hardware_version','firmware_version','device_name','hostname','asset_id'];
   parsed.identifiers.slice(0,30).forEach(i=>{
     if(!i||typeof i!=='object')return;

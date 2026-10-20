@@ -7,6 +7,7 @@ function createHarness(options={}){
   const literal=value=>typeof value==='string'&&/^'\s*=/.test(value)?value.slice(1):value;
   class Sheet{
     constructor(name,headers=[]){this.name=name;this.cells=headers.length?[headers.slice()]:[];}
+    getName(){return this.name;}
     getLastRow(){return this.cells.length;}
     getLastColumn(){return Math.max(0,...this.cells.map(r=>r.length));}
     getDataRange(){return this.getRange(1,1,Math.max(1,this.getLastRow()),Math.max(1,this.getLastColumn()));}
@@ -31,9 +32,9 @@ function createHarness(options={}){
     }
     getRangeList(addresses){return {setValue:value=>{for(const address of addresses){const m=address.match(/^([A-Z]+)(\d+)$/);let col=0;for(const c of m[1])col=col*26+c.charCodeAt(0)-64;this.getRange(Number(m[2]),col).setValue(value);}}};}
   }
-  const ss={getSheetByName:name=>sheets.get(name)||null,insertSheet(name){const sheet=new Sheet(name);sheets.set(name,sheet);return sheet;}};
-  const cache={get(){return null;},put(){},remove(){}};
-  const context={console,URL,PropertiesService:{getScriptProperties:()=>({getProperty:k=>({SPREADSHEET_ID:'test-only-sheet',DRIVE_FOLDER_ID:'test-only-folder'}[k]||'')})},SpreadsheetApp:{openById:()=>ss},CacheService:{getScriptCache:()=>cache},LockService:{getScriptLock:()=>({waitLock(){if(locked)throw new Error('Nested lock');locked=true;},releaseLock(){locked=false;}})},Utilities:{getUuid:()=>crypto.randomUUID(),DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},computeDigest:(_,value)=>crypto.createHash('sha256').update(String(value)).digest(),base64Encode:value=>Buffer.from(value).toString('base64')},UrlFetchApp:{fetch(){throw new Error('Network calls forbidden in the spreadsheet harness');}}};
+  const ss={getSheets:()=>[...sheets.values()],getSheetByName:name=>sheets.get(name)||null,insertSheet(name){const sheet=new Sheet(name);sheets.set(name,sheet);return sheet;}};
+  const cached=new Map(),cache={get(key){const item=cached.get(key);return item&&item.expires>Date.now()?item.value:null;},put(key,value,seconds=600){cached.set(key,{value,expires:Date.now()+seconds*1000});},remove(key){cached.delete(key);}};
+  const context={console,URL,PropertiesService:{getScriptProperties:()=>({getProperty:k=>({SPREADSHEET_ID:'test-only-sheet',DRIVE_FOLDER_ID:'test-only-folder',...(options.properties||{})}[k]||'')})},SpreadsheetApp:{openById:()=>ss},CacheService:{getScriptCache:()=>cache},LockService:{getScriptLock:()=>({waitLock(){if(locked)throw new Error('Nested lock');locked=true;},releaseLock(){locked=false;}})},Utilities:{getUuid:()=>crypto.randomUUID(),DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},computeDigest:(_,value)=>crypto.createHash('sha256').update(String(value)).digest(),base64Encode:value=>Buffer.from(value).toString('base64'),base64EncodeWebSafe:value=>Buffer.from(value).toString('base64url')},UrlFetchApp:{fetch(){throw new Error('Network calls forbidden in the spreadsheet harness');}}};
   vm.createContext(context);for(const file of ['Code.gs','AssetGroups.gs'])vm.runInContext(fs.readFileSync(path.resolve(__dirname,'../../apps-script',file),'utf8'),context,{filename:file});
   const schema=JSON.parse(vm.runInContext('JSON.stringify(SCHEMA)',context));
   Object.entries(schema).forEach(([name,headers])=>{if(options.grouping===false&&name==='AssetBatches')return;sheets.set(name,new Sheet(name,options.grouping===false&&name==='Assets'?headers.filter(h=>!['set_id','set_name'].includes(h)):headers));});

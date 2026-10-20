@@ -17,7 +17,7 @@
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
   const APP_VERSION = '2.7';
-  const BUILD_ID = '2.7-fast-entry-1';
+  const BUILD_ID = '2.7-connection-checks-1';
   const ASSET_BASE_URL = 'https://assets.jcpmalaysia.com/';
   const CACHE_BOOT = 'jcp_assethub_cache_boot_v1';
   const CACHE_ASSETS = 'jcp_assethub_cache_assets_v1';
@@ -149,10 +149,13 @@
     if(!btn||!dot||!text)return;
     const active=state.passiveJobs>0;
     btn.classList.toggle('passive-sync',active);
-    if(active){dot.className='system-status-dot checking';text.textContent='Syncing';return;}
-    const status=state.diagnostics?.status || (navigator.onLine?'online':'warning');
+    const health=connectionHealth.summary();
+    const status=navigator.onLine?health.status:'issues';
     dot.className='system-status-dot '+status;
-    text.textContent=status==='online'?'Online':status==='warning'?'Warning':status==='issues'?'Issues':'Checking';
+    text.textContent=!navigator.onLine?'Offline':active?'Syncing':health.text;
+    btn.title=!navigator.onLine?'Device reports offline':health.message||'System connection checks';
+    const scanButton=$('scannerConnectionBtn');
+    if(scanButton){scanButton.title=btn.title;scanButton.classList.toggle('passive-sync',active);$('scannerConnectionDot').className=dot.className;$('scannerConnectionText').textContent=text.textContent;}
   }
   function beginPassiveSync(){state.passiveJobs++;renderPassiveSync();}
   function endPassiveSync(){state.passiveJobs=Math.max(0,state.passiveJobs-1);renderPassiveSync();}
@@ -210,6 +213,7 @@
     try{
       const r=await AssetAPI.get('sync',{since:state.sync.lastCursor||''});
       const d=r.sync||{};
+      if(typeof d.ai_ocr_enabled==='boolean')state.boot={...(state.boot||{}),ai_ocr_enabled:d.ai_ocr_enabled};
       if(d.features){state.boot={...(state.boot||{}),features:d.features};cacheWrite(CACHE_BOOT,safeBootCache(state.boot));}
       const openAssetChanged=!!state.openAssetId&&(d.assets||[]).some(a=>String(a.asset_id)===String(state.openAssetId));
       const assets=(d.assets||[]).map(a=>{markDetailStaleFromSummary(a);return publicAssetSummary(a);});
@@ -240,6 +244,7 @@
       }
       markSyncCursor(d.server_time||new Date().toISOString());
       state.sync.lastCompleted=Date.now();
+      connectionEvent('api',{state:'ok',message:'Backend sync request succeeded.',evidence:'request'});
       await persistPublicData();
       renderCurrentData();
       if(openAssetChanged&&state.openAssetId){
@@ -249,6 +254,7 @@
       return d;
     }catch(err){
       console.warn('Background sync failed',err);
+      connectionEvent('api',{state:'error',message:humanError(err),evidence:'request'});
       updateSystemStatus({status:navigator.onLine?'warning':'offline'});
       return null;
     }finally{
@@ -324,6 +330,15 @@
       USER_DISABLED:'This account is disabled.',
       API_NOT_CONFIGURED:'Apps Script connection is not configured.',
       INVALID_API_URL:'The Apps Script Web App URL is invalid.',
+      AI_RATE_LIMIT_PROVIDER:'Groq rate limit or quota reached. Keep OCR results and retry later.',
+      AI_RATE_LIMIT_LOCAL:'This account reached its hourly AI mapping limit. OCR remains available.',
+      AI_OUTPUT_LIMIT:'Groq reached the response output limit before finishing. OCR results are retained.',
+      AI_MAPPING_NOT_CONFIGURED:'Groq is not configured in Apps Script. OCR results are retained.',
+      AI_AUTH:'Groq rejected the configured key or its access permissions.',
+      AI_MODEL_UNAVAILABLE:'The configured Groq model is unavailable. Ask the administrator to check the model setting.',
+      AI_SCHEMA_REJECTED:'Groq could not produce the required structured output. OCR results are retained.',
+      AI_REQUEST_REJECTED:'Groq rejected the request, model or structured-output settings. Ask the administrator to run the AI connection test.',
+      AI_TRANSPORT:'Groq could not be reached or timed out. OCR results are retained.',
       REQUEST_TIMEOUT:'Apps Script took too long to respond. Cached data remains usable; try Sync Now again.'
     };
     for(const [key,msg] of Object.entries(map)) if(raw.includes(key)) return msg;
@@ -582,6 +597,7 @@
     document.addEventListener('click',e=>{ if(!e.target.closest('.profile-btn')&&!e.target.closest('.profile-menu')) $('profileMenu').classList.remove('open'); });
     $('apiSettingsBtn').addEventListener('click',()=>withAccess('ADMIN',()=>openApiSetup(false)));
     $('systemStatusBtn').addEventListener('click',openSystemDiagnostics);
+    $('scannerConnectionBtn').addEventListener('click',openSystemDiagnostics);
     $('signInBtn').addEventListener('click',()=>openLogin({reason:'Sign in for Staff/Admin actions such as editing, moving, maintenance and system setup.'}));
     $('logoutBtn').addEventListener('click',logout);
     $('adminToggle').addEventListener('click',toggleAdminMode);
@@ -667,61 +683,116 @@
     wrap.classList.add('hidden');wrap.classList.remove('locked');$('modalBody').innerHTML='';document.body.classList.remove('modal-open');
     $('modalCloseBtn').classList.remove('hidden');state.modalRestoreFocus?.focus?.();state.modalRestoreFocus=null;
   }
+  let connectionProtocol=0,connectionRun=0,connectionPanelBusy=false,providerChecksBusy=false;
+  const connectionHealth=ConnectionStatus.create({onChange:()=>{
+    renderPassiveSync();
+    if($('diagnosticBody'))renderConnectionPanel();
+  }});
+  function connectionEvent(id,value){connectionHealth.record(id,{...value,checked_at:new Date().toISOString()});}
   function updateSystemStatus(diag){
     state.diagnostics=diag||null;
-    const dot=$('systemStatusDot'), text=$('systemStatusText');
-    const status=diag?.status || 'checking';
-    dot.className='system-status-dot '+status;
-    text.textContent=status==='online'?'Online':status==='warning'?'Warning':status==='issues'?'Issues':'Checking';
+    if(diag?.status==='online'&&!diag.components)connectionEvent('api',{state:'ok',message:'A recent backend request succeeded.',evidence:'request'});
+    renderPassiveSync();
   }
-
-  function diagnosticsHtml(diag){
-    const c=diag?.components||{};
-    const order=['api','version','sheets','drive','ocr','ai','auth'];
-    const backendRows=order.map(k=>{
-      const x=c[k]||{ok:false,label:k,message:'Not tested'};
-      const cls=x.warning?'warn':(x.ok?'ok':'bad');
-      return `<div class="diag-row ${cls}"><span class="diag-icon"></span><div><b>${esc(x.label||k)}</b><small>${esc(x.message||'')}</small></div></div>`;
+  function diagnosticsHtml(){
+    const rows=Object.values(connectionHealth.snapshot().components),names={ok:'Verified',error:'Failed',warning:'Needs attention',not_tested:'Not tested',disabled:'Not configured',info:'Information',checking:'Checking'};
+    const rowsHtml=rows.map(row=>{
+      const cls=row.state==='checking'?'checking':row.state==='error'?'bad':row.state==='ok'&&!row.stale?'ok':row.state==='warning'||row.state==='disabled'||row.stale?'warn':'neutral';
+      const stamp=row.checked_at?new Date(row.checked_at).toLocaleTimeString('en-MY',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'';
+      const when=stamp?`${row.evidence==='configuration'?'Configuration checked':row.cached?'Cached test from':'Last checked'} ${stamp}${row.elapsed_ms!=null?' · '+Math.round(row.elapsed_ms)+' ms':''}`:'';
+      return `<div class="diag-row ${cls}" data-connection="${esc(row.id)}" data-state="${esc(row.state)}"><span class="diag-icon" aria-hidden="true"></span><div><div class="diag-row-title"><b>${esc(row.label)}</b><span class="diag-state">${row.stale&&row.state==='ok'?'Stale result':names[row.state]}</span></div><small>${esc(row.message)}</small>${when?`<small>${esc(when)}${row.stale?' · Recheck this result.':''}</small>`:''}</div></div>`;
     }).join('');
-    const codeOk=('BarcodeDetector' in window)||!!window.ZXing;
     const timing=AssetAPI.getLastTiming?.();
-    const latencyRow=timing?`<div class="diag-row ${timing.ms<=2000?'ok':timing.ms<=5000?'warn':'bad'}"><span class="diag-icon"></span><div><b>Last API response</b><small>${esc(timing.action)} · ${esc(timing.ms)} ms${timing.transport?' · '+esc(timing.transport):''}${timing.ms>5000?' · slow':timing.ms>2000?' · usable but slower than ideal':''}</small></div></div>`:'';
-    const lastSync=state.sync.lastCompleted?new Date(state.sync.lastCompleted).toLocaleTimeString('en-MY',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'Not synced yet';
-    const cacheRow=`<div class="diag-row ok"><span class="diag-icon"></span><div><b>Browser cache</b><small>IndexedDB + in-memory state · last sync ${esc(lastSync)}</small></div></div>`;
-    const frontendRows=`${latencyRow}${cacheRow}<div class="diag-row ${codeOk?'ok':'warn'}"><span class="diag-icon"></span><div><b>Barcode / QR reader</b><small>${codeOk?('Available via '+(('BarcodeDetector' in window)?'browser BarcodeDetector':'ZXing fallback')):'Native code reading unavailable. Image OCR still works; ZXing fallback loads separately.'}</small></div></div><div class="diag-row ${window.QRCode?'ok':'warn'}"><span class="diag-icon"></span><div><b>QR label generator</b><small>${window.QRCode?'QRCode library loaded':'QR helper is still loading or unavailable. Reopen the QR label after connection is stable.'}</small></div></div>`;
-    return `<div class="diag-list">${backendRows}${frontendRows}</div>`;
+    const latency=timing?`<p class="diag-note">Last API request: ${esc(timing.action)} · ${esc(timing.ms)} ms · ${timing.ok?'succeeded':'failed'}${timing.ms>5000?' · slow':''}. This is one request, not a check of every service.</p>`:'';
+    return `<div class="diag-list">${rowsHtml}</div>${latency}`;
   }
-
-  async function runDiagnostics(silent=false){
-    if(!AssetAPI.getUrl()){
-      const diag={status:'issues',components:{api:{ok:false,label:'Apps Script API',message:'No /exec URL configured.'},version:{ok:true,label:'Frontend',message:'Frontend '+APP_VERSION},sheets:{ok:false,label:'Google Sheets',message:'Not tested'},drive:{ok:false,label:'Google Drive',message:'Not tested'},ocr:{ok:false,label:'OCR API',message:'Not tested'},auth:{ok:true,label:'Access control',message:'Guest read + add available'}}};
-      updateSystemStatus(diag);
-      return diag;
-    }
-    try{
-      const r=await AssetAPI.get('diagnostics',{frontend_version:APP_VERSION},{publicCall:true});
-      updateSystemStatus(r.diagnostics);
-      return r.diagnostics;
-    }catch(err){
-      const diag={status:'issues',components:{api:{ok:false,label:'Apps Script API',message:humanError(err)},version:{ok:true,label:'Frontend',message:'Frontend '+APP_VERSION},sheets:{ok:false,label:'Google Sheets',message:'API unavailable'},drive:{ok:false,label:'Google Drive',message:'API unavailable'},ocr:{ok:false,label:'OCR API',message:'API unavailable'},auth:{ok:true,label:'Access control',message:'Guest read + add intended'}}};
-      updateSystemStatus(diag);
-      if(!silent) throw err;
-      return diag;
-    }
+  function providerTestsAllowed(){const c=connectionHealth.snapshot().components;return isAuthenticated()&&connectionProtocol===2&&c.api.state==='ok'&&c.auth.state==='ok';}
+  function renderConnectionPanel(){
+    const body=$('diagnosticBody');if(!body)return;
+    const rows=Object.values(connectionHealth.snapshot().components).filter(r=>!['ocr','ai'].includes(r.id));
+    const completed=rows.filter(r=>r.checked_at&&r.state!=='checking').length;
+    body.innerHTML=`<p class="diag-progress" role="status" aria-live="polite">${connectionPanelBusy?'Checking connections… ':''}${completed} / ${rows.length} local and backend results. OCR and AI have separate live tests.</p>${diagnosticsHtml()}`;
+    if($('diagRunBtn'))$('diagRunBtn').disabled=connectionPanelBusy||providerChecksBusy;
+    if($('diagProviderBtn'))$('diagProviderBtn').disabled=connectionPanelBusy||providerChecksBusy||!providerTestsAllowed();
+    if($('diagProviderNote'))$('diagProviderNote').textContent=!isAuthenticated()?'Sign in as Staff/Admin to test OCR and AI.':connectionProtocol!==2?'Live provider tests need the updated Apps Script backend.':!providerTestsAllowed()?'Verify the API connection and sign-in session before testing providers.':'Live tests use a built-in sample and provider quota. Results may be reused for up to 90 seconds. No asset is saved.';
   }
-
-  async function openSystemDiagnostics(){
-    openModal('System connection',`<div class="login-card"><div class="login-note">AssetHub checks each layer separately so a failure tells you exactly where to look.</div><div id="diagnosticBody"><div class="loading-inline"><span class="btn-spinner"></span>Running diagnostics...</div></div><div class="diag-actions"><button id="diagConnectionBtn" class="btn light">Connection Settings</button><button id="diagSyncBtn" class="btn light">Sync Now</button><button id="diagRunBtn" class="btn blue">Run Diagnostics</button></div></div>`,()=>{
-      const render=async()=>{
-        try{const d=await runDiagnostics(false);if($('diagnosticBody'))$('diagnosticBody').innerHTML=diagnosticsHtml(d);}catch(err){if($('diagnosticBody'))$('diagnosticBody').innerHTML=`<div class="empty-state compact">${esc(humanError(err))}</div>`;}
-      };
-      $('diagRunBtn').addEventListener('click',()=>withBusy($('diagRunBtn'),'Checking...',render));
+  async function runDiagnostics(){
+    const epoch=++connectionRun;connectionPanelBusy=true;renderConnectionPanel();
+    const localJobs=[
+      connectionHealth.run('storage',()=>window.AssetStore?.probe?.()||{state:'warning',message:'Storage checker is unavailable.'},{timeoutMs:4000,evidence:'device_test'}),
+      connectionHealth.run('local',async()=>{
+        const engine=await window.AssetInput?.ready();
+        return engine?.analyze('Brand: Ricoh\nModel: TEST-CHECK-01').fields.model?.value==='TEST-CHECK-01'?{state:'ok',message:'Local extraction passed a test without AI or a provider call.'}:{state:'warning',message:'Local recognition dictionary/parser could not pass its test. Manual entry remains available.'};
+      },{timeoutMs:4000,evidence:'device_test'}),
+      connectionHealth.run('qr',()=>{
+        if(!window.QRCode)return {state:'warning',message:'QR label library is unavailable. This is a local tool, not an API connection.'};
+        const target=document.createElement('div');new window.QRCode(target,{text:'JCP CONNECTION CHECK',width:48,height:48});
+        const canvas=target.querySelector('canvas');
+        const pixels=canvas?.getContext('2d')?.getImageData(0,0,canvas.width,canvas.height).data;
+        let light=false,dark=false;
+        for(let i=0;pixels&&i<pixels.length;i+=4){if(pixels[i+3]&&pixels[i]<64)dark=true;if(pixels[i+3]&&pixels[i]>192)light=true;}
+        return light&&dark?{state:'ok',message:'QR label library rendered a nonblank test image. Printed QR scanning was not tested.'}:{state:'warning',message:'QR label library loaded but did not render a nonblank test image.'};
+      },{timeoutMs:2000,evidence:'device_test'}),
+      connectionHealth.run('barcode',async()=>{
+        if(state.recognitionSession?.photos.some(photo=>photo.codeBusy))return {state:'not_tested',message:'A scan is already using the reader. Recheck after it finishes.'};
+        const response=await fetch('./assets/connection-check.png');if(!response.ok)throw new Error('Barcode test image is unavailable.');
+        const codes=await window.AssetCode?.scanAll?.(await response.blob(),{budgetMs:4000});
+        const found=codes?.find(c=>c.value==='JCP-CONNECTION-CHECK');
+        return found?{state:'ok',message:'Local test code decoded using '+found.engine+'. No camera or provider was used.'}:{state:'warning',message:'Local test code could not be decoded. OCR/manual entry remain available.'};
+      },{timeoutMs:6000,evidence:'device_test'})
+    ];
+    let response;
+    await connectionHealth.run('api',async()=>{
+      const r=await AssetAPI.get('diagnostics',{frontend_version:APP_VERSION,component:'api'});response=r.diagnostics;
+      if(!response?.components?.api?.ok)throw new Error('The backend did not return a valid diagnostic API result.');
+      return {...response.components.api,state:'ok',evidence:'response'};
+    });
+    if(epoch!==connectionRun)return null;
+    if(response){
+      connectionProtocol=response.diagnostics_version===2?2:0;
+      for(const [id,row]of Object.entries(response.components||{})){
+        if(id==='api')continue;
+        const provider=['ocr','ai'].includes(id);
+        connectionHealth.update(id,{...row,state:row.state||(provider?'not_tested':id==='auth'?'info':row.ok?'ok':'error'),evidence:row.evidence||(provider?'configuration':id==='auth'?'policy':'read'),message:provider&&!row.state?'Backend reports configuration only. Update Apps Script for a live provider test.':row.message});
+      }
+      if(connectionProtocol===2){
+        for(const id of ['sheets','drive'])localJobs.push(connectionHealth.run(id,async()=>{
+          const r=await AssetAPI.get('diagnostics',{component:id});const row=r.diagnostics?.components?.[id];
+          if(!row?.state)throw new Error('Backend did not return the requested check.');return row;
+        }));
+      }
+    }else{
+      for(const id of ['sheets','drive','auth'])connectionEvent(id,{state:'not_tested',message:'Not tested because the Apps Script API check failed.',evidence:'blocked'});
+      for(const id of ['ocr','ai'])connectionHealth.update(id,{state:'not_tested',message:'Provider health is unknown while the API is unavailable.',evidence:'configuration'});
+    }
+    await Promise.allSettled(localJobs);
+    if(epoch!==connectionRun)return null;
+    connectionPanelBusy=false;renderConnectionPanel();renderPassiveSync();
+    const diag=connectionHealth.snapshot();diag.ok=['api','version','sheets','drive'].every(id=>diag.components[id].state==='ok');
+    return diag;
+  }
+  async function testScanningConnections(){
+    if(providerChecksBusy||!providerTestsAllowed())return;
+    providerChecksBusy=true;renderConnectionPanel();
+    try{await Promise.allSettled(['ocr','ai'].map(id=>connectionHealth.run(id,async()=>{
+      const r=await AssetAPI.post('testScanConnection',{service:id});
+      if(!r.check?.state)throw new Error('Backend did not return a provider test result.');return r.check;
+    },{timeoutMs:48000,evidence:'provider_test'})));}
+    finally{providerChecksBusy=false;renderConnectionPanel();}
+  }
+  function openSystemDiagnostics(){
+    openModal('System connection',`<div class="login-card"><div class="login-note">Results appear as each check finishes. Configured keys and loaded libraries alone do not prove a working connection.</div><div class="diag-actions"><button id="diagRunBtn" class="btn blue">Check connections</button><button id="diagProviderBtn" class="btn blue">Test OCR & AI</button><button id="diagSyncBtn" class="btn light">Sync Now</button><button id="diagConnectionBtn" class="btn light">Connection Settings</button></div><p id="diagProviderNote" class="diag-note"></p><div id="diagnosticBody"></div></div>`,()=>{
+      state.modalCleanup=()=>{connectionRun++;connectionPanelBusy=false;connectionHealth.cancel();};
+      $('diagRunBtn').addEventListener('click',runDiagnostics);
+      $('diagProviderBtn').addEventListener('click',testScanningConnections);
       $('diagConnectionBtn').addEventListener('click',()=>withAccess('ADMIN',()=>openApiSetup(false)));
-      $('diagSyncBtn').addEventListener('click',()=>withBusy($('diagSyncBtn'),'Syncing...',async()=>{try{await backgroundSync('manual',{force:true});await render();toast('Sync finished.');}catch(err){toast(humanError(err),'error');}}));
-      withBusy($('diagRunBtn'),'Checking...',render);
-    },{size:'sm'});
+      $('diagSyncBtn').addEventListener('click',()=>withBusy($('diagSyncBtn'),'Syncing…',async()=>{
+        const result=await backgroundSync('manual',{force:true});
+        if(result){toast('Sync finished.');renderConnectionPanel();}else toast(navigator.onLine?'Sync did not complete. It failed or another sync is still running.':'Offline. Sync did not run.','error');
+      }));
+      void runDiagnostics();
+    },{size:'md'});
   }
-
   function showSetupRequired(){
     // No endpoint configured for a fresh device. Never request a deployment URL from a normal staff user.
     openModal('AssetHub connection unavailable', `<div class="login-card"><div class="login-note"><b>Configuration is required.</b> Ask the AssetHub administrator to set the production Apps Script endpoint in api-config.js before deploying this website. No asset data has been changed.</div><div class="modal-actions"><button id="setupRetryBtn" class="btn blue" type="button">Retry</button></div></div>`, ()=>{
@@ -740,6 +811,7 @@
           try{
             const ping=await AssetAPI.get('ping',{}, {publicCall:true});
             const d=await runDiagnostics(false);
+            if(!d||!$('apiTestStatus'))return;
             $('apiTestStatus').innerHTML=`<div class="login-note"><b>${esc(ping.message)}</b> · backend ${esc(ping.version||'unknown')}</div>${diagnosticsHtml(d)}`;
             if(d.ok){ wrapUnlock(); setAppLoading(true,'Loading AssetHub...'); await boot({closeModalAfter:false}); closeModal(); toast('Connection ready.'); }
           }catch(err){ AssetAPI.setUrl(previous); $('apiTestStatus').innerHTML=`<div class="diag-row bad"><span class="diag-icon"></span><div><b>Connection failed</b><small>${esc(humanError(err))}</small></div></div>`; }
@@ -2100,6 +2172,7 @@
     state.lastRecognition=null;
     state.scanFile=null;
     if(state.recognitionSession){state.recognitionSession.photos.forEach(x=>{x.codeAbort?.abort();try{URL.revokeObjectURL(x.url);}catch(_){}});state.recognitionSession=null;}
+    for(const id of ['ocr','ai']){const row=connectionHealth.snapshot().components[id];if(row.state==='checking'&&row.evidence==='scan')connectionEvent(id,{state:'not_tested',message:'Scan cancelled; the provider result was not confirmed.',evidence:'scan'});}
     setScannerBusy(false);
     if(state.cameraStream)setupBarcodeDetector(); else resetScannerPreview();
     setScannerStage('camera');
@@ -2139,12 +2212,12 @@
   function recognitionPhotos(){return recognitionState().photos.map(x=>x.file);}
   function recognitionStatusHtml(){
     const session=recognitionState();
-    const phases=[['captured','Captured'],['ocr','OCR read'],['ai','AI organized'],['matched','Matched']];
+    const phases=[['captured','Captured'],['ocr','OCR read'],['ai','AI mapping'],['matched','Asset matching']];
     const latest=session.photos[session.photos.length-1];
     return `<div class="v27-progress" role="status" aria-live="polite">${phases.map(([key,title])=>{
       const idx=phases.findIndex(p=>p[0]===key),done=latest?.steps?.[key]==='done',skipped=latest?.steps?.[key]==='skipped';
-      const busy=latest?.steps?.[key]==='busy';
-      return `<div class="v27-stage ${done?'complete':busy?'active':skipped?'skipped':''}"><span>${done?'✓':busy?'◌':skipped?'−':String(idx+1)}</span><small>${title}</small></div>`;
+      const busy=latest?.steps?.[key]==='busy',failed=latest?.steps?.[key]==='failed';
+      return `<div class="v27-stage ${done?'complete':busy?'active':failed?'failed':skipped?'skipped':''}" data-scan-step="${key}"><span>${done?'✓':busy?'◌':failed?'!':skipped?'−':String(idx+1)}</span><small>${failed?title+' failed':title}</small></div>`;
     }).join('')}</div>`;
   }
   function showUniversalRecognition(){
@@ -2175,7 +2248,7 @@
     const pendingTarget=state.scanUpdateTarget;
     $('scanResult').innerHTML=`<div class="result-card v27-result"><div class="recognition-badges"><span class="recognition-badge">Universal recognition V2.7</span><span class="recognition-badge">${sourceCount} photo${sourceCount===1?'':'s'}</span>${running?'<span class="recognition-badge warn">Processing · preliminary fields visible</span>':''}</div><strong>One asset · multiple evidence sources</strong>${recognitionStatusHtml()}
       <div class="v27-photo-strip">${photoHtml}</div><div class="v27-photo-actions"><button id="v27AddPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Choose from gallery</button><button id="v27CameraPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Take photo</button><button id="v27Reset" class="btn light sm" type="button">${running?'Cancel recognition':'Start new asset'}</button></div>
-      ${errors}${conflictHtml}
+      ${errors}${session.matchWarning?`<div class="scan-warning">${esc(session.matchWarning)}</div>`:''}${conflictHtml}
       ${barcodeHtml}
       <div class="v27-core"><h4>Review the main information</h4><div class="v27-fields">${core}</div></div>
       ${idRows?`<details class="v27-evidence-block" open><summary>Additional identifiers (${proposal.identifiers.length})</summary><div class="v27-table-wrap"><table><thead><tr><th>Type</th><th>Value</th><th>Source</th></tr></thead><tbody>${idRows}</tbody></table></div></details>`:''}
@@ -2263,7 +2336,8 @@
       session.matches=candidates.filter(m=>AssetGroups.matchKind(m,incoming)!=='different_unit');
       session.relatedModels=candidates.filter(m=>AssetGroups.matchKind(m,incoming)==='different_unit');
       showUniversalRecognition();
-    }catch(err){console.warn('Optional match suggestions unavailable',err);}
+      session.matchWarning='';return 'done';
+    }catch(err){session.matchWarning='Existing-asset check failed. Review identifiers before creating a new record. '+humanError(err);console.warn('Optional match suggestions unavailable',err);return 'failed';}
   }
   async function processScanFile(file){
     if(!file)return;
@@ -2288,35 +2362,42 @@
         if(state.recognitionSession===session)showUniversalRecognition();
       });
       const inputEngine=await window.AssetInput?.ready();
-      let ocr;
+      let ocr,ocrSubmitted=false;
       try{
         const image=await AssetImage.prepareForOcr(file);
+        if(state.recognitionSession!==session)return;
+        connectionHealth.record('ocr',{state:'checking',message:'Reading the latest scan image…',checked_at:null,evidence:'scan'});
+        ocrSubmitted=true;
         const answer=await AssetAPI.post('ocr',{image});ocr=answer.result;
-      }catch(err){item.error='OCR unavailable: '+humanError(err)+'. Retake or enter manually.';}
+        if(state.recognitionSession===session)connectionEvent('ocr',{state:ocr?.text?'ok':'warning',message:ocr?.text?'OCR.Space returned text for the latest scan. Extraction still requires review.':'OCR.Space replied but found no usable text in this image.',evidence:'scan'});
+      }catch(err){item.steps.ocr='failed';item.error='OCR unavailable: '+humanError(err)+'. Retake or enter manually.';if(state.recognitionSession===session)connectionEvent('ocr',{state:ocrSubmitted?'error':'not_tested',message:ocrSubmitted?humanError(err):'Image preparation failed; OCR.Space was not contacted.',evidence:'scan'});}
       if(state.recognitionSession!==session)return;
       if(ocr?.text){
         item.ocr=ocr;item.observation=window.AssetRecognition.fromOcr(ocr,item.id,inputEngine?.analyze(ocr.text,{categories:state.refs.categories}));
         if(!inputEngine)item.warning='Local recognition data is unavailable; review OCR suggestions carefully.';
         item.steps.ocr='done';
-      }else item.steps.ocr='skipped';
+      }else if(item.steps.ocr!=='failed')item.steps.ocr='skipped';
       // Partial fields appear now, without waiting for Groq.
       item.steps.ai=ocr?.text && state.boot?.ai_ocr_enabled && isAuthenticated()?'busy':'skipped';
+      if(ocr?.text&&item.steps.ai==='skipped')item.warning=!isAuthenticated()?'AI was not run: sign in as Staff/Admin. OCR results are retained.':'AI was not run: Groq is not configured. OCR results are retained.';
       showUniversalRecognition();
       if(item.steps.ai==='busy'){
+        connectionHealth.record('ai',{state:'checking',message:'Mapping the latest OCR text…',checked_at:null,evidence:'scan'});
         try{
           const r=await AssetAPI.post('interpretOcrUniversal',{text:ocr.text,base_fields_json:JSON.stringify(ocr.fields||{}),source_image:item.id});
           if(state.recognitionSession!==session)return;
+          if(!r.result?.fields||typeof r.result.fields!=='object'||Array.isArray(r.result.fields))throw new Error('AI_INVALID_SCHEMA: Groq returned no valid field mapping.');
           item.ai={...r.result,attributes:(r.result?.attributes||[]).map(a=>inputEngine?inputEngine.canonicalAttribute(a):a)};
           item.observation=window.AssetRecognition.attachAi(item.observation,item.ai,(field,value)=>inputEngine?.canonical(field,value,{categories:state.refs.categories})||'');
           item.steps.ai='done';
-        }catch(err){item.steps.ai='skipped';item.warning='Groq unavailable; OCR fallback retained ('+humanError(err)+').';}
+          connectionEvent('ai',{state:'ok',message:'Groq returned a structured mapping for the latest scan. Fields still require evidence review.',evidence:'scan'});
+        }catch(err){if(state.recognitionSession!==session)return;item.steps.ai='failed';item.warning='Groq unavailable; OCR fallback retained ('+humanError(err)+').';connectionEvent('ai',{state:'error',message:humanError(err),evidence:'scan'});}
         showUniversalRecognition();
       }
       await codePromise;
       if(state.recognitionSession!==session)return;
       item.steps.matched='busy';showUniversalRecognition();
-      await updateUniversalMatches();
-      item.steps.matched='done';
+      item.steps.matched=await updateUniversalMatches()||'skipped';
     }finally{
       item.processing=false;if(state.recognitionSession===session){setScannerBusy(false);showUniversalRecognition();}
     }
@@ -2503,7 +2584,7 @@
   }
   async function renderDashboardAfterRefresh(){ scheduleSync('dashboard',20); }
 
-  function monitorOnline(){ const paint=()=>{$('offlineBar').classList.toggle('hidden',navigator.onLine);};window.addEventListener('online',()=>{paint();backgroundSync('online',{force:true});});window.addEventListener('offline',paint);paint(); }
+  function monitorOnline(){ const paint=()=>{$('offlineBar').classList.toggle('hidden',navigator.onLine);renderPassiveSync();};window.addEventListener('online',()=>{paint();backgroundSync('online',{force:true});});window.addEventListener('offline',paint);paint(); }
   async function checkRemoteVersion(){
     try{const r=await fetch(`./version.json?t=${Date.now()}`,{cache:'no-store'});const v=await r.json();state.latestVersion=v;const available=!!v.version&&(v.version!==APP_VERSION||(v.build&&v.build!==BUILD_ID));$('updateBtn').classList.toggle('hidden',!available);if(available)$('updateBtn').title=`Update ${APP_VERSION} → ${v.build||v.version}`;}
     catch(err){console.warn('Version check failed',err);}

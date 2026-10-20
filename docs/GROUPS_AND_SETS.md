@@ -2,7 +2,8 @@
 
 Build `2.7-asset-groups-1`, based on merged main `b960205`. API version stays
 `2.7`; write support is advertised separately by `features.asset_groups`.
-This feature is not deployed. Production remains `2.7-still-barcodes-1`.
+Included in production build `2.7-fast-entry-1`, released on 2026-10-20.
+The owner deployed the grouping backend before the Hosting release.
 
 ## Staff workflow and identity rules
 

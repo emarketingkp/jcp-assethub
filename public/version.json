@@ -1,7 +1,7 @@
 {
   "version": "2.7",
-  "build": "2.7-fast-entry-1",
+  "build": "2.7-connection-checks-1",
   "released": "2026-10-20",
-  "name": "Faster register and multiple-item entry",
-  "notes": "Cached search and sorting, compact broad searches, overlapping startup reads, component suggestions and serial-list entry. Uses the existing grouping backend."
+  "name": "Progressive connection checks and visible AI failures",
+  "notes": "Separate verified checks for backend reads and device tools, explicit OCR/Groq tests, visible scan failures and refreshed AI configuration. Live provider tests require the updated Code.gs."
 }
