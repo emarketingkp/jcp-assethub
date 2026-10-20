@@ -29,6 +29,7 @@ test('browser regressions on mobile and desktop',async t=>{
     await context.exposeFunction('__assetBatchBridge',params=>({result:backend.request(params),assets:backend.read('Assets')}));
     await context.addInitScript(({options,categories})=>{
       window.__mockOptions=options;window.__fixtureCategories=categories;
+      if(options.disableIDB)Object.defineProperty(window,'indexedDB',{value:undefined});
       // Native capture is exercised with a file fixture, without granting real camera access.
       navigator.mediaDevices.getUserMedia=async()=>{throw new Error('No physical camera in automated tests');};
     },{options,categories:data.categories.map(r=>({category_id:r.categoryId,name:r.name,active:true}))});
@@ -287,6 +288,75 @@ test('browser regressions on mobile and desktop',async t=>{
         });
         console.log('1000-asset search and layout milliseconds at 4x CPU slowdown:',JSON.stringify(result));
         assert(result.p95<150,'Search exceeded the 150 ms p95 budget');assert.equal(result.calls,0);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('connection results appear independently and configured providers are never reported verified',async()=>{
+      const {page,context,errors}=await start({diagDelayed:true,diagDriveFail:true});
+      try{
+        await page.locator('#systemStatusBtn').click();
+        await page.locator('[data-connection="api"][data-state="ok"]').waitFor();await page.locator('[data-connection="storage"][data-state="ok"]').waitFor();
+        await page.waitForFunction(()=>window.__mock.diagReleases.sheets&&window.__mock.diagReleases.drive);
+        assert.equal(await page.locator('[data-connection="drive"]').getAttribute('data-state'),'checking');
+        await page.evaluate(()=>window.__mock.diagReleases.sheets());await page.locator('[data-connection="sheets"][data-state="ok"]').waitFor();
+        assert.equal(await page.locator('[data-connection="drive"]').getAttribute('data-state'),'checking');
+        assert.equal(await page.locator('[data-connection="ai"]').getAttribute('data-state'),'not_tested');assert.equal(await page.evaluate(()=>window.__mock.calls.filter(c=>c.action==='testScanConnection').length),0);
+        await page.evaluate(()=>window.__mock.diagReleases.drive());await page.locator('[data-connection="drive"][data-state="error"]').waitFor();
+        await page.locator('[data-connection="barcode"][data-state="ok"]').waitFor();assert.match(await page.locator('[data-connection="barcode"]').textContent(),/ZXing WASM/);
+        await checkNoOverflow(page);await page.screenshot({path:path.resolve('test-results/mobile-connection-checks.png'),fullPage:true});assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('explicit OCR/AI tests update separately and a successful sync cannot hide AI quota failure',async()=>{
+      const {page,context,errors,backend}=await start({diagAiFail:true,diagProviderDelayed:true});
+      try{
+        await page.locator('#systemStatusBtn').click();await page.waitForFunction(()=>!document.querySelector('#diagProviderBtn').disabled);await page.locator('#diagProviderBtn').click();
+        await page.locator('[data-connection="ai"][data-state="error"]').waitFor();assert.match(await page.locator('[data-connection="ai"]').textContent(),/quota/);
+        assert.equal(await page.locator('[data-connection="ocr"]').getAttribute('data-state'),'checking');await page.evaluate(()=>window.__mock.providerReleases.ocr());await page.locator('[data-connection="ocr"][data-state="ok"]').waitFor();
+        await page.locator('#diagSyncBtn').click();await page.waitForFunction(()=>document.querySelector('#systemStatusText').textContent==='Issues');assert.equal(await page.locator('[data-connection="ai"]').getAttribute('data-state'),'error');
+        assert.equal(backend.read('Assets').length,0);assert.equal(backend.writes.length,0);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('Guest and legacy backends cannot run provider tests or report policy/configuration as a verified connection',async()=>{
+      for(const options of [{role:'GUEST'},{diagLegacy:true},{diagAuthFail:true}]){
+        const {page,context,errors}=await start(options,{width:1440,height:1000});
+        try{
+          await page.locator('#systemStatusBtn').click();await page.waitForFunction(()=>!document.querySelector('#diagRunBtn').disabled);
+          assert(await page.locator('#diagProviderBtn').isDisabled());assert.equal(await page.locator('[data-connection="auth"]').getAttribute('data-state'),options.diagAuthFail?'error':'info');
+          assert.equal(await page.locator('[data-connection="ai"]').getAttribute('data-state'),'not_tested');assert.equal(await page.evaluate(()=>window.__mock.calls.filter(c=>c.action==='testScanConnection').length),0);
+          await checkNoOverflow(page);assert.deepEqual(errors,[]);
+        }finally{await context.close();}
+      }
+    });
+    await t.test('blocked storage, empty QR render and offline/failed sync do not show false success',async()=>{
+      const {page,context,errors}=await start({failStartupSync:true});
+      try{
+        await page.evaluate(()=>{IDBObjectStore.prototype.put=()=>{throw new DOMException('Storage full','QuotaExceededError');};window.QRCode=class{constructor(){}};});
+        await page.locator('#systemStatusBtn').click();await page.locator('[data-connection="storage"][data-state="error"]').waitFor();await page.locator('[data-connection="qr"][data-state="warning"]').waitFor();
+        await page.locator('#diagSyncBtn').click();await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('Sync did not complete'));assert(!await page.locator('#toast').textContent().then(t=>t.includes('Sync finished')));
+        await context.setOffline(true);await page.waitForFunction(()=>document.querySelector('#systemStatusText').textContent==='Offline');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('storage fallback is tested and described accurately instead of claiming IndexedDB',async()=>{
+      const {page,context,errors}=await start({disableIDB:true});
+      try{
+        await page.locator('#systemStatusBtn').click();await page.locator('[data-connection="storage"][data-state="ok"]').waitFor();assert.match(await page.locator('[data-connection="storage"]').textContent(),/localStorage fallback/);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('late diagnostics cannot repaint a closed/replaced modal',async()=>{
+      const {page,context,errors}=await start({diagDelayed:true,role:'GUEST'});
+      try{
+        await page.locator('#systemStatusBtn').click();await page.waitForFunction(()=>window.__mock.diagReleases.drive);await page.locator('#modalCloseBtn').click();
+        await page.locator('#profileBtn').click();await page.locator('#signInBtn').click();assert.match(await page.locator('#modalTitle').textContent(),/Sign in/);
+        await page.evaluate(()=>{window.__mock.diagReleases.sheets();window.__mock.diagReleases.drive();});assert.equal(await page.locator('#diagnosticBody').count(),0);assert(await page.locator('#loginForm').isVisible());assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('cached AI configuration refreshes before scanning and real failures remain visible with OCR fallback',async()=>{
+      const {page,context,errors}=await start({ai:true,aiError:'AI_OUTPUT_LIMIT: Response incomplete',matchFail:true});
+      try{
+        await page.evaluate(()=>{const boot=JSON.parse(localStorage.getItem('jcp_assethub_cache_boot_v1'));boot.data.ai_ocr_enabled=false;localStorage.setItem('jcp_assethub_cache_boot_v1',JSON.stringify(boot));});
+        await page.reload();await page.waitForFunction(()=>window.__mock?.calls.some(c=>c.action==='sync')&&document.querySelector('#profileRole').textContent==='STAFF');await scan(page);
+        assert.equal(await page.evaluate(()=>window.__mock.calls.filter(c=>c.action==='interpretOcrUniversal').length),1);assert(await page.locator('[data-scan-step="ai"]').evaluate(el=>el.classList.contains('failed')));
+        assert(await page.locator('[data-scan-step="matched"]').evaluate(el=>el.classList.contains('failed')));assert.equal(await page.locator('[data-universal-field="brand"]').inputValue(),'Ricoh');assert.match(await page.locator('#scanResult').textContent(),/output limit/);
+        await page.locator('#scannerConnectionBtn').click();await page.waitForFunction(()=>!document.querySelector('#diagRunBtn').disabled);assert.equal(await page.locator('[data-connection="ai"]').getAttribute('data-state'),'error');assert.match(await page.locator('[data-connection="ai"]').textContent(),/output limit/);assert.deepEqual(errors,[]);
       }finally{await context.close();}
     });
     await t.test('real local decoder finds a warranty QR and linear identifier in the same image',async()=>{

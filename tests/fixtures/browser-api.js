@@ -7,6 +7,13 @@
   function cloneInitial(){return structuredClone(options.assets||[]);}
   const pixel='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jgE0AAAAASUVORK5CYII=';
   const clone=x=>structuredClone(x);
+  state.diagReleases={};state.providerReleases={};
+  const diagnosticReply=params=>{
+    const row=(label,state,message)=>({label,state,ok:state==='ok',message,checked_at:new Date().toISOString()});
+    const components={api:row('Apps Script API','ok','Backend replied.'),version:row('App version','ok','Frontend/backend compatible.'),auth:row('Session',options.diagAuthFail?'error':user.role==='GUEST'?'info':'ok',options.diagAuthFail?'Session expired.':user.role==='GUEST'?'Guest browsing.':'Active Staff session verified.'),ocr:{...row('OCR.Space','not_tested','Configured; provider request not tested.'),configured:true,evidence:'configuration'},ai:{...row('Groq AI','not_tested','Configured; model not tested.'),configured:true,evidence:'configuration'}};
+    if(params.component&&params.component!=='api')return {diagnostics:{diagnostics_version:2,components:{[params.component]:row(params.component,params.component==='drive'&&options.diagDriveFail?'error':'ok',params.component==='drive'&&options.diagDriveFail?'Drive read failed.':'Read verified; writes not tested.')}}};
+    return {diagnostics:options.diagLegacy?{components:{...Object.fromEntries(Object.entries(components).map(([id,row])=>[id,{ok:true,label:row.label,message:id==='auth'?'Guest/Staff/Admin policy':row.message}])),sheets:{ok:true,message:'Old read check'},drive:{ok:true,message:'Old read check'}}}:{diagnostics_version:2,components}};
+  };
   const startupReply=(action,result)=>{
     if(action==='sync'&&options.failStartupSync)throw new Error('Simulated initial sync outage');
     return options.delayStartup?new Promise(resolve=>{state[action+'Release']=()=>resolve(result);}):result;
@@ -15,16 +22,25 @@
   api.get=async(action,params={})=>{
     state.calls.push({action,params:clone(params)});
     if(action==='bootstrap')return startupReply(action,{success:true,version:'2.7',features:{asset_groups:options.grouping===false?0:1},user,references:clone(refs),dashboard:{},authenticated:user.role!=='GUEST',ai_ocr_enabled:!!options.ai});
-    if(action==='sync')return startupReply(action,{sync:{version:'2.7',features:{asset_groups:options.grouping===false?0:1},user,authenticated:user.role!=='GUEST',assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}});
-    if(action==='suggestMatchesV27')return {matches:clone(options.matches||[])};
+    if(action==='sync')return startupReply(action,{sync:{version:'2.7',ai_ocr_enabled:!!options.ai,features:{asset_groups:options.grouping===false?0:1},user,authenticated:user.role!=='GUEST',assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}});
+    if(action==='suggestMatchesV27'){if(options.matchFail)throw new Error('Matching service unavailable');return {matches:clone(options.matches||[])};}
     if(action==='listAssets')return {assets:clone(state.assets)};
     if(action==='getAsset')return {asset:clone(state.assets.find(a=>a.asset_id===params.asset_id))};
     if(action==='getImageData')return {data:{data_url:pixel}};
-    if(action==='diagnostics')return {diagnostics:{status:'online',components:{}}};
+    if(action==='diagnostics'){
+      if(options.diagDelayed&&['sheets','drive'].includes(params.component))return new Promise(resolve=>{state.diagReleases[params.component]=()=>resolve(diagnosticReply(params));});
+      return diagnosticReply(params);
+    }
     throw new Error('Unexpected mock GET: '+action);
   };
   api.post=async(action,params={})=>{
     state.calls.push({action,params:clone(params)});
+    if(action==='testScanConnection'){
+      if(user.role==='GUEST')throw new Error('AUTH_REQUIRED');
+      const result={check:{state:params.service==='ai'&&options.diagAiFail?'error':'ok',message:params.service==='ai'&&options.diagAiFail?'AI_RATE_LIMIT_PROVIDER: Groq quota reached.':'Built-in sample verified.',checked_at:new Date().toISOString(),evidence:'provider_test'}};
+      if(options.diagProviderDelayed&&params.service==='ocr')return new Promise(resolve=>{state.providerReleases.ocr=()=>resolve(result);});
+      return result;
+    }
     if(action==='saveAssetBatch'){
       const reply=await window.__assetBatchBridge(params);state.assets=reply.assets;
       if(state.loseBatchReply){state.loseBatchReply=false;sessionStorage.setItem('test-batch-reply-lost','1');throw new Error('Simulated lost reply after the real backend saved');}
@@ -36,6 +52,7 @@
       return result;
     }
     if(action==='interpretOcrUniversal'){
+      if(options.aiError)throw new Error(options.aiError);
       if(options.aiDelayed)return new Promise(resolve=>{state.aiRelease=()=>resolve({result:{fields:{brand:{value:'Ricoh',evidence:'Brand: Ricoh',status:'supported'}}}});});
       throw new Error('Simulated provider outage');
     }

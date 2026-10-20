@@ -1,8 +1,8 @@
-const CACHE = 'jcp-assethub-v2.7-fast-entry-1';
+const CACHE = 'jcp-assethub-v2.7-connection-checks-1';
 const CORE = [
   './','./index.html','./app.css','./store.js','./api-config.js','./api.js','./image.js','./code-scanner.js','./recognition-v27.js','./app.js',
   './manifest.webmanifest','./assets/icon-192.png','./assets/icon-512.png',
-  './photo-picker.js','./input-assist.js','./data/input-knowledge.json','./asset-groups.js','./group-entry.js'
+  './photo-picker.js','./input-assist.js','./data/input-knowledge.json','./asset-groups.js','./group-entry.js','./connection-status.js','./assets/connection-check.png'
 ];
 
 self.addEventListener('install', event => {
