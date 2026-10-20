@@ -37,7 +37,7 @@ test('browser regressions on mobile and desktop',async t=>{
     const page=await context.newPage(),errors=[];page.on('pageerror',err=>errors.push(err.message));
     page.setDefaultTimeout(7000);
     await page.goto(base);await page.waitForFunction(()=>window.AssetInput?.current&&window.__mock);
-    await page.locator('#appLoading').waitFor({state:'hidden'});
+    if(!options.delayStartup)await page.locator('#appLoading').waitFor({state:'hidden'});
     return {page,context,errors,backend};
   }
   async function scan(page){
@@ -198,6 +198,95 @@ test('browser regressions on mobile and desktop',async t=>{
         assert.match(await page.locator('#batchSaveStatus').textContent(),/internet connection/);assert.equal(backend.read('Assets').length,0);assert.equal(backend.read('AssetBatches').length,0);
         assert.equal(await page.evaluate(()=>localStorage.getItem('jcp_assethub_pending_group_v1:test-staff')),null);
         await context.setOffline(false);await page.locator('#batchSave').click();await page.locator('#modalWrap').waitFor({state:'hidden'});assert.equal(backend.read('Assets').length,2);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('cold startup overlaps reads and reuses its asset snapshot when opening the register',async()=>{
+      for(const first of ['bootstrap','sync']){
+        const {page,context,errors}=await start({delayStartup:true,assets:[stock('STARTUP-A'),stock('STARTUP-B')]});
+        try{
+          await page.waitForFunction(()=>window.__mock.bootstrapRelease&&window.__mock.syncRelease);
+          assert.deepEqual(await page.evaluate(()=>window.__mock.calls.map(c=>c.action).sort()),['bootstrap','sync']);
+          await page.evaluate(first=>window.__mock[first+'Release'](),first);
+          if(first==='bootstrap')await page.locator('#appLoading').waitFor({state:'hidden'});
+          else await page.evaluate(()=>window.__mock.bootstrapRelease());
+          await page.locator('[data-mobile-route="assets"]').click();
+          assert.equal(await page.evaluate(()=>window.__mock.calls.filter(c=>c.action==='listAssets').length),0);
+          if(first==='bootstrap')await page.evaluate(()=>window.__mock.syncRelease());
+          await page.waitForFunction(()=>document.querySelector('#assetScopeCount').textContent.includes('2 matching physical items'));
+          assert.equal(await page.evaluate(()=>window.__mock.calls.filter(c=>c.action==='listAssets').length),0);assert.deepEqual(errors,[]);
+        }finally{await context.close();}
+      }
+    });
+    await t.test('failed initial sync falls back to ordinary asset loading',async()=>{
+      const {page,context,errors}=await start({failStartupSync:true,assets:[stock('FALLBACK-A'),stock('FALLBACK-B')]});
+      try{
+        await page.locator('[data-mobile-route="assets"]').click();await page.waitForFunction(()=>document.querySelector('#assetScopeCount').textContent.includes('2 matching physical items'));
+        assert.equal(await page.evaluate(()=>window.__mock.calls.filter(c=>c.action==='listAssets').length),1);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('serial list import and keyboard navigation preserve identifiers and require review',async()=>{
+      const {page,context,errors,backend}=await start();
+      try{
+        await startSameBatch(page);await page.locator('.batch-paste summary').click();
+        await page.locator('#batchSerialList').fill('001O0I1234\n\n00012345678901234567890\n');await page.locator('#batchApplySerials').click();
+        assert.equal(await page.locator('#batchQuantity').inputValue(),'3');
+        const first=page.locator('[data-unit="0"][data-unit-field="serial"]'),second=page.locator('[data-unit="1"][data-unit-field="serial"]'),third=page.locator('[data-unit="2"][data-unit-field="serial"]');
+        assert.equal(await first.inputValue(),'001O0I1234');assert.equal(await second.inputValue(),'');assert.equal(await third.inputValue(),'00012345678901234567890');
+        assert(await first.evaluate(el=>document.activeElement===el));await checkNoOverflow(page);
+        await page.screenshot({path:path.resolve('test-results/mobile-fast-entry.png'),fullPage:true});
+        await first.press('Enter');assert(await second.evaluate(el=>document.activeElement===el));await third.press('Enter');
+        assert.equal(await page.locator('.group-review').count(),0);assert.equal(backend.read('Assets').length,0);
+        await page.locator('.batch-paste summary').click();await page.locator('#batchSerialList').fill('CHANGED');
+        page.once('dialog',dialog=>dialog.dismiss());await page.locator('#batchApplySerials').click();assert.equal(await first.inputValue(),'001O0I1234');
+        await page.locator('#batchSerialList').fill(Array(26).fill('TOO-MANY').join('\n'));await page.locator('#batchApplySerials').click();assert.match(await page.locator('#batchSerialListError').textContent(),/25 lines/);
+        await page.locator('#batchEntryForm [type="submit"]').click();assert(await page.locator('#batchSave').isDisabled());await page.locator('#batchConfirm').check();await page.locator('#batchSave').click();await page.locator('#modalWrap').waitFor({state:'hidden'});
+        assert.deepEqual(backend.read('Assets').map(a=>a.serial),['001O0I1234','','00012345678901234567890']);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('component suggestions use each component brand and never auto-fill another model',async()=>{
+      const assets=[stock('HP-1',{brand:'HP',model:'EXACT-HP-10'}),stock('RICOH-1',{brand:'Ricoh',model:'EXACT-RICOH-20'})];
+      const {page,context,errors}=await start({assets});
+      try{
+        await startSameBatch(page);const shared=page.locator('.group-common');await shared.locator('[data-batch-common="brand"]').fill('rico');
+        await shared.getByRole('button',{name:'Ricoh',exact:true}).click();assert.equal(await shared.locator('[data-batch-common="brand"]').inputValue(),'Ricoh');
+        await page.locator('#batchCancel').click();await page.locator('#addAssetGroupBtn').click();await page.locator('[data-batch-mode="set"]').click();await page.locator('#batchPcPreset').click();
+        const pc=page.locator('[data-unit-card="0"]'),monitor=page.locator('[data-unit-card="1"]');
+        await pc.locator('[data-unit-field="brand"]').fill('HP');await monitor.locator('[data-unit-field="brand"]').fill('Ricoh');
+        await pc.locator('[data-unit-field="model"]').fill('EXACT');await monitor.locator('[data-unit-field="model"]').fill('EXACT');
+        assert.equal(await pc.getByRole('button',{name:'EXACT-RICOH-20',exact:true}).count(),0);assert.equal(await monitor.getByRole('button',{name:'EXACT-HP-10',exact:true}).count(),0);
+        await monitor.getByRole('button',{name:'EXACT-RICOH-20',exact:true}).click();assert.equal(await pc.locator('[data-unit-field="model"]').inputValue(),'EXACT');
+        assert.equal(await monitor.locator('[data-unit-field="model"]').inputValue(),'EXACT-RICOH-20');await checkNoOverflow(page);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('broad search stays compact, exact results open, and synced edits invalidate cached search/sort',async()=>{
+      const assets=Array.from({length:100},(_,i)=>stock('JCP-AS-'+i,{model:'M-'+Math.floor(i/2),serial:'SN-'+i}));
+      const {page,context,errors}=await start({assets});
+      try{
+        await page.locator('[data-mobile-route="assets"]').click();await page.locator('#assetSearch').fill('Sample');assert.equal(await page.locator('.group-unit').count(),0);
+        await page.locator('#assetSearch').fill('SN-99');assert.equal(await page.locator('.group-unit').count(),1);
+        await page.locator('#assetSearch').fill('Sample');assert.equal(await page.locator('.group-unit').count(),0);
+        await page.locator('#assetGroupToggle').uncheck();await page.locator('#assetMobileSort').selectOption('device:asc');
+        await page.evaluate(()=>{window.__mock.assets[99].brand='AAA Changed';window.__mock.assets.push({...window.__mock.assets[0],asset_id:'NEW-SYNC',brand:'ZZZ Added',serial:'UNIQUE-NEW'});window.dispatchEvent(new Event('online'));});
+        await page.locator('#assetSearch').fill('AAA Changed');await page.waitForFunction(()=>document.querySelector('#assetList [data-asset]')?.dataset.asset==='JCP-AS-99');
+        await page.locator('#assetSearch').fill('');assert.equal(await page.locator('#assetList [data-asset]').first().getAttribute('data-asset'),'JCP-AS-99');
+        await page.locator('#assetSearch').fill('UNIQUE-NEW');assert.equal(await page.locator('#assetList [data-asset]').getAttribute('data-asset'),'NEW-SYNC');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('1000-asset search and layout stay within 150 ms p95 at 4x CPU slowdown',async()=>{
+      const assets=Array.from({length:1000},(_,i)=>stock('JCP-AS-'+i,{model:'M-'+Math.floor(i/4),serial:'SN-'+i}));
+      const {page,context,errors}=await start({assets});
+      try{
+        await page.locator('[data-mobile-route="assets"]').click();await page.locator('#assetMobileSort').selectOption('device:asc');
+        const cdp=await context.newCDPSession(page);await cdp.send('Emulation.setCPUThrottlingRate',{rate:4});
+        const result=await page.evaluate(()=>{
+          const input=document.querySelector('#assetSearch'),times=[],calls=window.__mock.calls.length;
+          for(let i=0;i<45;i++){
+            input.value=['Sample','M-1','SN-99','Test',''][i%5];const started=performance.now();input.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#assetList').getBoundingClientRect();if(i>=5)times.push(performance.now()-started);
+          }
+          times.sort((a,b)=>a-b);return {p50:times[20],p95:times[38],max:times[39],calls:window.__mock.calls.length-calls};
+        });
+        console.log('1000-asset search and layout milliseconds at 4x CPU slowdown:',JSON.stringify(result));
+        assert(result.p95<150,'Search exceeded the 150 ms p95 budget');assert.equal(result.calls,0);assert.deepEqual(errors,[]);
       }finally{await context.close();}
     });
     await t.test('real local decoder finds a warranty QR and linear identifier in the same image',async()=>{

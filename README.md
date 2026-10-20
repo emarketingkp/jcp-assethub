@@ -5,7 +5,7 @@ JCP AssetHub, a mobile-first asset management application built with Firebase Ho
 
 This repository includes the source from `JCP_AssetHub_V2_7_PREVIEW.zip`. The owner reports that V2.7 is deployed. The supplied archive has not been compared against that deployment; its original release documents describe the earlier preview status.
 
-Production Hosting was last updated on 2026-10-19 to build `2.7-still-barcodes-1`. This branch adds equipment sets, a grouped register and reviewed multiple-unit entry; it has not been deployed. See [grouping implementation and the owner's Apps Script rollout](docs/GROUPS_AND_SETS.md), [scanner changes and validation limits](docs/STILL_CAPTURE_AND_BARCODES.md), and [earlier input/photo implementation notes](docs/LOCAL_INPUT_AND_PHOTOS.md).
+Production Hosting was last updated on 2026-10-19 to build `2.7-still-barcodes-1` (confirmed by a read-only check on 2026-10-20). The grouping backend now advertises support; the corresponding frontend has not been deployed. This branch adds faster register searches and batch entry on top of the merged grouping work. See [performance measurements, entry changes and remaining limits](docs/PERFORMANCE_AND_FAST_ENTRY.md), [grouping implementation and the owner's Apps Script rollout](docs/GROUPS_AND_SETS.md), [scanner changes and validation limits](docs/STILL_CAPTURE_AND_BARCODES.md), and [earlier input/photo implementation notes](docs/LOCAL_INPUT_AND_PHOTOS.md).
 
 - `public/`: Firebase Hosting frontend.
 - `apps-script/`: Google Apps Script backend and manifest.

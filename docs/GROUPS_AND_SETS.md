@@ -158,6 +158,10 @@ changes during rollback and restore/review data from the backup if necessary.
 
 ## Validation and remaining limits
 
+Follow-up frontend optimizations and faster batch entry are documented in
+[PERFORMANCE_AND_FAST_ENTRY.md](PERFORMANCE_AND_FAST_ENTRY.md). Broad searches
+now keep groups compact; up to 25 matching physical items open automatically.
+
 Automated checks cover unique physical counts, set/model/incomplete group
 projection, different/missing/repeated serials, unknown models, variant separation,
 identity-free templates, actual backend batch creation, partial writes, lost

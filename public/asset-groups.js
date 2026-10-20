@@ -23,22 +23,25 @@
     return [...byId.values()];
   }
   function buildIndex(assets){
-    const all=uniqueAssets(assets),serials=new Map(),sets=new Map(),models=new Map(),unmarked=new Map();
+    const all=uniqueAssets(assets),byId=new Map(),searchText=new Map(),keys=new Map(),serials=new Map(),sets=new Map(),models=new Map(),unmarked=new Map(),modelTotals=new Map(),unmarkedTotals=new Map();
     for(const asset of all){
+      byId.set(asset.asset_id,asset);
+      searchText.set(asset.asset_id,[asset.asset_id,asset.category_name,asset.brand,asset.model,asset.serial,asset.site_name,asset.area_name,asset.assigned_to,asset.exact_location,asset.set_name,asset.set_id].join(' ').toLowerCase());
       const serial=serialKey(asset.serial);
       if(serial){if(!serials.has(serial))serials.set(serial,[]);serials.get(serial).push(asset.asset_id);}
       if(asset.set_id){if(!sets.has(asset.set_id))sets.set(asset.set_id,[]);sets.get(asset.set_id).push(asset);}
-      const key=modelKey(asset);if(key){if(!models.has(key))models.set(key,[]);models.get(key).push(asset);}
-      const unknown=unmarkedKey(asset);if(unknown){if(!unmarked.has(unknown))unmarked.set(unknown,[]);unmarked.get(unknown).push(asset);}
+      const key=modelKey(asset);if(key){if(!models.has(key))models.set(key,[]);models.get(key).push(asset);if(!asset.set_id)modelTotals.set(key,(modelTotals.get(key)||0)+1);}
+      const unknown=key?'':unmarkedKey(asset);if(unknown){if(!unmarked.has(unknown))unmarked.set(unknown,[]);unmarked.get(unknown).push(asset);if(!asset.set_id)unmarkedTotals.set(unknown,(unmarkedTotals.get(unknown)||0)+1);}
+      keys.set(asset.asset_id,{model:key,unmarked:unknown});
     }
-    return {all,serials,sets,models,unmarked};
+    return {all,byId,searchText,keys,serials,sets,models,unmarked,modelTotals,unmarkedTotals};
   }
   function project(rows,index,{grouped=true}={}){
     const entries=[],byGroup=new Map();
     for(const asset of uniqueAssets(rows)){
       let kind='asset',key=asset.asset_id;
       if(grouped&&asset.set_id){kind='set';key=asset.set_id;}
-      else if(grouped){const model=modelKey(asset),unknown=unmarkedKey(asset);if(model){kind='model';key=model;}else if(unknown){kind='unmarked';key=unknown;}}
+      else if(grouped){const cached=index.byId.get(asset.asset_id)===asset?index.keys.get(asset.asset_id):null,model=cached?cached.model:modelKey(asset),unknown=cached?cached.unmarked:unmarkedKey(asset);if(model){kind='model';key=model;}else if(unknown){kind='unmarked';key=unknown;}}
       const id=kind+':'+key;
       if(!byGroup.has(id)){const entry={key:id,kind,assets:[],total:0};byGroup.set(id,entry);entries.push(entry);}
       byGroup.get(id).assets.push(asset);
@@ -46,8 +49,8 @@
     for(const entry of entries){
       const first=entry.assets[0];
       if(entry.kind==='set')entry.total=index.sets.get(first.set_id)?.length||entry.assets.length;
-      else if(entry.kind==='model')entry.total=(index.models.get(modelKey(first))||[]).filter(a=>!a.set_id).length;
-      else if(entry.kind==='unmarked')entry.total=(index.unmarked.get(unmarkedKey(first))||[]).filter(a=>!a.set_id).length;
+      else if(entry.kind==='model')entry.total=index.modelTotals.get(entry.key.slice(6))||0;
+      else if(entry.kind==='unmarked')entry.total=index.unmarkedTotals.get(entry.key.slice(9))||0;
       else entry.total=1;
       if(['model','unmarked'].includes(entry.kind)&&entry.assets.length===1&&entry.total===1)entry.kind='asset';
     }
@@ -67,6 +70,14 @@
       const ids=index.serials.get(key);if(ids?.length)issues.push(`Item ${i+1}: serial already belongs to ${ids.join(', ')}. Choose the existing item instead.`);
     });return issues;
   }
+  function parseSerialList(value){
+    const lines=String(value??'').split(/\r\n|\r|\n/).map(text);
+    while(lines.length&&!lines[lines.length-1])lines.pop();
+    if(!lines.length)throw new Error('Paste at least one serial. Use the quantity field for items without serials.');
+    if(lines.length>25)throw new Error('Use up to 25 lines per batch.');
+    if(lines.some(line=>line.length>80))throw new Error('Each serial must be 80 characters or fewer. Paste one serial per line.');
+    return lines.map(serial=>({serial}));
+  }
   function matchKind(match,incoming){
     const asset=match.asset||{},serial=serialKey(incoming.serial),other=serialKey(asset.serial);
     if(serial&&serial===other)return 'identity';
@@ -74,5 +85,5 @@
     if(serial&&other&&serial!==other)return 'different_unit';
     return 'similar';
   }
-  return {modelKey,unmarkedKey,sharedSpecifications,uniqueAssets,buildIndex,project,template,duplicateSerials,serialKey,matchKind};
+  return {modelKey,unmarkedKey,sharedSpecifications,uniqueAssets,buildIndex,project,template,duplicateSerials,parseSerialList,serialKey,matchKind};
 });

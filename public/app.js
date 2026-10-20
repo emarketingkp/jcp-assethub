@@ -10,14 +10,14 @@
     assetGrouping:localStorage.getItem('jcp_assethub_asset_grouping')!=='off',groupOpen:new Set(),groupUnitLimits:new Map(),groupPageLimit:50,
     sync:{inFlight:false,lastCursor:localStorage.getItem('jcp_assethub_sync_cursor')||'',lastStarted:0,lastCompleted:0},
     indicator:{jobs:new Map(),next:0},passiveJobs:0,openAssetId:'',
-    cacheHydrated:false,reportCacheKey:'',
+    cacheHydrated:false,reportCacheKey:'',startupSync:null,
     assetSort:{key:'updated_at',dir:'desc'},
     assetFilters:{site:'',area:'',category:'',status:'',assigned:'',location:'',dateField:'updated_at',dateFrom:'',dateTo:''},
     maintenanceSort:{key:'reported_at',dir:'desc'},
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
   const APP_VERSION = '2.7';
-  const BUILD_ID = '2.7-asset-groups-1';
+  const BUILD_ID = '2.7-fast-entry-1';
   const ASSET_BASE_URL = 'https://assets.jcpmalaysia.com/';
   const CACHE_BOOT = 'jcp_assethub_cache_boot_v1';
   const CACHE_ASSETS = 'jcp_assethub_cache_assets_v1';
@@ -98,6 +98,16 @@
     const idx=out.findIndex(x=>String(x?.[key])===String(row?.[key]));
     if(idx>=0)out[idx]={...out[idx],...row}; else out.unshift(row);
     return out;
+  }
+  function upsertManyByKey(list,rows,key){
+    if(!rows.length)return list;
+    const positions=new Map((list||[]).map((row,i)=>[String(row?.[key]),i])),out=(list||[]).slice(),added=new Map();
+    for(const row of rows){
+      const id=String(row?.[key]),i=positions.get(id);
+      if(i!==undefined)out[i]={...out[i],...row};
+      else added.set(id,{...added.get(id),...row});
+    }
+    return [...added.values()].reverse().concat(out);
   }
   function removeByIds(list,ids,key){
     const set=new Set((ids||[]).map(String));
@@ -202,7 +212,8 @@
       const d=r.sync||{};
       if(d.features){state.boot={...(state.boot||{}),features:d.features};cacheWrite(CACHE_BOOT,safeBootCache(state.boot));}
       const openAssetChanged=!!state.openAssetId&&(d.assets||[]).some(a=>String(a.asset_id)===String(state.openAssetId));
-      (d.assets||[]).forEach(a=>{markDetailStaleFromSummary(a);state.assets=upsertByKey(state.assets,publicAssetSummary(a),'asset_id');});
+      const assets=(d.assets||[]).map(a=>{markDetailStaleFromSummary(a);return publicAssetSummary(a);});
+      state.assets=upsertManyByKey(state.assets,assets,'asset_id');
       if(d.removed_asset_ids?.length)state.assets=removeByIds(state.assets,d.removed_asset_ids,'asset_id');
       refreshDerivedReferences();
       (d.maintenance||[]).forEach(m=>{
@@ -245,6 +256,11 @@
     }
   }
   function scheduleSync(reason='change',delay=120){setTimeout(()=>backgroundSync(reason,{force:true}),delay);}
+  function beginStartupSync(reason){
+    const request=backgroundSync(reason,{force:true});state.startupSync=request;
+    void request.finally(()=>{if(state.startupSync===request)state.startupSync=null;});
+    return request;
+  }
   function optimisticAsset(asset){
     const safe=publicAssetSummary(asset); if(!safe)return;
     state.assets=upsertByKey(state.assets,safe,'asset_id');
@@ -496,10 +512,10 @@
       if(hadBootCache){
         setAppLoading(false);
         updateSystemStatus({status:'checking'});
-        backgroundSync('boot',{force:true}).then(result=>updateSystemStatus({status:result?'online':'warning'}));
+        beginStartupSync('boot').then(result=>updateSystemStatus({status:result?'online':'warning'}));
       }else{
+        beginStartupSync('prefetch');
         await boot();
-        backgroundSync('prefetch',{force:true});
       }
     }
     catch(err){
@@ -841,6 +857,11 @@
     const indicatorId=!showedCache?beginIndicator('Loading assets…'):null;
     if(showedCache)beginPassiveSync();
     try{
+      const startup=state.startupSync;
+      if(!state.assets.length&&startup){
+        const synced=await startup;
+        if(synced&&Array.isArray(synced.assets)){renderAssets();return state.assets;}
+      }
       const r=await AssetAPI.get('listAssets',{limit:1000,include_retired:true});
       state.assets=(r.assets||[]).map(publicAssetSummary); refreshDerivedReferences(); cacheWrite(CACHE_ASSETS,state.assets); await window.AssetStore?.set?.(STORE_KEYS.assets,state.assets); renderAssets();
       markSyncCursor(r.server_time||new Date().toISOString());
@@ -856,11 +877,11 @@
   function assetGroupingIndex(){if(groupedIndexSource!==state.assets){groupedIndex=AssetGroups.buildIndex(state.assets);groupedIndexSource=state.assets;}return groupedIndex;}
   function openGroupEntry(options={}){
     AssetGroupEntry.open({assets:state.assets,refs:state.refs,actor:state.user?.username||state.user?.email||'',enabled:!!state.boot?.features?.asset_groups,api:AssetAPI,
-      host:{openModal,closeModal,toast,humanError,setBusy:setPhotoOperationBusy},...options,onSaved:result=>{
+      host:{openModal,closeModal,toast,humanError,bindInputs:bindInputAssistance,setBusy:setPhotoOperationBusy},...options,onSaved:result=>{
         const rows=new Map(state.assets.map(a=>[String(a.asset_id),a]));result.assets.forEach(a=>{rows.set(String(a.asset_id),publicAssetSummary(a));invalidateAssetDetail(a.asset_id);});state.assets=[...rows.values()];
         cacheWrite(CACHE_ASSETS,state.assets);window.AssetStore?.set?.(STORE_KEYS.assets,state.assets);refreshDerivedReferences();
         if(result.set_id)state.groupOpen.add('set:'+result.set_id);else if(result.assets[0])state.groupOpen.add('model:'+AssetGroups.modelKey(result.assets[0]));
-        closeModal();closeDrawer();setRoute('assets');renderAssets();scheduleSync('asset-group-saved',6500);
+        closeModal();closeDrawer();setRoute('assets');scheduleSync('asset-group-saved',6500);
       }});
   }
   function groupUnitHtml(a,index){
@@ -881,7 +902,8 @@
     if(!state.assets.length){ header.innerHTML='';$('assetScopeCount').textContent='0 loaded physical items'; box.innerHTML='<div class="empty-state">No assets found.</div>'; return; }
     const q=$('assetSearch').value.trim().toLowerCase();
     const f=state.assetFilters;
-    let rows=state.assets.filter(a=>{
+    const index=assetGroupingIndex();
+    const rows=sortedAssetSource().filter(a=>{
       if(f.site&&String(a.site_id)!==f.site)return false;
       if(f.area&&String(a.area_id)!==f.area)return false;
       if(f.category&&String(a.category_id)!==f.category)return false;
@@ -889,11 +911,10 @@
       if(f.assigned&&!String(a.assigned_to||'').toLowerCase().includes(f.assigned.toLowerCase()))return false;
       if(f.location&&!String(a.exact_location||'').toLowerCase().includes(f.location.toLowerCase()))return false;
       if((f.dateFrom||f.dateTo)&&!dateWithin(a[f.dateField]||a.updated_at,f.dateFrom,f.dateTo))return false;
-      if(q&&!([a.asset_id,a.category_name,a.brand,a.model,a.serial,a.site_name,a.area_name,a.assigned_to,a.exact_location,a.set_name,a.set_id].join(' ').toLowerCase().includes(q)))return false;
+      if(q&&!index.searchText.get(a.asset_id)?.includes(q))return false;
       return true;
     });
-    rows=sortAssets(rows);
-    const index=assetGroupingIndex(),entries=AssetGroups.project(rows,index,{grouped:state.assetGrouping}),visible=entries.slice(0,state.groupPageLimit);
+    const entries=AssetGroups.project(rows,index,{grouped:state.assetGrouping}),visible=entries.slice(0,state.groupPageLimit);
     const listMode=state.assetView!=='grid',hasGroups=entries.some(e=>e.kind!=='asset');
     box.className=(listMode?'asset-list mode-list':'asset-list mode-grid')+(state.assetGrouping?' grouped-register':'');
     header.classList.toggle('hidden',!listMode||hasGroups);
@@ -907,6 +928,7 @@
     };
     box.querySelectorAll('[data-group-index]').forEach(details=>{
       const entry=visible[Number(details.dataset.groupIndex)],first=entry.assets[0];
+      let autoExpanded=!!(q&&rows.length<=25&&!state.groupOpen.has(entry.key));
       const paint=()=>{
         const limit=state.groupUnitLimits.get(entry.key)||25,body=details.querySelector('.asset-group-content');
         body.innerHTML=`<div class="group-actions">${isAuthenticated()?(entry.kind==='set'?'<button data-group-add class="btn light sm">Add new</button><button data-group-link class="btn light sm">Link existing</button><button data-group-rename class="btn light sm">Rename</button>':'<button data-group-add class="btn light sm">Add units</button>'):''}</div>`+entry.assets.slice(0,limit).map(a=>groupUnitHtml(a,index)).join('');
@@ -916,8 +938,8 @@
         body.querySelector('[data-group-rename]')?.addEventListener('click',()=>openGroupEntry({mode:'rename',set:{id:first.set_id,name:first.set_name},units:(index.sets.get(first.set_id)||[]).map(a=>({existing_asset_id:a.asset_id,source:'existing'}))}));
         if(entry.assets.length>limit){const more=document.createElement('button');more.className='btn light sm';more.textContent='Show more units';more.addEventListener('click',()=>{state.groupUnitLimits.set(entry.key,limit+25);paint();});body.append(more);}
       };
-      details.addEventListener('toggle',()=>{if(details.open){state.groupOpen.add(entry.key);if(!details.querySelector('.group-unit'))paint();}else state.groupOpen.delete(entry.key);});
-      if(q||state.groupOpen.has(entry.key)){details.open=true;paint();}
+      details.addEventListener('toggle',()=>{if(details.open){if(!autoExpanded)state.groupOpen.add(entry.key);if(!details.querySelector('.group-unit'))paint();}else{autoExpanded=false;state.groupOpen.delete(entry.key);}});
+      if(autoExpanded||state.groupOpen.has(entry.key)){details.open=true;paint();}
     });
     bindUnits(box,true);
     $$('#assetListHeader [data-sort]').forEach(b=>b.addEventListener('click',()=>setAssetSort(b.dataset.sort)));
@@ -931,15 +953,20 @@
     return true;
   }
 
+  const assetCollator=new Intl.Collator(undefined,{numeric:true,sensitivity:'base'});
+  let sortedAssetsCache={};
+  function sortedAssetSource(){
+    const {key,dir}=state.assetSort;
+    if(sortedAssetsCache.source!==state.assets||sortedAssetsCache.key!==key||sortedAssetsCache.dir!==dir){
+      sortedAssetsCache={source:state.assets,key,dir,rows:sortAssets(state.assets)};
+    }
+    return sortedAssetsCache.rows;
+  }
   function sortAssets(rows){
     const {key,dir}=state.assetSort; const sign=dir==='asc'?1:-1;
-    return rows.slice().sort((a,b)=>{
-      let av,bv;
-      if(key==='device'){av=`${a.brand||''} ${a.model||''}`;bv=`${b.brand||''} ${b.model||''}`;}
-      else{av=a[key]??'';bv=b[key]??'';}
-      if(key==='updated_at'||key==='created_at'){av=new Date(av).getTime()||0;bv=new Date(bv).getTime()||0;return (av-bv)*sign;}
-      return String(av).localeCompare(String(bv),undefined,{numeric:true,sensitivity:'base'})*sign;
-    });
+    const dates=key==='updated_at'||key==='created_at';
+    return rows.map(row=>({row,value:dates?(new Date(row[key]).getTime()||0):key==='device'?`${row.brand||''} ${row.model||''}`:String(row[key]??'')}))
+      .sort((a,b)=>(dates?a.value-b.value:assetCollator.compare(a.value,b.value))*sign).map(item=>item.row);
   }
 
   function setAssetSort(key){
@@ -1265,15 +1292,17 @@
   function bindInputAssistance(scope){
     const attach=engine=>{
       if(!engine||!scope.isConnected)return;
-      const inputs=Array.from(scope.querySelectorAll('input')).filter(el=>['category','brand','model'].includes(el.dataset.universalField||el.name));
+      const fieldOf=el=>el.dataset.universalField||el.dataset.batchCommon||el.dataset.unitField||el.name;
+      const inputs=Array.from(scope.querySelectorAll('input')).filter(el=>['category','brand','model'].includes(fieldOf(el)));
       for(const input of inputs){
         if(input.dataset.assistBound)return;input.dataset.assistBound='1';
         const choices=document.createElement('div');choices.className='input-suggestions';choices.setAttribute('aria-live','polite');
         (input.closest('.field,.v27-edit-field')||input.parentElement).append(choices);
         const render=()=>{
           choices.replaceChildren();if(input.disabled)return;
-          const brand=inputs.find(el=>(el.dataset.universalField||el.name)==='brand')?.value||'';
-          const field=input.dataset.universalField||input.name;
+          const section=input.closest('[data-unit-card],.group-common')||scope;
+          const brand=inputs.find(el=>fieldOf(el)==='brand'&&section.contains(el))?.value||'';
+          const field=fieldOf(input);
           const suggestions=engine.suggest(field,input.value,{categories:state.refs.categories,brand,assets:state.assets});
           for(const suggestion of suggestions){
             if(suggestion.value===input.value)continue;
@@ -1286,7 +1315,8 @@
           }
         };
         input.addEventListener('input',render);
-        inputs.find(el=>(el.dataset.universalField||el.name)==='brand')?.addEventListener('input',render);
+        const section=input.closest('[data-unit-card],.group-common')||scope;
+        if(fieldOf(input)==='model')inputs.find(el=>fieldOf(el)==='brand'&&section.contains(el))?.addEventListener('input',render);
         render();
       }
     };

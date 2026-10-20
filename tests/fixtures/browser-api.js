@@ -7,11 +7,15 @@
   function cloneInitial(){return structuredClone(options.assets||[]);}
   const pixel='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jgE0AAAAASUVORK5CYII=';
   const clone=x=>structuredClone(x);
+  const startupReply=(action,result)=>{
+    if(action==='sync'&&options.failStartupSync)throw new Error('Simulated initial sync outage');
+    return options.delayStartup?new Promise(resolve=>{state[action+'Release']=()=>resolve(result);}):result;
+  };
   const api={getUrl:()=>'/test-backend',setUrl(){},getToken:()=>user.role==='GUEST'?'':'test-session',setToken(){},getLastTiming:()=>null};
   api.get=async(action,params={})=>{
     state.calls.push({action,params:clone(params)});
-    if(action==='bootstrap')return {success:true,version:'2.7',features:{asset_groups:options.grouping===false?0:1},user,references:clone(refs),dashboard:{},authenticated:user.role!=='GUEST',ai_ocr_enabled:!!options.ai};
-    if(action==='sync')return {sync:{version:'2.7',features:{asset_groups:options.grouping===false?0:1},user,authenticated:user.role!=='GUEST',assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}};
+    if(action==='bootstrap')return startupReply(action,{success:true,version:'2.7',features:{asset_groups:options.grouping===false?0:1},user,references:clone(refs),dashboard:{},authenticated:user.role!=='GUEST',ai_ocr_enabled:!!options.ai});
+    if(action==='sync')return startupReply(action,{sync:{version:'2.7',features:{asset_groups:options.grouping===false?0:1},user,authenticated:user.role!=='GUEST',assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}});
     if(action==='suggestMatchesV27')return {matches:clone(options.matches||[])};
     if(action==='listAssets')return {assets:clone(state.assets)};
     if(action==='getAsset')return {asset:clone(state.assets.find(a=>a.asset_id===params.asset_id))};
