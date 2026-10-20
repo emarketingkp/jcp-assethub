@@ -1,8 +1,8 @@
-const CACHE = 'jcp-assethub-v2.7-still-barcodes-1';
+const CACHE = 'jcp-assethub-v2.7-asset-groups-1';
 const CORE = [
   './','./index.html','./app.css','./store.js','./api-config.js','./api.js','./image.js','./code-scanner.js','./recognition-v27.js','./app.js',
   './manifest.webmanifest','./assets/icon-192.png','./assets/icon-512.png',
-  './photo-picker.js','./input-assist.js','./data/input-knowledge.json'
+  './photo-picker.js','./input-assist.js','./data/input-knowledge.json','./asset-groups.js','./group-entry.js'
 ];
 
 self.addEventListener('install', event => {

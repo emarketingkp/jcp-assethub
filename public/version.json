@@ -1,7 +1,7 @@
 {
   "version": "2.7",
-  "build": "2.7-still-barcodes-1",
+  "build": "2.7-asset-groups-1",
   "released": "2026-10-19",
-  "name": "Still photos and confirmed barcode candidates",
-  "notes": "Sensor still capture with native camera fallback, bounded local barcode search, progressive observations and explicit serial approval. Compatible with the V2.7 backend."
+  "name": "Equipment sets and grouped asset register",
+  "notes": "Expandable sets and model groups, guided multiple-item review, individual JCP records and safe batch retries. Group writes require the optional Apps Script grouping update."
 }

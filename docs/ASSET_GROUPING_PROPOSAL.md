@@ -1,7 +1,9 @@
 # Grouping and serial collection proposal
 
-Design only. The owner requested scanning fixes first; this patch does not add
-groups, change schemas, merge records or modify stored assets.
+This is the initial design proposal written while scanning fixes took priority.
+The subsequent implementation and exact scope are documented in
+[GROUPS_AND_SETS.md](GROUPS_AND_SETS.md); its limitations take precedence over
+future ideas below.
 
 ## Recommendation
 
