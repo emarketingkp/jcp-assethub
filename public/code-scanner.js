@@ -27,6 +27,7 @@
     const candidate=/^[A-Z0-9][A-Z0-9._/-]{3,63}$/i.test(serial);
     return {...code,value,format,kind:candidate?'candidate':'other',serialCandidate:candidate?serial:'',label:candidate?'Identifier candidate · check the printed label':'Unclassified code · review manually'};
   }
+  let idleWorker=null;
   async function scanAll(file,{signal,onUpdate,budgetMs=5000}={}){
     if(!file||signal?.aborted)return [];
     const deadline=Date.now()+Math.min(8000,Math.max(100,budgetMs));
@@ -65,16 +66,16 @@
     let worker,timer;
     const fallback=new Promise(resolve=>{
       let finished=false;
-      const finish=(warning='')=>{
+      const finish=(warning='',reuse=false)=>{
         if(finished)return;finished=true;
-        clearTimeout(timer);worker?.terminate();signal?.removeEventListener('abort',abort);
+        clearTimeout(timer);if(reuse&&worker){worker.onmessage=null;worker.onerror=null;idleWorker?.terminate();idleWorker=worker;}else worker?.terminate();signal?.removeEventListener('abort',abort);
         if(warning)publish([],warning);resolve();
       };
       const abort=()=>finish();
       signal?.addEventListener('abort',abort,{once:true});
       try{
-        worker=new root.Worker('./barcode-worker.js');
-        worker.onmessage=event=>{publish(event.data.codes,event.data.warning);if(event.data.done)finish();};
+        worker=idleWorker||new root.Worker('./barcode-worker.js');idleWorker=null;
+        worker.onmessage=event=>{publish(event.data.codes,event.data.warning);if(event.data.done)finish('',true);};
         worker.onerror=()=>finish('Local barcode reader unavailable. OCR and manual entry remain available.');
         timer=setTimeout(()=>finish('Barcode time limit reached. Try a close, sharp label photo or enter the serial manually.'),Math.max(1,deadline-Date.now()));
         worker.postMessage({file});

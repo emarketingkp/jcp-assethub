@@ -44,10 +44,19 @@
     return dataUrl.split(',')[1];
   }
 
-  async function prepareForStorage(file){
+  const storagePreparations=new WeakMap();
+  async function convertForStorage(file){
     const full = await resize(file,1600,'image/webp',.82);
     const thumb = await resize(file,360,'image/webp',.74);
     return {full,thumb};
+  }
+
+  function prepareForStorage(file){
+    if(!storagePreparations.has(file)){
+      const pending=convertForStorage(file).catch(err=>{storagePreparations.delete(file);throw err;});
+      storagePreparations.set(file,pending);
+    }
+    return storagePreparations.get(file);
   }
 
   async function prepareForOcr(file){

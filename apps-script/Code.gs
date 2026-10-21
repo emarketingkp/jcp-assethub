@@ -49,7 +49,7 @@ const SCHEMA = {
   Assets: [
     'asset_id','category_id','category','brand','model','serial','specifications',
     'site_id','site','area_id','area','exact_location','assigned_to','status',
-    'main_image_id','drive_folder_id','created_at','updated_at','created_by','updated_by','retired_at','source_ref','set_id','set_name'
+    'main_image_id','drive_folder_id','created_at','updated_at','created_by','updated_by','retired_at','source_ref','set_id','set_name','parent_asset_id'
   ],
   AssetImages: [
     'image_id','asset_id','image_type','drive_file_id','thumbnail_file_id','file_name',
@@ -179,6 +179,8 @@ function doGet(e) {
     const user = optionalUser_(p.token);
     if (action === 'listAssets' || action === 'assets') return json_({success:true, assets:listAssets_(p), server_time:new Date().toISOString(), user:user});
     if (action === 'getAsset') return json_({success:true, asset:getAssetBundle_(p.asset_id, user), user:user});
+    if (action === 'assetSummaryPage') return json_(assetSummaryPage_(p));
+    if (action === 'assetDetailsBatch') return json_(assetDetailsBatch_(p,user));
     if (action === 'listMaintenance') return json_({success:true, rows:listMaintenance_(), user:user});
     if (action === 'listAudits') return json_({success:true, rows:listAudits_(), user:user});
     if (action === 'getAuditRoster') return json_({success:true, roster:getAuditRoster_(p.audit_id, requireUser_(p.token,'STAFF'))});
@@ -209,7 +211,7 @@ function doPost(e) {
     if (action === 'uploadImage') {
       const actor = optionalUser_(p.token);
       if (String(actor.role || '').toUpperCase() === 'GUEST') assertGuestImageAdd_(p.assetId, p.guest_upload_token);
-      return postReply_(p, {success:true, image:uploadImage_(p, actor), user:actor});
+      return postReply_(p, {success:true, image:p.operation_id?uploadQueuedImage_(p, actor):uploadImage_(p, actor), user:actor});
     }
 
     if (action === 'logout') {
@@ -346,9 +348,14 @@ function syncChanges_(p, user) {
   const areaMap = objectMap_(areas,'area_id');
   const mainImages = mainImageMap_();
 
-  const changedAssets = rawAssets
+  let changedAssets = rawAssets
     .filter(r=>String(r.status)!=='Merged' && newer(r.updated_at || r.created_at))
     .map(r=>decorateAsset_(r,catMap,siteMap,areaMap,mainImages));
+  let assetCursor='';
+  if(!sinceMs&&p.summary_page_size){
+    const page=assetSummaryPage_({page_size:p.summary_page_size});
+    changedAssets=page.assets;assetCursor=page.next_cursor;
+  }
   const removedAssetIds = rawAssets
     .filter(r=>String(r.status)==='Merged' && newer(r.updated_at || r.retired_at))
     .map(r=>r.asset_id);
@@ -388,6 +395,7 @@ function syncChanges_(p, user) {
     authenticated:String(user && user.role || '').toUpperCase()!=='GUEST',
     write_auth_required:AUTH_REQUIRED,
     assets:changedAssets,
+    asset_cursor:assetCursor,
     removed_asset_ids:removedAssetIds,
     maintenance:maintenance,
     activity:changedActivity,
@@ -397,6 +405,19 @@ function syncChanges_(p, user) {
     legacy_import:base.legacy_import,
     user:user
   };
+}
+
+// Stable key pagination includes every summary field used by the existing register.
+function assetSummaryPage_(p){
+  const size=Math.min(250,Math.max(1,Number(p.page_size)||200));
+  const rows=listObjects_(SHEETS.ASSETS).filter(r=>r.status!=='Merged'&&String(r.asset_id)>String(p.after||'')).sort((a,b)=>String(a.asset_id)<String(b.asset_id)?-1:1);
+  const cats=objectMap_(listObjects_(SHEETS.CATEGORIES),'category_id'),sites=objectMap_(listObjects_(SHEETS.SITES),'site_id'),areas=objectMap_(listObjects_(SHEETS.AREAS),'area_id'),images=mainImageMap_();
+  return {success:true,assets:rows.slice(0,size).map(r=>decorateAsset_(r,cats,sites,areas,images)),next_cursor:rows.length>size?String(rows[size-1].asset_id):''};
+}
+function assetDetailsBatch_(p,user){
+  let ids;try{ids=JSON.parse(p.ids_json);}catch(_){throw new Error('Invalid asset IDs.');}
+  if(!Array.isArray(ids)||ids.length>12||ids.some(id=>typeof id!=='string'||id.length>80))throw new Error('Use up to 12 asset IDs.');
+  return {success:true,assets:ids.map(id=>{const a=getAssetBundle_(id,user);delete a.images;return a;})};
 }
 
 function listAssets_(p) {
@@ -863,7 +884,35 @@ function assertGuestImageAdd_(assetId, token) {
   }
 }
 
-function uploadImage_(p, user) {
+// A queue photo has a stable actor-scoped identity; Drive names reconcile partial writes.
+function uploadQueuedImage_(p,user) {
+  requireRole_(user,'STAFF');
+  const operation=groupText_(p.operation_id,100,'Photo operation');
+  if(!/^[A-Za-z0-9-]{16,100}$/.test(operation))throw new Error('Invalid photo operation ID.');
+  const id='IMG-Q-'+hash_(actorKey_(user)+'|'+operation).slice(0,32);
+  const fingerprint=hash_(JSON.stringify([p.assetId,p.imageType,p.mimeType,p.base64Data,p.thumbnailBase64]));
+  const stamp='queue-'+fingerprint;
+  const lock=LockService.getScriptLock();lock.waitLock(10000);
+  try {
+    clearRequestCache_();
+    const previous=findByKey_(SHEETS.ASSET_IMAGES,'image_id',id);
+    if(previous){
+      if(previous.asset_id!==p.assetId||String(previous.file_name).indexOf(stamp)<0)throw new Error('REQUEST_REUSED: Photo operation changed.');
+      const asset=findByKey_(SHEETS.ASSETS,'asset_id',p.assetId);
+      // Only repair an unfinished image touch. A completed replay must not undo later edits/main-photo selection.
+      if(asset&&(!asset.updated_at||String(asset.updated_at)<String(previous.uploaded_at))){
+        const touch={updated_at:previous.uploaded_at,updated_by:actorKey_(user)};
+        if(previous.image_type==='main')touch.main_image_id=previous.image_id;
+        updateByKey_(SHEETS.ASSETS,'asset_id',p.assetId,touch);invalidateDataCache_();
+      }
+      return previous;
+    }
+    return uploadImage_(p,user,{stamp:stamp,id:id});
+  } finally {lock.releaseLock();}
+}
+
+function uploadImage_(p, user, queued) {
+  p=Object.assign({},p,{_queueStamp:queued&&queued.stamp||'',_queueImageId:queued&&queued.id||''});
   if (!p.assetId) throw new Error('assetId is required.');
   if (!findByKey_(SHEETS.ASSETS,'asset_id',p.assetId)) throw new Error('Asset not found.');
   if (!p.base64Data) throw new Error('Image data is required.');
@@ -871,25 +920,27 @@ function uploadImage_(p, user) {
   const folder = getOrCreateAssetFolder_(p.assetId);
   const mime = clean_(p.mimeType) || 'image/webp';
   const imageType = clean_(p.imageType) || 'main';
-  const timestamp = Utilities.formatDate(new Date(),'Asia/Kuala_Lumpur','yyyyMMdd-HHmmss-SSS');
+  const timestamp = p._queueStamp || Utilities.formatDate(new Date(),'Asia/Kuala_Lumpur','yyyyMMdd-HHmmss-SSS');
   const ext = mime === 'image/jpeg' ? 'jpg' : mime === 'image/png' ? 'png' : 'webp';
   const safeType = safeFileToken_(imageType);
   const name = p.assetId + '__' + safeType + '__' + timestamp + '.' + ext;
 
   const bytes = Utilities.base64Decode(p.base64Data);
-  const file = folder.createFile(Utilities.newBlob(bytes,mime,name));
+  const files=p._queueStamp?folder.getFilesByName(name):null;
+  const file = files&&files.hasNext()?files.next():folder.createFile(Utilities.newBlob(bytes,mime,name));
 
   let thumbId = '';
   if (p.thumbnailBase64) {
     const tBytes = Utilities.base64Decode(p.thumbnailBase64);
     const tName = p.assetId + '__' + safeType + '__' + timestamp + '__thumb.webp';
-    const t = folder.createFile(Utilities.newBlob(tBytes,'image/webp',tName));
+    const thumbs=p._queueStamp?folder.getFilesByName(tName):null;
+    const t = thumbs&&thumbs.hasNext()?thumbs.next():folder.createFile(Utilities.newBlob(tBytes,'image/webp',tName));
     thumbId = t.getId();
   }
 
   const now = new Date().toISOString();
   const image = {
-    image_id:'IMG-'+shortId_(), asset_id:p.assetId, image_type:imageType,
+    image_id:p._queueImageId||'IMG-'+shortId_(), asset_id:p.assetId, image_type:imageType,
     drive_file_id:file.getId(), thumbnail_file_id:thumbId, file_name:file.getName(), mime_type:mime,
     bytes:bytes.length, uploaded_at:now, uploaded_by:actorKey_(user), active:true
   };
@@ -1892,7 +1943,7 @@ function updateByComposite_(name,keys,patch) {
       const current=rowToObject_(h,data[r]); const next=Object.assign({},current,patch);
       // Image/legacy writers must not restore stale set membership from a full row
       // snapshot. Write contiguous spans, excluding set fields absent from this patch.
-      const protectedCell=i=>name===SHEETS.ASSETS&&['set_id','set_name'].includes(h[i])&&!Object.prototype.hasOwnProperty.call(patch,h[i]);
+      const protectedCell=i=>name===SHEETS.ASSETS&&['set_id','set_name','parent_asset_id'].includes(h[i])&&!Object.prototype.hasOwnProperty.call(patch,h[i]);
       let start=0;
       for(let end=0;end<=h.length;end++){
         if(end<h.length&&!protectedCell(end))continue;

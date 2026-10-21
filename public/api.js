@@ -71,7 +71,7 @@
   function postViaIframe(action, params = {}, {publicCall=false, requestId=''} = {}){
     const start = performance.now();
     const apiUrl = assertUrl();
-    const id = requestId || `jcp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const id = requestId || params.request_id || `jcp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     return new Promise((resolve,reject)=>{
       const frameName = `jcp_api_${id.replace(/[^a-z0-9_-]/gi,'')}`;
       const iframe = document.createElement('iframe');
@@ -95,7 +95,7 @@
       addFormField(form,'reply_origin',location.origin);
       if(!publicCall && getToken()) addFormField(form,'token',getToken());
       Object.entries(params).forEach(([k,v])=>{
-        if(v !== undefined && v !== null) addFormField(form,k,v);
+        if(k !== 'request_id' && v !== undefined && v !== null) addFormField(form,k,v);
       });
 
       let settled = false;

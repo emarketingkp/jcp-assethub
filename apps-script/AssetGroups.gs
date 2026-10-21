@@ -13,7 +13,7 @@ function groupingFeatures_() {
     const ss=getSpreadsheet_(),assets=ss.getSheetByName(SHEETS.ASSETS),ledger=ss.getSheetByName(SHEETS.ASSET_BATCHES);
     if(!assets||!ledger)return {asset_groups:0};
     const assetHeaders=new Set(headers_(assets)),ledgerHeaders=new Set(headers_(ledger));
-    return {asset_groups:['set_id','set_name'].every(k=>assetHeaders.has(k))&&SCHEMA.AssetBatches.every(k=>ledgerHeaders.has(k))?1:0};
+    const ready=['set_id','set_name'].every(k=>assetHeaders.has(k))&&SCHEMA.AssetBatches.every(k=>ledgerHeaders.has(k));return {asset_groups:ready?1:0,sequential_saves:ready&&assetHeaders.has('parent_asset_id')?1:0};
   } catch(_){return {asset_groups:0};}
 }
 
@@ -30,7 +30,7 @@ function normalizedBatch_(json) {
   const c=p.common||{};
   const common=Object.assign(product(c),{site_id:groupText_(c.site_id,80,'Site'),area:groupText_(c.area,120,'Area'),exact_location:groupText_(c.exact_location,160,'Location'),assigned_to:groupText_(c.assigned_to,160,'Assignment')});
   common.status=groupText_(c.status,30,'Status')||'Active';if(!['Active','Spare','Faulty','Under Repair','Missing'].includes(common.status))throw new Error('Choose a supported status for the new items.');
-  if(p.mode==='same'&&/^\s*(?:serial(?:\s+(?:number|no\.?))?|s\s*\/\s*n|imei\s*2?|mac(?:\s+address)?|service\s+tag|jcp\s+asset\s+id|asset\s+id|host\s*name|device\s+(?:id|name)|uuid|license\s+key)\s*[:=#]/im.test(common.specifications))throw new Error('Unique device identifiers cannot be shared across new units. Enter each serial in its own row; add other unit identifiers in individual asset details.');
+  if(p.mode==='same'&&p.units.length>1&&/^\s*(?:serial(?:\s+(?:number|no\.?))?|s\s*\/\s*n|imei\s*2?|mac(?:\s+address)?|service\s+tag|jcp\s+asset\s+id|asset\s+id|host\s*name|device\s+(?:id|name)|uuid|license\s+key)\s*[:=#]/im.test(common.specifications))throw new Error('Unique device identifiers cannot be shared across new units. Enter each serial in its own row; add other unit identifiers in individual asset details.');
   const custom=Object.create(null);if(c.custom&&typeof c.custom==='object'&&!Array.isArray(c.custom))Object.keys(c.custom).sort().forEach(k=>{if(!/^[A-Za-z0-9_-]{1,80}$/.test(k)||['__proto__','constructor','prototype'].includes(k))throw new Error('Invalid custom field.');custom[k]=groupText_(c.custom[k],1000,'Custom value');});common.custom=custom;
   const seen=Object.create(null);
   const units=p.units.map((r,index)=>{
@@ -45,6 +45,7 @@ function normalizedBatch_(json) {
     if(!row.category&&!row.category_id)throw new Error('Item '+(index+1)+': category is required.');return row;
   });
   const result={mode:p.mode,set_id:groupText_(p.set_id,60,'Set ID'),set_name:groupText_(p.set_name,100,'Set name'),common:common,units:units};
+  if(p.parent_asset_id){if(!['set','attach'].includes(p.mode))throw new Error('Parent links require a set operation.');result.parent_asset_id=groupText_(p.parent_asset_id,80,'Parent asset ID');}
   if(result.set_id&&!/^SET-[A-Za-z0-9-]{10,50}$/.test(result.set_id))throw new Error('Invalid set ID.');
   if(result.mode==='same'&&(result.set_id||result.set_name))throw new Error('Same-model items are grouped by their product details, not a physical set.');
   if(['attach','detach','rename'].includes(result.mode)&&!result.set_id&&result.mode!=='attach')throw new Error('Choose a set.');
@@ -91,6 +92,12 @@ function resolveBatchProducts_(p) {
 function validateBatchMembers_(p,rows,plan,resuming) {
   const chosen=new Set(p.units.filter(u=>u.existing_asset_id).map(u=>u.existing_asset_id));
   const setMembers=rows.filter(r=>r.set_id===plan.set_id&&r.status!=='Merged');
+  if(p.parent_asset_id){
+    const parent=rows.find(r=>r.asset_id===p.parent_asset_id&&r.status!=='Merged'&&r.status!=='Retired');
+    if(!parent||parent.set_id!==plan.set_id&&!chosen.has(parent.asset_id))throw new Error('PARENT_NOT_READY: Choose a confirmed member of this set.');
+    for(const id of chosen){if(id===p.parent_asset_id)continue;let ancestor=parent,seen=new Set();while(ancestor){if(ancestor.asset_id===id||seen.has(ancestor.asset_id))throw new Error('Linked assets cannot form a cycle.');seen.add(ancestor.asset_id);ancestor=rows.find(r=>r.asset_id===ancestor.parent_asset_id);}}
+  }
+  if(p.mode==='detach'&&rows.some(r=>chosen.has(r.parent_asset_id)&&!chosen.has(r.asset_id)&&r.status!=='Merged'))throw new Error('Remove linked components before removing their parent from the set.');
   if(p.mode==='rename'&&(setMembers.length!==chosen.size||setMembers.some(r=>!chosen.has(String(r.asset_id)))))throw new Error('Set membership changed. Reload and review every component before renaming.');
   p.units.forEach(u=>{
     if(!u.existing_asset_id)return;
@@ -189,7 +196,7 @@ function saveAssetBatch_(params,user) {
       if(existing){if(existing.source_ref!==source)throw new Error('Reserved JCP ID is already occupied. No record was overwritten.');return;}
       const category=products.categories[i],site=products.site,area=products.area;
       newRows.push({asset_id:id,category_id:category.category_id,category:category.name,brand:unit.brand,model:unit.model,serial:unit.serial,specifications:unit.specifications,
-        site_id:site.site_id,site:site.name,area_id:area?area.area_id:'',area:area?area.name:p.common.area,exact_location:p.common.exact_location,assigned_to:p.common.assigned_to,status:p.common.status,main_image_id:'',drive_folder_id:'',created_at:plan.created_at,updated_at:writeTime,created_by:actor,updated_by:actor,retired_at:'',source_ref:source,set_id:p.mode==='set'?plan.set_id:'',set_name:p.mode==='set'?plan.set_name:''});
+        site_id:site.site_id,site:site.name,area_id:area?area.area_id:'',area:area?area.name:p.common.area,exact_location:p.common.exact_location,assigned_to:p.common.assigned_to,status:p.common.status,main_image_id:'',drive_folder_id:'',created_at:plan.created_at,updated_at:writeTime,created_by:actor,updated_by:actor,retired_at:'',source_ref:source,set_id:p.mode==='set'?plan.set_id:'',set_name:p.mode==='set'?plan.set_name:'',parent_asset_id:p.parent_asset_id||''});
     });
     appendBatchRows_(SHEETS.ASSETS,newRows);
     const customRows=listObjects_(SHEETS.CUSTOM_VALUES),pendingCustom=[];
@@ -197,6 +204,8 @@ function saveAssetBatch_(params,user) {
     appendBatchRows_(SHEETS.CUSTOM_VALUES,pendingCustom);
     const existingIds=p.units.filter(u=>u.existing_asset_id).map(u=>u.existing_asset_id);
     writeSetColumns_(existingIds,{set_id:p.mode==='detach'?'':plan.set_id,set_name:p.mode==='detach'?'':plan.set_name,updated_at:writeTime,updated_by:actor});
+    if(p.mode==='detach'&&groupingFeatures_().sequential_saves)writeSetColumns_(existingIds,{parent_asset_id:''});
+    else if(p.parent_asset_id)writeSetColumns_(existingIds.filter(id=>id!==p.parent_asset_id),{parent_asset_id:p.parent_asset_id});
     const activity=listObjects_(SHEETS.ACTIVITY),pendingLogs=[],finalRows=listObjects_(SHEETS.ASSETS);
     plan.ids.forEach((id,i)=>{
       const action=p.units[i].existing_asset_id?'SET_MEMBERSHIP':'CREATE_ASSET_BATCH';

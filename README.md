@@ -14,6 +14,8 @@ Production Hosting was updated on 2026-10-20 to build `2.7-fast-entry-1`, includ
 - `START_HERE.md` and `V2_7_TEST_CHECKLIST.md`: original setup and acceptance references.
 - `GITHUB_SETUP.md`: repository setup details and validation limits.
 
+The sequential linked-asset workflow and durable-save changes are documented in [workflow, backend update steps and validation limits](docs/SEQUENTIAL_SET_WORKFLOW.md). This implementation has not been deployed.
+
 ## Local checks
 
 Use Node.js 24 and install the pinned development dependencies for the unit, vendor-integrity and browser checks.
