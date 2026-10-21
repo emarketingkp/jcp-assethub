@@ -1,6 +1,6 @@
 {
-  "version": "2.7",
-  "build": "2.7-sequential-sets-1",
+  "version": "2.7.2",
+  "build": "2.7.2-sequential-sets-1",
   "released": "2026-10-21",
   "name": "Sequential linked assets and durable saves",
   "notes": "One asset at a time with durable local saves, safe retries, linked assets, batched caches and reusable barcode workers. Requires updated Code.gs, AssetGroups.gs and setupAssetGrouping."

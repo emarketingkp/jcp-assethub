@@ -2,7 +2,7 @@
 
 Implementation branch: `feature/sequential-set-workflow`, based on `main` at `f930577`.
 Scope: `docs/V27_IMPLEMENTATION_HANDOFF.md` on `docs/implementation-handoff-2026-10-21`.
-This release has **not been deployed**.
+Frontend **2.7.2** was deployed with explicit approval on 2026-10-21. Firebase Hosting version: `ab466fda15b3e8b7`; previous version: `48f33716821493cc`. All 32 published files were verified through the Hosting API, and the live `api-config.js` hash was preserved exactly. Direct website checks were blocked by environment network policy. The Apps Script changes have **not** been deployed; the owner must complete the backend steps below.
 
 ## Workflow
 
@@ -28,14 +28,14 @@ Staff/Admin creates and detail-photo attachments are persisted in IndexedDB befo
 
 ## Owner's Apps Script update steps
 
-These instructions are for review; onboarding/implementation did not execute them against production.
+The owner must apply these backend steps; the frontend-only release did not execute them against production.
 
 1. Back up the existing Apps Script project and linked spreadsheet. Preserve Script Properties, deployment access and execution identity. No new API keys or permission scopes are required.
 2. Replace **both** `Code.gs` and `AssetGroups.gs` from this branch. Keep the existing manifest and existing configuration; do not replace credentials or live asset data with fixtures.
 3. In the Apps Script editor, run `setupAssetGrouping()` as the project owner. It additively ensures the existing `AssetBatches` retry ledger and asset columns, including the new `parent_asset_id`. It does not create a container asset. Preserve existing retry rows; deleting them can prevent safe reconciliation.
 4. Create a new Apps Script web-app version and update the owner's chosen test deployment using its existing access policy. The owner controls Apps Script deployment. Verify bootstrap/sync reports `features.sequential_saves: 1`; it stays disabled until the required schema exists. Existing deployments keep the foreground workflow.
 5. On an isolated test spreadsheet/Drive folder, verify one root and one component, refresh after an uncertain save, retry a failed photo, sign-out/sign-in recovery, duplicate serial rejection, and parent-removal safeguards. Check unchanged Sheets/Drive permission boundaries. Do not use production asset records for these checks.
-6. Review frontend `2.7-sequential-sets-1` and service-worker changes together with the backend version. Any production Firebase deployment still requires fresh explicit approval. No Firebase or Apps Script deployment was performed here.
+6. Frontend `2.7.2-sequential-sets-1` and its service worker are deployed. Update the backend to the matching `2.7.2` source version. Future production deployments require explicit approval. No Apps Script deployment was performed here.
 
 ## Validation and limits
 
@@ -55,4 +55,4 @@ The tests execute real Apps Script business rules with an in-memory spreadsheet 
 
 Suggested PR title: **Add sequential linked-asset registration with durable local saves**.
 
-Suggested PR description: Preserve the existing AssetHub screens while registering linked sets one physical item at a time. Add durable user-scoped saves, dependency-safe links, idempotent metadata/photo retries, progressive cache loading and reusable barcode workers. Default the register to individual records while retaining opt-in grouping. Requires the owner to update both Apps Script files and run `setupAssetGrouping()`; no production deployment is included. Include the final test counts from this branch when opening the PR.
+Suggested PR description: Preserve the existing AssetHub screens while registering linked sets one physical item at a time. Add durable user-scoped saves, dependency-safe links, idempotent metadata/photo retries, progressive cache loading and reusable barcode workers. Default the register to individual records while retaining opt-in grouping. Requires the owner to update both Apps Script files and run `setupAssetGrouping()`; frontend 2.7.2 was subsequently deployed with explicit approval; Apps Script deployment remains with the owner. Include the final test counts from this branch when opening the PR.

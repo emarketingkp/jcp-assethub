@@ -16,8 +16,8 @@
     maintenanceSort:{key:'reported_at',dir:'desc'},
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
-  const APP_VERSION = '2.7';
-  const BUILD_ID = '2.7-sequential-sets-1';
+  const APP_VERSION = '2.7.2';
+  const BUILD_ID = '2.7.2-sequential-sets-1';
   const ASSET_BASE_URL = 'https://assets.jcpmalaysia.com/';
   const CACHE_BOOT = 'jcp_assethub_cache_boot_v1';
   const CACHE_ASSETS = 'jcp_assethub_cache_assets_v1';

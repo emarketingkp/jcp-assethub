@@ -14,7 +14,7 @@ Production Hosting was updated on 2026-10-20 to build `2.7-fast-entry-1`, includ
 - `START_HERE.md` and `V2_7_TEST_CHECKLIST.md`: original setup and acceptance references.
 - `GITHUB_SETUP.md`: repository setup details and validation limits.
 
-The sequential linked-asset workflow and durable-save changes are documented in [workflow, backend update steps and validation limits](docs/SEQUENTIAL_SET_WORKFLOW.md). This implementation has not been deployed.
+The sequential linked-asset workflow and durable-save changes are documented in [workflow, backend update steps and validation limits](docs/SEQUENTIAL_SET_WORKFLOW.md). Frontend version `2.7.2` was deployed to Firebase Hosting on 2026-10-21 with the existing backend configuration preserved. The Apps Script changes still require the owner's update and schema setup.
 
 ## Local checks
 
