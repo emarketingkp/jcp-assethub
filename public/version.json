@@ -1,7 +1,7 @@
 {
-  "version": "2.7",
-  "build": "2.7-connection-checks-1",
-  "released": "2026-10-20",
-  "name": "Progressive connection checks and visible AI failures",
-  "notes": "Separate verified checks for backend reads and device tools, explicit OCR/Groq tests, visible scan failures and refreshed AI configuration. Live provider tests require the updated Code.gs."
+  "version": "2.7.2",
+  "build": "2.7.2-sequential-sets-1",
+  "released": "2026-10-21",
+  "name": "Sequential linked assets and durable saves",
+  "notes": "One asset at a time with durable local saves, safe retries, linked assets, batched caches and reusable barcode workers. Requires updated Code.gs, AssetGroups.gs and setupAssetGrouping."
 }

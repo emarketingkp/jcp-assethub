@@ -4,10 +4,10 @@
   const state = {
     boot:null,user:null,refs:{sites:[],areas:[],categories:[],custom_fields:[],brands:[],assignees:[],locations:[],users:[]},
     assets:[],maintenance:[],audits:[],movements:[],report:null,route:'dashboard',adminTab:'sites',
-    cameraStream:null,scanTimer:null,barcodeDetector:null,scanFile:null,recognitionSession:null,scanUpdateTarget:null,imageCache:new Map(),assetDetails:new Map(),detailRequests:new Map(),activeAuditId:'',
+    cameraStream:null,scanTimer:null,barcodeDetector:null,scanFile:null,recognitionSession:null,scanUpdateTarget:null,imageCache:new Map(),assetDetails:new Map(),detailRequests:new Map(),detailEpochs:new Map(),activeAuditId:'',
     adminMode:false,diagnostics:null,deepLinkHandled:false,lastRecognition:null,latestVersion:null,modalRestoreFocus:null,
     assetView:localStorage.getItem('jcp_assethub_asset_view')||'list',
-    assetGrouping:localStorage.getItem('jcp_assethub_asset_grouping')!=='off',groupOpen:new Set(),groupUnitLimits:new Map(),groupPageLimit:50,
+    assetGrouping:localStorage.getItem('jcp_assethub_asset_grouping')==='on',groupOpen:new Set(),groupUnitLimits:new Map(),groupPageLimit:50,
     sync:{inFlight:false,lastCursor:localStorage.getItem('jcp_assethub_sync_cursor')||'',lastStarted:0,lastCompleted:0},
     indicator:{jobs:new Map(),next:0},passiveJobs:0,openAssetId:'',
     cacheHydrated:false,reportCacheKey:'',startupSync:null,
@@ -16,8 +16,8 @@
     maintenanceSort:{key:'reported_at',dir:'desc'},
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
-  const APP_VERSION = '2.7';
-  const BUILD_ID = '2.7-connection-checks-1';
+  const APP_VERSION = '2.7.2';
+  const BUILD_ID = '2.7.2-sequential-sets-1';
   const ASSET_BASE_URL = 'https://assets.jcpmalaysia.com/';
   const CACHE_BOOT = 'jcp_assethub_cache_boot_v1';
   const CACHE_ASSETS = 'jcp_assethub_cache_assets_v1';
@@ -58,7 +58,7 @@
     delete copy.guest_upload_token;
     return copy;
   }
-  function detailStoreKey(assetId){return STORE_KEYS.detailPrefix+String(assetId||'');}
+  function detailStoreKey(assetId){return STORE_KEYS.detailPrefix+encodeURIComponent(AssetAPI.getUrl()+'|'+(state.user?.username||state.user?.email||'guest')+'|'+role())+':'+String(assetId||'');}
   function detailMemoryRecord(assetId){return state.assetDetails.get(String(assetId||''))||null;}
   function cacheAssetDetail(asset,{persist=true}={}){
     if(!asset?.asset_id)return asset;
@@ -70,6 +70,7 @@
   }
   function invalidateAssetDetail(assetId){
     const id=String(assetId||''); if(!id)return;
+    state.detailEpochs.set(id,(state.detailEpochs.get(id)||0)+1);
     state.assetDetails.delete(id);
     window.AssetStore?.remove?.(detailStoreKey(id));
   }
@@ -83,7 +84,7 @@
   }
   function clearSensitiveDetailCache(){state.assetDetails.clear();}
   function detailNeedsRefresh(record){
-    if(!record)return true;
+    if(!record||record.partial||record.data?._nonimageOnly)return true;
     if(Date.now()-Number(record.savedAt||0)>DETAIL_REVALIDATE_MS)return true;
     if(isAuthenticated() && String(record.role||'GUEST')==='GUEST')return true;
     return false;
@@ -96,7 +97,7 @@
     if(!row)return list||[];
     const out=Array.isArray(list)?list.slice():[];
     const idx=out.findIndex(x=>String(x?.[key])===String(row?.[key]));
-    if(idx>=0)out[idx]={...out[idx],...row}; else out.unshift(row);
+    if(idx>=0){if(out[idx].updated_at&&row.updated_at&&String(out[idx].updated_at)>String(row.updated_at))return out;out[idx]={...out[idx],...row};} else out.unshift(row);
     return out;
   }
   function upsertManyByKey(list,rows,key){
@@ -104,7 +105,7 @@
     const positions=new Map((list||[]).map((row,i)=>[String(row?.[key]),i])),out=(list||[]).slice(),added=new Map();
     for(const row of rows){
       const id=String(row?.[key]),i=positions.get(id);
-      if(i!==undefined)out[i]={...out[i],...row};
+      if(i!==undefined){if(out[i].updated_at&&row.updated_at&&String(out[i].updated_at)>String(row.updated_at))continue;out[i]={...out[i],...row};}
       else added.set(id,{...added.get(id),...row});
     }
     return [...added.values()].reverse().concat(out);
@@ -211,12 +212,24 @@
     state.sync.inFlight=true;state.sync.lastStarted=now;
     beginPassiveSync();
     try{
-      const r=await AssetAPI.get('sync',{since:state.sync.lastCursor||''});
+      const r=await AssetAPI.get('sync',{since:state.sync.lastCursor||'',summary_page_size:200});
       const d=r.sync||{};
       if(typeof d.ai_ocr_enabled==='boolean')state.boot={...(state.boot||{}),ai_ocr_enabled:d.ai_ocr_enabled};
       if(d.features){state.boot={...(state.boot||{}),features:d.features};cacheWrite(CACHE_BOOT,safeBootCache(state.boot));}
       const openAssetChanged=!!state.openAssetId&&(d.assets||[]).some(a=>String(a.asset_id)===String(state.openAssetId));
-      const assets=(d.assets||[]).map(a=>{markDetailStaleFromSummary(a);return publicAssetSummary(a);});
+      const firstAssets=d.assets||[];
+      state.assets=upsertManyByKey(state.assets,firstAssets.map(publicAssetSummary),'asset_id');
+      if(state.route==='assets')renderAssets();
+      let cursor=d.asset_cursor;
+      while(cursor){
+        const page=await AssetAPI.get('assetSummaryPage',{after:cursor,page_size:200});
+        firstAssets.push(...(page.assets||[]));
+        state.assets=upsertManyByKey(state.assets,(page.assets||[]).map(publicAssetSummary),'asset_id');
+        if(state.route==='assets')renderAssets();
+        if(page.next_cursor===cursor)throw new Error('Summary pagination did not advance.');
+        cursor=page.next_cursor;
+      }
+      const assets=firstAssets.map(a=>{markDetailStaleFromSummary(a);return publicAssetSummary(a);});
       state.assets=upsertManyByKey(state.assets,assets,'asset_id');
       if(d.removed_asset_ids?.length)state.assets=removeByIds(state.assets,d.removed_asset_ids,'asset_id');
       refreshDerivedReferences();
@@ -244,6 +257,7 @@
       }
       markSyncCursor(d.server_time||new Date().toISOString());
       state.sync.lastCompleted=Date.now();
+      scheduleDetailBatches();
       connectionEvent('api',{state:'ok',message:'Backend sync request succeeded.',evidence:'request'});
       await persistPublicData();
       renderCurrentData();
@@ -475,6 +489,7 @@
   }
 
   function applyRole(){
+    configureSaveQueue();
     $$('.admin-only').forEach(el=>el.classList.toggle('hidden',!isAdmin()));
 
     const guest = isGuest();
@@ -631,7 +646,7 @@
     $('maintenanceFilterBtn').addEventListener('click',openMaintenanceFilters);
     $('maintenanceMobileSort').addEventListener('change',()=>{const [key,dir]=$('maintenanceMobileSort').value.split(':');state.maintenanceSort={key,dir};renderMaintenance();});
     $('addAssetBtn').addEventListener('click',()=>openAssetForm());
-    $('addAssetGroupBtn').addEventListener('click',()=>withAccess('STAFF',()=>openGroupEntry()));
+    $('addAssetGroupBtn').addEventListener('click',()=>withAccess('STAFF',()=>state.assetGrouping?openGroupEntry():saveQueue?openAssetForm({_startSet:true}):toast('Update both Apps Script files and run setupAssetGrouping before starting a set.','error')));
     $('assetGroupToggle').checked=state.assetGrouping;
     $('assetGroupToggle').addEventListener('change',()=>{state.assetGrouping=$('assetGroupToggle').checked;localStorage.setItem('jcp_assethub_asset_grouping',state.assetGrouping?'on':'off');state.groupPageLimit=50;renderAssets();});
     $('reportIssueBtn').addEventListener('click',()=>withAccess('STAFF',()=>openIssueForm()));
@@ -866,7 +881,9 @@
   async function logout(){
     await withPassiveSync(async()=>{try{await AssetAPI.post('logout',{});}catch{}});
     AssetAPI.setToken('');
+    activeSet=null;ordinarySave=null;saveQueue=null;queueScope='';queueRows=[];
     clearSensitiveDetailCache();
+    await window.AssetStore?.clear?.(STORE_KEYS.detailPrefix);
     state.user={name:'Guest',username:'guest',email:'',role:'GUEST'};
     state.adminMode=false;
     state.refs.users=[];
@@ -990,12 +1007,31 @@
     const listMode=state.assetView!=='grid',hasGroups=entries.some(e=>e.kind!=='asset');
     box.className=(listMode?'asset-list mode-list':'asset-list mode-grid')+(state.assetGrouping?' grouped-register':'');
     header.classList.toggle('hidden',!listMode||hasGroups);
-    header.innerHTML=listMode&&!hasGroups?assetHeaderHtml():'';
+    const heading=listMode&&!hasGroups?assetHeaderHtml():'';
+    if(header._markup!==heading){header.innerHTML=heading;header._markup=heading;}
     $('assetScopeCount').textContent=AssetGroups.uniqueAssets(rows).length+' matching physical items · '+entries.length+' display row'+(entries.length===1?'':'s')+' · '+index.all.length+' loaded items. Counts follow the current filters.';
+    if(!state.assetGrouping&&rows.length){
+      const previous=new Map(Array.from(box.children).filter(n=>n.dataset.asset).map(n=>[n.dataset.asset,n]));
+      const anchor=Array.from(previous.values()).find(n=>{const r=n.getBoundingClientRect();return r.bottom>0&&r.top<innerHeight;}),top=anchor?.getBoundingClientRect().top;
+      const desired=visible.map(entry=>{
+        const a=entry.assets[0],markup=listMode?assetListRowHtml(a):assetGridCardHtml(a),old=previous.get(a.asset_id);
+        if(old?._markup===markup)return old;
+        const template=document.createElement('template');template.innerHTML=markup;
+        const node=template.content.firstElementChild;node._markup=markup;return node;
+      });
+      const keep=new Set(desired);
+      Array.from(box.children).forEach(n=>{if(!keep.has(n))n.remove();});
+      desired.forEach((node,i)=>{if(box.children[i]!==node)box.insertBefore(node,box.children[i]||null);});
+      if(anchor?.isConnected){
+        const delta=anchor.getBoundingClientRect().top-top;
+        if(delta){let scroll=box.parentElement;while(scroll&&!(scroll.scrollHeight>scroll.clientHeight&&/auto|scroll/.test(getComputedStyle(scroll).overflowY)))scroll=scroll.parentElement;if(scroll)scroll.scrollTop+=delta;else window.scrollBy(0,delta);}
+      }
+    }else{
     box.innerHTML=rows.length?visible.map((entry,i)=>entry.kind==='asset'?(listMode?assetListRowHtml(entry.assets[0]):assetGridCardHtml(entry.assets[0])):groupCardHtml(entry,i,index)).join(''):'<div class="empty-state">No matching assets.</div>';
+    }
     if(entries.length>visible.length){const more=document.createElement('button');more.className='btn light group-load-more';more.textContent='Show more ('+(entries.length-visible.length)+' rows remaining)';more.addEventListener('click',()=>{state.groupPageLimit+=50;renderAssets();});box.append(more);}
     const bindUnits=(root,outerOnly=false)=>{
-      root.querySelectorAll('[data-asset]').forEach(b=>{if(!outerOnly||!b.closest('.asset-group'))b.addEventListener('click',()=>openAsset(b.dataset.asset));});
+      root.querySelectorAll('[data-asset]').forEach(b=>{if(!outerOnly||!b.closest('.asset-group'))b.onclick=()=>openAsset(b.dataset.asset);});
       root.querySelectorAll('[data-unlink-asset]').forEach(b=>{if(!outerOnly||!b.closest('.asset-group'))b.addEventListener('click',()=>withAccess('STAFF',()=>{const a=index.all.find(r=>r.asset_id===b.dataset.unlinkAsset);openGroupEntry({mode:'detach',set:{id:a.set_id,name:a.set_name},units:[{existing_asset_id:a.asset_id,source:'existing'}]});}));});
     };
     box.querySelectorAll('[data-group-index]').forEach(details=>{
@@ -1014,7 +1050,7 @@
       if(autoExpanded||state.groupOpen.has(entry.key)){details.open=true;paint();}
     });
     bindUnits(box,true);
-    $$('#assetListHeader [data-sort]').forEach(b=>b.addEventListener('click',()=>setAssetSort(b.dataset.sort)));
+    $$('#assetListHeader [data-sort]').forEach(b=>b.onclick=()=>setAssetSort(b.dataset.sort));
     updateAssetToolbarState(); hydrateThumbs(box);
   }
 
@@ -1109,7 +1145,12 @@
     const loadOne=async el=>{
       el.dataset.loading='1';
       try{const data=await imageData(el.dataset.thumb,{persistent:true});if(data){el.innerHTML=`<img src="${data}" alt="Asset thumbnail">`;el.dataset.loaded='1';}}
-      catch{el.classList.add('thumb-error');el.title='Thumbnail unavailable';}
+      catch{
+        el.classList.add('thumb-error');el.title='Thumbnail unavailable';el.innerHTML='<span role="button" tabindex="0">Retry image</span>';
+        const retry=el.firstElementChild;
+        retry.onclick=e=>{e.preventDefault();e.stopPropagation();void loadOne(el);};
+        retry.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();e.stopPropagation();void loadOne(el);}};
+      }
       finally{delete el.dataset.loading;}
     };
     if(!('IntersectionObserver' in window)){ for(const el of els.slice(0,40)) await loadOne(el); return; }
@@ -1145,14 +1186,44 @@
   function activityLabel(a){ return String(a||'Activity').replaceAll('_',' ').toLowerCase().replace(/\b\w/g,c=>c.toUpperCase()); }
   function activityDetails(s){ if(!s)return''; try{const o=JSON.parse(s);if(o.summary)return esc(o.summary)+(o.set_name?' · '+esc(o.set_name):'');return Object.values(o).filter(v=>typeof v!=='boolean').slice(0,2).map(esc).join(' · ');}catch{return esc(String(s).slice(0,90));} }
 
+  let detailBatchTimer=null,detailBatchRunning=false;
+  function scheduleDetailBatches(){
+    clearTimeout(detailBatchTimer);
+    if(!state.boot?.features?.sequential_saves)return;
+    detailBatchTimer=setTimeout(prefetchDetailBatches,1200);
+  }
+  async function prefetchDetailBatches(){
+    if(detailBatchRunning||!navigator.onLine)return;
+    detailBatchRunning=true;
+    const scope=detailStoreKey('');
+    try{
+      const candidates=state.assets.filter(a=>!detailMemoryRecord(a.asset_id)).map(a=>a.asset_id);
+      while(candidates.length&&scope===detailStoreKey('')&&navigator.onLine){
+        if(state.route==='scanner'||state.detailRequests.size||queueRows.some(r=>!r.asset&&r.state!=='Retry')){scheduleDetailBatches();break;}
+        const ids=candidates.splice(0,12),started=Date.now(),epochs=new Map(ids.map(id=>[id,state.detailEpochs.get(id)||0]));
+        const r=await AssetAPI.get('assetDetailsBatch',{ids_json:JSON.stringify(ids)});
+        if(scope!==detailStoreKey(''))break;
+        for(const a of r.assets||[]){
+          if((detailMemoryRecord(a.asset_id)?.savedAt||0)>started||(state.detailEpochs.get(a.asset_id)||0)!==epochs.get(a.asset_id))continue;
+          state.assetDetails.set(a.asset_id,{data:{...a,_nonimageOnly:true},savedAt:Date.now(),role:role(),partial:true});
+          window.AssetStore?.set?.(detailStoreKey(a.asset_id),{...publicAssetDetail(a),_nonimageOnly:true});
+        }
+        await new Promise(resolve=>setTimeout(resolve,100));
+      }
+    }catch(err){console.warn('Background detail cache paused; open details to retry.',err);}
+    finally{detailBatchRunning=false;}
+  }
   async function fetchAssetDetail(id,{label='Refreshing asset…'}={}){
     const key=String(id||'');
     if(state.detailRequests.has(key))return state.detailRequests.get(key);
     const promise=withPassiveSync(async()=>{
+      const scope=detailStoreKey(key),before=detailMemoryRecord(key)?.savedAt||0,epoch=state.detailEpochs.get(key)||0;
       const r=await AssetAPI.get('getAsset',{asset_id:key});
+      if(scope!==detailStoreKey(key)||(state.detailEpochs.get(key)||0)!==epoch)return detailMemoryRecord(key)?.data||null;
+      if((detailMemoryRecord(key)?.savedAt||0)>before)return detailMemoryRecord(key).data;
       cacheAssetDetail(r.asset);
       return r.asset;
-    }).finally(()=>state.detailRequests.delete(key));
+    }).finally(()=>{if(state.detailRequests.get(key)===promise)state.detailRequests.delete(key);});
     state.detailRequests.set(key,promise);
     return promise;
   }
@@ -1189,7 +1260,7 @@
   }
   function closeDrawer(){ state.openAssetId=''; $('assetDrawer').classList.remove('open'); $('drawerBackdrop').classList.add('hidden'); document.body.classList.remove('drawer-open'); }
   async function renderDrawer(a){
-    if(state.openAssetId&&String(state.openAssetId)!==String(a?.asset_id))return;
+    if(!a||state.openAssetId&&String(state.openAssetId)!==String(a.asset_id))return;
     const mainImage=a.images?.find(x=>String(x.image_id)===String(a.main_image_id)&&String(x.active)!=='false')||a.images?.find(x=>String(x.image_type)==='main'&&String(x.active)!=='false')||null;
     const mainFile=mainImage?.thumbnail_file_id||mainImage?.drive_file_id||a.thumbnail_file_id||a.image_file_id;
     const custom=(a.custom_fields||[]).filter(f=>f.value).map(f=>`<div class="detail-field"><label>${esc(f.label)}</label><div>${esc(f.value)}</div></div>`).join('');
@@ -1199,6 +1270,7 @@
     const groupInfo=document.createElement('div');groupInfo.className='group-detail';
     groupInfo.innerHTML=`${a.set_id?`<b>Equipment set: ${esc(a.set_name||a.set_id)}</b><small>This item's serial, placement and history belong to this unit.</small><button id="viewAssetSet" class="btn light sm">Show set in asset list</button>`:'<small>This item is not assigned to an equipment set.</small>'}${isAuthenticated()?'<button id="linkDrawerSet" class="btn light sm">'+(a.set_id?'Remove from set':'Add to equipment set')+'</button>':''}`;
     $('drawerBody').querySelector('.detail-hero').after(groupInfo);
+    if(a.set_id){const tree=document.createElement('div');tree.className='group-detail';tree.innerHTML='<b>Linked assets</b>'+state.assets.filter(m=>m.set_id===a.set_id).map(m=>`<button class="btn light sm" data-linked-member="${esc(m.asset_id)}">${esc((m.parent_asset_id?'↳ ':'')+m.asset_id+' · '+assetDisplayName(m))}</button>`).join('');groupInfo.append(tree);tree.querySelectorAll('[data-linked-member]').forEach(b=>b.onclick=()=>openAsset(b.dataset.linkedMember));}
     $('viewAssetSet')?.addEventListener('click',()=>{closeDrawer();$('assetSearch').value=a.set_name||a.set_id;setRoute('assets');renderAssets();});
     $('linkDrawerSet')?.addEventListener('click',()=>openGroupEntry({mode:a.set_id?'detach':'attach',set:a.set_id?{id:a.set_id,name:a.set_name}:undefined,units:[{existing_asset_id:a.asset_id,source:'existing'}]}));
     if(isAuthenticated()){
@@ -1284,6 +1356,8 @@
       ? imgs.map((x,i)=>`<button class="gallery-item ${String(a.main_image_id)===String(x.image_id)?'is-main':''}" data-img-index="${i}"><div data-thumb="${esc(x.thumbnail_file_id||x.drive_file_id)}">${icon('image','lg')}</div><span class="gallery-label">${String(a.main_image_id)===String(x.image_id)?'★ Main photo':esc(x.image_type)}</span></button>`).join('')
       : '<div class="empty-state compact" style="grid-column:1/-1">No images yet.</div>';
     box.querySelectorAll('[data-thumb]').forEach(el=>el.classList.add('asset-thumb'));
+    if(a._nonimageOnly)box.innerHTML='<div class="empty-state compact">Loading image list… <button class="btn light sm" id="retryDetailImages">Retry</button></div>';
+    $('retryDetailImages')?.addEventListener('click',()=>openAsset(a.asset_id,{force:true}));
     await hydrateThumbs(box);
     box.querySelectorAll('[data-img-index]').forEach(b=>b.addEventListener('click',()=>openGalleryViewer(a,Number(b.dataset.imgIndex))));
   }
@@ -1395,12 +1469,108 @@
     attach(window.AssetInput?.current);
     if(!window.AssetInput?.current)window.AssetInput?.ready().then(attach);
   }
+  let saveQueue=null,queueScope='',queueRows=[],activeSet=null,ordinarySave=null,activeDetailScope='';
+  function configureSaveQueue(){
+    const detailScope=detailStoreKey('');
+    if(detailScope!==activeDetailScope){activeDetailScope=detailScope;clearSensitiveDetailCache();state.detailRequests.clear();closeDrawer();}
+    const scope=isAuthenticated()&&state.boot?.features?.sequential_saves?AssetAPI.getUrl()+'|'+(state.user.username||state.user.email)+'|'+role():'';
+    if(scope===queueScope)return;
+    queueScope=scope;saveQueue=null;queueRows=[];activeSet=null;
+    if(scope){
+      const current=AssetSaveQueue.create({scope,api:AssetAPI,active:()=>queueScope===scope&&isAuthenticated(),photosAllowed:()=>state.route!=='scanner'&&!state.recognitionSession?.running,
+        onChange:(rows,error)=>{if(rows)queueRows=rows;paintPendingSaves();if(error)console.warn('Save queue paused:',error);},onAsset:(asset,row,metadata)=>{
+          const current=state.assets.find(a=>a.asset_id===asset.asset_id);
+          if(metadata){for(const related of row.relatedAssets||[asset]){optimisticAsset(related);invalidateAssetDetail(related.asset_id);}}
+          else if(current&&(!current.updated_at||!asset.updated_at||String(asset.updated_at)>=String(current.updated_at)))optimisticAsset({...current,updated_at:asset.updated_at||current.updated_at,main_image_id:asset.main_image_id||current.main_image_id,thumbnail_file_id:asset.thumbnail_file_id||current.thumbnail_file_id,image_file_id:asset.image_file_id||current.image_file_id});
+          invalidateAssetDetail(asset.asset_id);
+          if(ordinarySave?.id===row.id){
+            const normal=ordinarySave;ordinarySave=null;
+            if($('modalWrap').classList.contains('hidden')&&state.route==='assets'){
+              if(normal.fromScan)openAsset(asset.asset_id);else showAssetQr(asset);
+            }
+          }
+          if(state.openAssetId===asset.asset_id&&asset.images)renderGallery(asset);
+        }});
+      saveQueue=current;
+      current.rows().then(rows=>{if(queueScope===scope){queueRows=rows;paintPendingSaves();void current.pump();}}).catch(err=>toast(humanError(err),'error'));
+    }
+    paintPendingSaves();
+  }
+  function paintPendingSaves(){
+    let button=$('pendingSavesBtn');
+    if(!button){button=document.createElement('button');button.id='pendingSavesBtn';button.className='btn light sm';button.onclick=openPendingSaves;$('systemStatusBtn').parentElement.append(button);}
+    const pending=queueRows.filter(r=>r.state!=='Saved');button.classList.toggle('hidden',!pending.length);button.textContent=pending.length+' pending';
+    const list=$('pendingSaveItems');if(list){
+      const displayed=queueRows.filter(r=>!activeSet||r.id===activeSet.id||r.parent===activeSet.parent);
+      const root=activeSet&&queueRows.find(r=>r.id===activeSet.parent),setId=root?.asset?.set_id||activeSet?.setId;
+      const known=new Set(displayed.map(r=>r.asset?.asset_id));
+      const members=activeSet?state.assets.filter(a=>!known.has(a.asset_id)&&(setId&&a.set_id===setId||a.asset_id===root?.anchor?.asset_id)):[];
+      list.innerHTML=members.map(a=>`<div class="group-detail"><b>${esc(a.asset_id+' · '+assetDisplayName(a))}</b><small>Saved</small></div>`).join('')+pendingSaveItems(displayed);
+    }
+    list?.querySelectorAll('[data-retry-save]').forEach(b=>b.onclick=()=>saveQueue?.retry(b.dataset.retrySave));
+    list?.querySelectorAll('[data-review-save]').forEach(b=>{b.onclick=()=>{const r=queueRows.find(row=>row.id===b.dataset.reviewSave);openAssetForm({...r.params,_queueRow:r,_scanFiles:r.photos.map(p=>p.file),_setContext:r.parent?{parent:r.parent,setName:r.setName,setId:r.setId}:null});};});
+    list?.querySelectorAll('[data-open-saved]').forEach(b=>b.onclick=()=>{closeModal();openAsset(b.dataset.openSaved);});
+    list?.querySelectorAll('[data-resume-set]').forEach(b=>b.onclick=()=>{const r=queueRows.find(r=>r.id===b.dataset.resumeSet);activeSet={id:r.parent||r.id,parent:r.parent||r.id,setName:r.setName||r.asset?.set_name,setId:r.setId,placement:Object.fromEntries(['site_id','area','exact_location','assigned_to'].map(k=>[k,r.params[k]||''])),template:AssetGroups.template(r.params)};openSetOverview();});
+  }
+  function pendingSaveItems(rows){return rows.map(r=>`<div class="group-detail"><b>${esc([r.params.brand,r.params.model,r.params.serial].filter(Boolean).join(' · '))}</b><small>${esc(r.asset?.asset_id||'Awaiting backend ID')} · ${esc(r.state)}</small>${r.error?`<p>${esc(r.error)}</p><button type="button" class="btn light sm" data-retry-save="${esc(r.id)}">Retry / reconcile</button>${!r.asset&&r.error.includes('BATCH_NOT_STARTED:')?`<button class="btn light sm" data-review-save="${esc(r.id)}">Review draft</button>`:''}`:''}${r.parent&&!queueRows.find(p=>p.id===r.parent)?.asset?'<small>Waiting for the main asset to be confirmed.</small>':''}${r.asset?`<button class="btn light sm" data-open-saved="${esc(r.asset.asset_id)}">View asset</button>`:''}${r.setName||r.parent||r.setId?`<button class="btn light sm" data-resume-set="${esc(r.id)}">Continue set</button>`:''}</div>`).join('')||'<p>No pending saves.</p>';}
+  function openPendingSaves(){activeSet=null;openModal('Pending saves','<p>Work resumes while this app is open and you are signed in. Closing the app or phone suspension can pause uploads.</p><div id="pendingSaveItems"></div>',paintPendingSaves);}
+  function openSetOverview(){
+    openModal('Set overview',`<p>Each item is registered separately. Pending items are retained on this device; keep the app open to finish uploads.</p><div id="pendingSaveItems"></div><div class="modal-actions"><button class="btn blue" id="scanNextComponent">Scan next component</button><button class="btn light" id="manualNextComponent">Add manually</button><button class="btn light" id="sameModelComponent">Same model</button><button class="btn light" id="finishAssetSet">Finish set</button></div>`,()=>{
+      paintPendingSaves();
+      $('scanNextComponent').onclick=()=>{closeModal();resetScannerResult({restartCamera:false});setRoute('scanner');};
+      $('manualNextComponent').onclick=()=>openAssetForm();
+      $('sameModelComponent').onclick=()=>openAssetForm({...activeSet.template,serial:''});
+      $('finishAssetSet').onclick=()=>{activeSet=null;closeModal();setRoute('assets');void saveQueue?.pump();};
+    },{size:'lg'});
+  }
+  function linkedAssetFields(a){
+    if(!saveQueue)return '';
+    return `<section class="field full"><label>Linked asset / set (optional)</label><input id="linkedAssetSearch" placeholder="Search by name, tag or serial" autocomplete="off"><select id="linkedAssetChoice" aria-label="Linked asset"><option value="">No linked asset</option></select><div class="modal-actions"><button type="button" class="btn light sm" id="scanLinkedTag">Scan tag</button><button type="button" class="btn light sm" id="removeLinkedAsset">Remove</button></div><input type="file" id="linkedTagPhoto" accept="image/*" capture="environment" hidden><small id="linkedAssetSummary"></small><label><input id="startsAssetSet" type="checkbox" ${a._startSet||a._queueRow?.setName&&!a._queueRow?.parent&&!a._queueRow?.anchor?'checked':''}> This asset starts a set</label><input id="linkedSetName" aria-label="Set name" placeholder="Set name" value="${esc(a._setContext?.setName||a._queueRow?.setName||a.set_name||'')}"></section>`;
+  }
+  function bindLinkedAssetFields(form,a){
+    if(!$('linkedAssetChoice'))return null;
+    let selected=a._queueRow?.anchor||null,removed=false;
+    const choice=$('linkedAssetChoice'),search=$('linkedAssetSearch'),starts=$('startsAssetSet'),name=$('linkedSetName'),summary=$('linkedAssetSummary');
+    const update=()=>{
+      const q=search.value.toLowerCase();
+      const matches=state.assets.filter(r=>r.asset_id!==a.asset_id&&r.status!=='Merged'&&r.status!=='Retired'&&[r.asset_id,r.brand,r.model,r.serial,r.set_name].join(' ').toLowerCase().includes(q)).slice(0,50);
+      choice.innerHTML='<option value="">Choose linked asset</option>'+matches.map(r=>`<option value="${esc(r.asset_id)}">${esc([r.asset_id,r.brand,r.model,r.serial].filter(Boolean).join(' · '))}</option>`).join('');
+      if(selected)choice.value=selected.asset_id;
+    };
+    const describe=()=>{summary.textContent=selected?[selected.asset_id,selected.brand,selected.model,selected.serial,selected.set_name].filter(Boolean).join(' · '):a._setContext&&!removed?'Continuing '+(a._setContext.setName||'set'):a.set_id&&!removed?'Current set: '+(a.set_name||a.set_id):'No linked asset selected.';form.querySelector('[type="submit"]').textContent=a.asset_id?'Save Changes':selected||starts.checked||a._setContext&&!removed?'Save and continue':'Create Asset';};
+    search.oninput=update;
+    choice.onchange=()=>{selected=state.assets.find(r=>r.asset_id===choice.value)||null;removed=false;if(selected){starts.checked=false;name.value=selected.set_name||[selected.brand,selected.model,selected.asset_id].filter(Boolean).join(' ');}describe();};
+    starts.onchange=()=>{if(starts.checked){selected=null;choice.value='';if(!name.value)name.value=[a.brand,a.model,'set'].filter(Boolean).join(' ');}describe();};
+    $('removeLinkedAsset').onclick=()=>{selected=null;removed=true;starts.checked=false;choice.value='';name.value='';describe();};
+    $('scanLinkedTag').onclick=()=>$('linkedTagPhoto').click();
+    $('linkedTagPhoto').onchange=async e=>{const file=e.target.files?.[0];if(!file)return;try{const codes=await AssetCode.scanAll(file);const ids=new Set(codes.map(c=>c.assetId||c.value));const matches=state.assets.filter(r=>ids.has(r.asset_id)||r.serial&&ids.has(r.serial));if(matches.length!==1)throw new Error('No unique cached asset matches this tag. Search and select the correct asset.');selected=matches[0];search.value=selected.asset_id;update();choice.value=selected.asset_id;choice.onchange();}catch(err){toast(humanError(err),'error');}finally{e.target.value='';}};
+    update();describe();
+    return {enabled:()=>!!saveQueue,value:()=>{
+      if(a._setContext&&!removed)return {parent:a._setContext.parent,setName:a._setContext.setName,setId:a._setContext.setId};
+      if(selected)return {setId:selected.set_id||'',setName:selected.set_name||name.value.trim(),anchor:selected};
+      if(starts.checked)return name.value.trim()?{setName:name.value.trim()}:{error:'Enter a set name.'};
+      return {};
+    },editPayload:(saved,id)=>{
+      if(!removed&&!selected&&!starts.checked)return null;
+      if(removed&&!a.set_id)return null;
+      if(a.set_id&&selected&&selected.set_id!==a.set_id&&!removed)throw new Error('Remove this asset from its current set before linking another set.');
+      const units=[{existing_asset_id:saved.asset_id,expected_updated_at:saved.updated_at||''}];
+      if(selected&&!selected.set_id)units.unshift({existing_asset_id:selected.asset_id,expected_updated_at:selected.updated_at||''});
+      if(!removed&&!name.value.trim())throw new Error('Enter a set name.');
+      return {request_id:id,confirmed:'true',batch_json:JSON.stringify({parent_asset_id:removed?'':selected?.asset_id||'',mode:removed?'detach':'attach',set_id:removed?a.set_id:selected?.set_id||'',set_name:removed?a.set_name:name.value.trim(),common:{},units})};
+    }};
+  }
+  window.addEventListener('online',()=>void saveQueue?.pump());
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)void saveQueue?.pump();});
+  setInterval(()=>void saveQueue?.pump(),5000);
+
   function assetFormHtml(a={}){
     const catValue=a.category_name||a.category||''; const site=a.site_id||''; const area=a.area_name||a.area||'';
-    return `<form id="assetForm" class="form-grid">${a.asset_id?`<div class="field full asset-form-scan-action"><div><b>Update from a device photo</b><small>Scan a label or Windows specifications screen, then review differences before saving.</small></div><button type="button" id="scanUpdateAsset" class="btn light">${icon('scan','sm')} Scan to update</button></div>`:''}<div class="field"><label>Category</label>${editablePicker("assetCategory","category",catValue,state.refs.categories.map(x=>x.name),"Enter category")}<small>You can type a new device type. Admin can later add it to the master category list.</small></div><div class="field"><label>Brand</label>${editablePicker("assetBrand","brand",a.brand||"",[...state.refs.brands,...(window.AssetInput?.current?.brands()||[])],"Enter brand")}</div><div class="field"><label>Model</label><input name="model" value="${esc(a.model||'')}" autocomplete="off" ${a.asset_id&&!a.model?'':'required'}></div><div class="field"><label>Serial number</label><input name="serial" value="${esc(a.serial||'')}"></div><div class="field"><label>Site</label><select name="site_id" id="assetSite" required><option value="">Select site</option>${state.refs.sites.map(x=>`<option value="${esc(x.site_id)}" ${String(x.site_id)===String(site)?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div><div class="field"><label>Area / Department</label>${editablePicker("assetArea","area",area,[],"Enter area / department")}</div><div class="field"><label>Status</label><select name="status">${['Active','Spare','Faulty','Under Repair','Missing','Retired'].map(s=>`<option ${String(a.status||'Active')===s?'selected':''}>${s}</option>`).join('')}</select></div><details class="asset-form-extra field full"><summary>Additional information <small>Location, assignment and specifications</small></summary><div class="asset-form-extra-grid form-grid"><div class="field"><label>Exact location <span style="font-weight:500">(optional)</span></label><input name="exact_location" list="locationOptions" value="${esc(a.exact_location||'')}" placeholder="e.g. DTF A3 Station"><datalist id="locationOptions">${state.refs.locations.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field"><label>Assigned person / team <span style="font-weight:500">(optional)</span></label><input name="assigned_to" list="assigneeOptions" value="${esc(a.assigned_to||'')}" placeholder="Person or team"><datalist id="assigneeOptions">${state.refs.assignees.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field full"><label>Specifications</label><textarea name="specifications" rows="3">${esc(a.specifications||'')}</textarea></div><div class="field"><label>Movement note <span style="font-weight:500">(only if placement changes)</span></label><input name="movement_note" placeholder="Optional reason"></div></div></details>${state.refs.custom_fields.some(f=>String(f.required)==='true'||f.required===true)?`<div id="customFieldsForm" class="field full"><span class="label">Required custom information</span><div class="form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>String(f.required)==='true'||f.required===true))}</div></div>`:''}${state.refs.custom_fields.some(f=>!(String(f.required)==='true'||f.required===true))?`<details class="asset-form-extra field full"><summary>Other custom information</summary><div class="asset-form-extra-grid form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>!(String(f.required)==='true'||f.required===true)))}</div></details>`:''}<section class="field full asset-form-photos"><h3>Photos</h3><p>${a._scanFiles?.length||a._scanFile?'Scan photos are included. ':''}Take photos or choose from your gallery. These attach to this asset without restarting recognition.</p><div id="assetPhotoPicker"></div><small>Photos are compressed before upload. Review the selected photos below.</small></section><div id="assetSaveStatus" class="asset-save-status" role="status" aria-live="polite"></div><div class="field full"><div class="modal-actions">${a.asset_id&&a.status!=='Retired'&&isAdmin()?'<button type="button" id="retireAssetBtn" class="btn danger">Retire Asset</button>':''}<button type="button" id="cancelAssetForm" class="btn light">Cancel</button><button type="submit" class="btn blue">${a.asset_id?'Save Changes':'Create Asset'}</button></div></div></form>`;
+    return `<form id="assetForm" class="form-grid">${a.asset_id?`<div class="field full asset-form-scan-action"><div><b>Update from a device photo</b><small>Scan a label or Windows specifications screen, then review differences before saving.</small></div><button type="button" id="scanUpdateAsset" class="btn light">${icon('scan','sm')} Scan to update</button></div>`:''}<div class="field"><label>Category</label>${editablePicker("assetCategory","category",catValue,state.refs.categories.map(x=>x.name),"Enter category")}<small>You can type a new device type. Admin can later add it to the master category list.</small></div><div class="field"><label>Brand</label>${editablePicker("assetBrand","brand",a.brand||"",[...state.refs.brands,...(window.AssetInput?.current?.brands()||[])],"Enter brand")}</div><div class="field"><label>Model</label><input name="model" value="${esc(a.model||'')}" autocomplete="off" ${a.asset_id&&!a.model?'':'required'}></div><div class="field"><label>Serial number</label><input name="serial" value="${esc(a.serial||'')}"></div><div class="field"><label>Site</label><select name="site_id" id="assetSite" required><option value="">Select site</option>${state.refs.sites.map(x=>`<option value="${esc(x.site_id)}" ${String(x.site_id)===String(site)?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div><div class="field"><label>Area / Department</label>${editablePicker("assetArea","area",area,[],"Enter area / department")}</div><div class="field"><label>Status</label><select name="status">${['Active','Spare','Faulty','Under Repair','Missing','Retired'].map(s=>`<option ${String(a.status||'Active')===s?'selected':''}>${s}</option>`).join('')}</select></div><details class="asset-form-extra field full"><summary>Additional information <small>Location, assignment and specifications</small></summary><div class="asset-form-extra-grid form-grid"><div class="field"><label>Exact location <span style="font-weight:500">(optional)</span></label><input name="exact_location" list="locationOptions" value="${esc(a.exact_location||'')}" placeholder="e.g. DTF A3 Station"><datalist id="locationOptions">${state.refs.locations.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field"><label>Assigned person / team <span style="font-weight:500">(optional)</span></label><input name="assigned_to" list="assigneeOptions" value="${esc(a.assigned_to||'')}" placeholder="Person or team"><datalist id="assigneeOptions">${state.refs.assignees.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field full"><label>Specifications</label><textarea name="specifications" rows="3">${esc(a.specifications||'')}</textarea></div><div class="field"><label>Movement note <span style="font-weight:500">(only if placement changes)</span></label><input name="movement_note" placeholder="Optional reason"></div></div></details>${state.refs.custom_fields.some(f=>String(f.required)==='true'||f.required===true)?`<div id="customFieldsForm" class="field full"><span class="label">Required custom information</span><div class="form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>String(f.required)==='true'||f.required===true))}</div></div>`:''}${state.refs.custom_fields.some(f=>!(String(f.required)==='true'||f.required===true))?`<details class="asset-form-extra field full"><summary>Other custom information</summary><div class="asset-form-extra-grid form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>!(String(f.required)==='true'||f.required===true)))}</div></details>`:''}${linkedAssetFields(a)}<section class="field full asset-form-photos"><h3>Photos</h3><p>${a._scanFiles?.length||a._scanFile?'Scan photos are included. ':''}Take photos or choose from your gallery. These attach to this asset without restarting recognition.</p><div id="assetPhotoPicker"></div><small>Photos are compressed before upload. Review the selected photos below.</small></section><div id="assetSaveStatus" class="asset-save-status" role="status" aria-live="polite"></div><div class="field full"><div class="modal-actions">${a.asset_id&&a.status!=='Retired'&&isAdmin()?'<button type="button" id="retireAssetBtn" class="btn danger">Retire Asset</button>':''}<button type="button" id="cancelAssetForm" class="btn light">Cancel</button><button type="submit" class="btn blue">${a.asset_id?'Save Changes':'Create Asset'}</button></div></div></form>`;
   }
   function customFieldsHtml(existing,fields=state.refs.custom_fields){ const map={}; existing.forEach(x=>map[x.field_id]=x.value); return fields.map(f=>{ const v=map[f.field_id]||''; const req=String(f.required)==='true'||f.required===true?'required':''; if(f.field_type==='select'){let opts=[];try{opts=JSON.parse(f.options_json||'[]')}catch{} return `<div class="field"><label>${esc(f.label)}</label><select data-custom="${esc(f.field_id)}" ${req}><option value="">—</option>${opts.map(o=>`<option ${String(o)===String(v)?'selected':''}>${esc(o)}</option>`).join('')}</select></div>`;} if(f.field_type==='boolean') return `<div class="field"><label>${esc(f.label)}</label><select data-custom="${esc(f.field_id)}" ${req}><option value="">—</option><option value="Yes" ${v==='Yes'?'selected':''}>Yes</option><option value="No" ${v==='No'?'selected':''}>No</option></select></div>`; return `<div class="field"><label>${esc(f.label)}</label><input type="${['date','number'].includes(f.field_type)?f.field_type:'text'}" data-custom="${esc(f.field_id)}" value="${esc(v)}" ${req}></div>`; }).join('')||'<div class="empty-state compact">No custom fields configured.</div>'; }
   function openAssetForm(asset={}){
+    if(!asset.asset_id&&activeSet)asset={...activeSet.placement,...asset,_setContext:activeSet};
     if(asset.asset_id && !isAuthenticated()) return withAccess('STAFF',()=>openAssetForm(asset));
     const initialScanFiles = Array.isArray(asset._scanFiles)?asset._scanFiles:(asset._scanFile?[asset._scanFile]:[]);
     const fromScan=initialScanFiles.length>0;
@@ -1415,9 +1585,12 @@
         toast('Scan a label to compare against '+asset.asset_id+'.');
       });
       bindInputAssistance(form);
+      const linkage=bindLinkedAssetFields(form,asset);
+      const operationId=asset._queueRow?.id||crypto.randomUUID();
+      let locallySaved=false;
       const photos=AssetPhotoPicker.mount($('assetPhotoPicker'),{initial:initialScanFiles,onError:message=>toast(message,'error')});
       state.modalCleanup=()=>photos.dispose();
-      let savedAsset=null,guestUploadToken='';
+      let savedAsset=null,guestUploadToken='',linkPayload=null;
       const viewSaved=()=>{
         const id=savedAsset.asset_id;
         closeModal();closeDrawer();
@@ -1431,6 +1604,26 @@
         e.preventDefault(); const fd=new FormData(form); const custom={}; form.querySelectorAll('[data-custom]').forEach(el=>custom[el.dataset.custom]=el.value);
         const params=Object.fromEntries(fd.entries()); params.custom_json=JSON.stringify(custom); if(asset.asset_id)params.asset_id=asset.asset_id;
         const submit=form.querySelector('[type="submit"]');
+        if(!asset.asset_id&&linkage?.enabled()){
+          if(locallySaved)return;
+          await withBusy(submit,'Saving draft…',async()=>{
+            try{
+              const link=linkage.value();
+              if(link.error)throw new Error(link.error);
+              const setWork=!!(link.setName||link.setId||link.parent);
+              const context=setWork?{id:activeSet?.id||operationId,parent:link.parent||operationId,setName:link.setName,setId:link.setId,placement:Object.fromEntries(['site_id','area','exact_location','assigned_to'].map(k=>[k,params[k]||''])),template:AssetGroups.template(params)}:null;
+              const queuedPhotos=photos.items.map((item,i)=>({file:item.file,type:item.type==='serial_label'?'serial_label':i===0?'main':'other'}));
+              if(asset._queueRow)await saveQueue.revise(operationId,params,queuedPhotos,link);
+              else await saveQueue.enqueue({id:operationId,params,photos:queuedPhotos,...link});
+              locallySaved=true;
+              activeSet=context;
+              if(!context)ordinarySave={id:operationId,fromScan};
+              closeModal();closeDrawer();
+              if(fromScan)resetScannerResult({restartCamera:false});
+              if(context)openSetOverview();else{setRoute('assets');toast('Saved on this device. Use the pending count to follow details and photos.');}
+            }catch(err){toast('Draft was not saved. Keep this form open. '+humanError(err),'error');}
+          });return;
+        }
         await withBusy(submit,asset.asset_id?'Saving...':'Creating...',async()=>{
           try{
             const creating=!asset.asset_id;
@@ -1443,6 +1636,10 @@
               // A photo retry must not create another record or silently discard edits.
               form.querySelectorAll('input,select,textarea').forEach(el=>{el.disabled=true;});
               $('cancelAssetForm').textContent='View saved asset';
+            }
+            if(asset.asset_id&&linkage?.enabled()){
+              if(!linkPayload)linkPayload=linkage.editPayload(savedAsset,operationId);
+              if(linkPayload){const linked=await AssetAPI.post('saveAssetBatch',linkPayload);linked.result.assets.forEach(optimisticAsset);savedAsset={...savedAsset,...linked.result.assets.find(a=>a.asset_id===savedAsset.asset_id)};cacheAssetDetail(savedAsset);}
             }
             const pending=photos.items.filter(item=>!item.uploaded);
             for(const item of pending){
@@ -1487,6 +1684,16 @@
         const pending=picker.items.filter(item=>!item.uploaded);
         if(!pending.length)return toast('Take a photo or choose from your gallery first.','error');
         const btn=$('uploadImageSubmit'),imageType=$('imageType');
+        if(saveQueue){
+          await withBusy(btn,'Saving photos on this device…',async()=>{
+            try{
+              const a=detailMemoryRecord(assetId)?.data||state.assets.find(a=>a.asset_id===assetId);
+              if(!a)throw new Error('Reopen the asset before attaching photos.');
+              await saveQueue.enqueuePhotos({id:crypto.randomUUID(),asset:a,photos:pending.map(item=>({file:item.file,type:imageType.value}))});
+              closeModal();toast('Photos saved locally. Follow progress using the pending count.');
+            }catch(err){toast('Photos were not saved. Keep this form open. '+humanError(err),'error');}
+          });return;
+        }
         await withBusy(btn,'Uploading...',async()=>{
           setPhotoOperationBusy(true);picker.setBusy(true);imageType.disabled=true;
           try{

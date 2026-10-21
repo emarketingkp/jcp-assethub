@@ -21,10 +21,11 @@
   const api={getUrl:()=>'/test-backend',setUrl(){},getToken:()=>user.role==='GUEST'?'':'test-session',setToken(){},getLastTiming:()=>null};
   api.get=async(action,params={})=>{
     state.calls.push({action,params:clone(params)});
-    if(action==='bootstrap')return startupReply(action,{success:true,version:'2.7',features:{asset_groups:options.grouping===false?0:1},user,references:clone(refs),dashboard:{},authenticated:user.role!=='GUEST',ai_ocr_enabled:!!options.ai});
-    if(action==='sync')return startupReply(action,{sync:{version:'2.7',ai_ocr_enabled:!!options.ai,features:{asset_groups:options.grouping===false?0:1},user,authenticated:user.role!=='GUEST',assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}});
+    if(action==='bootstrap')return startupReply(action,{success:true,version:'2.7',features:{asset_groups:options.grouping===false?0:1,sequential_saves:options.queue?1:0},user,references:clone(refs),dashboard:{},authenticated:user.role!=='GUEST',ai_ocr_enabled:!!options.ai});
+    if(action==='sync')return startupReply(action,{sync:{version:'2.7',ai_ocr_enabled:!!options.ai,features:{asset_groups:options.grouping===false?0:1,sequential_saves:options.queue?1:0},user,authenticated:user.role!=='GUEST',assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}});
     if(action==='suggestMatchesV27'){if(options.matchFail)throw new Error('Matching service unavailable');return {matches:clone(options.matches||[])};}
     if(action==='listAssets')return {assets:clone(state.assets)};
+    if(action==='assetDetailsBatch')return {assets:clone(state.assets.filter(a=>JSON.parse(params.ids_json).includes(a.asset_id)).map(a=>{const b={...a};delete b.images;return b;}))};
     if(action==='getAsset')return {asset:clone(state.assets.find(a=>a.asset_id===params.asset_id))};
     if(action==='getImageData')return {data:{data_url:pixel}};
     if(action==='diagnostics'){
@@ -69,7 +70,7 @@
       const a=state.assets.find(a=>a.asset_id===params.assetId);
       if(user.role==='GUEST'&&params.guest_upload_token!=='test-upload-grant')throw new Error('Missing guest upload grant');
       const image={image_id:'IMG-'+state.uploadAttempts,image_type:params.imageType,drive_file_id:'FILE-'+state.uploadAttempts,thumbnail_file_id:'THUMB-'+state.uploadAttempts,active:true};
-      a.images.push(image);return {image:clone(image)};
+      (a.images||(a.images=[])).push(image);return {image:clone(image)};
     }
     if(action==='replaceImage'){
       const a=state.assets.find(a=>a.images.some(i=>i.image_id===params.image_id));
