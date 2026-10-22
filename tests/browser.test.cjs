@@ -82,6 +82,19 @@ test('browser regressions on mobile and desktop',async t=>{
     if(count!==2){await page.locator('#batchQuantity').fill(String(count));await page.locator('#batchQuantity').press('Tab');}
   }
   try{
+    await t.test('cached Guest boot cannot send anonymous drafts using a saved Staff sign-in',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,delayStartup:true});
+      try{
+        await page.evaluate(async()=>{
+          const proof=crypto.randomUUID();localStorage.setItem('jcp_assethub_guest_drafts',proof);localStorage.setItem('fixture-session','test-session-test-staff');
+          localStorage.setItem('jcp_assethub_cache_boot_v1',JSON.stringify({saved_at:Date.now(),data:{success:true,features:{asset_links:1,sequential_saves:1},authenticated:false,user:{name:'Guest',username:'guest',role:'GUEST'},references:{sites:[],areas:[],categories:window.__fixtureCategories,custom_fields:[],brands:[],assignees:[],locations:[],users:[]},dashboard:{}}}));
+          const q=AssetSaveQueue.create({scope:'links-v1|/test-backend|guest:'+proof+'|GUEST',guestKey:proof,api:AssetAPI,online:()=>false});await q.enqueue({id:crypto.randomUUID(),kind:'create',params:{category:'Camera',brand:'',model:'',serial:'ANONYMOUS',site_id:'SITE-TEST',area:'Desk',custom_json:'{}'}});
+        });
+        await page.reload();await page.waitForFunction(()=>window.__mock?.syncRelease);await page.waitForTimeout(150);
+        assert.equal(backend.read('Assets').length,0);assert.equal(await page.evaluate(()=>window.__mock.calls.filter(c=>c.action==='saveAssetOperation').length),0);assert(await page.locator('#pendingSavesBtn').isHidden());
+        await page.evaluate(()=>window.__mock.syncRelease());await page.waitForFunction(()=>document.getElementById('profileRole').textContent==='STAFF');assert.equal(backend.read('Assets').length,0);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
     await t.test('scanning an existing asset links it only after explicit approval and preserves its placement',async()=>{
       const main=stock('ROOT',{model:'Recorder',serial:'ROOT-SERIAL'}),old=stock('OLD',{model:'Old main'}),camera=stock('CAMERA',{brand:'Ricoh',model:'TEST-100',serial:'O01I2345',parent_asset_id:'OLD',area:'Door',area_name:'Door'});
       const {page,context,backend,errors}=await start({links:true,queue:true,assets:[main,old,camera],matches:[{score:100,reasons:['same serial'],asset:camera}]});
@@ -89,7 +102,7 @@ test('browser regressions on mobile and desktop',async t=>{
     });
     await t.test('selected main context survives reopening without carrying serials or photos into a new scan',async()=>{
       const {page,context,errors}=await start({links:true,queue:true,assets:[stock('ROOT',{model:'Recorder',serial:'ROOT-SERIAL'})]});
-      try{await page.locator('[data-mobile-route="assets"]').click();await page.locator('[data-asset="ROOT"]').click();await page.locator('#addLinkedAsset').click();await page.locator('#linkedAssetYes').click();await page.locator('#linkedAssetOcr').click();await page.waitForFunction(async()=>!!await AssetStore.get('entry-main:'+encodeURIComponent('/test-backend|test-staff|STAFF')));await page.reload();await page.locator('#appLoading').waitFor({state:'hidden'});await page.locator('[data-mobile-route="scanner"]').click();await page.locator('#scannerMainContext').waitFor();assert.match(await page.locator('#scannerMainContext').textContent(),/Recorder/);assert.equal(await page.locator('.v27-photo').count(),0);await page.locator('#scannerFile').setInputFiles(image('new-label.png'));await page.locator('#scanMainSelected').waitFor();assert.match(await page.locator('#scanMainSelected').textContent(),/ROOT/);assert.equal(await page.locator('#scanEntryArea').inputValue(),'Test Area');assert.equal(await page.locator('[data-universal-field="serial"]').inputValue(),'O01I2345');assert.equal(await page.locator('.v27-photo').count(),1);assert.deepEqual(errors,[]);}finally{await context.close();}
+      try{await page.locator('[data-mobile-route="assets"]').click();await page.locator('[data-asset="ROOT"]').click();await page.locator('#addLinkedAsset').click();await page.locator('#linkedAssetYes').click();await page.locator('#linkedAssetOcr').click();await page.waitForFunction(async()=>!!await AssetStore.get('entry-main:'+encodeURIComponent('links-v1|/test-backend|test-staff|STAFF')));await page.reload();await page.locator('#appLoading').waitFor({state:'hidden'});await page.locator('[data-mobile-route="scanner"]').click();await page.locator('#scannerMainContext').waitFor();assert.match(await page.locator('#scannerMainContext').textContent(),/Recorder/);assert.equal(await page.locator('.v27-photo').count(),0);await page.locator('#scannerFile').setInputFiles(image('new-label.png'));await page.locator('#scanMainSelected').waitFor();assert.match(await page.locator('#scanMainSelected').textContent(),/ROOT/);assert.equal(await page.locator('#scanEntryArea').inputValue(),'Test Area');assert.equal(await page.locator('[data-universal-field="serial"]').inputValue(),'O01I2345');assert.equal(await page.locator('.v27-photo').count(),1);assert.deepEqual(errors,[]);}finally{await context.close();}
     });
     await t.test('new workflow fallback loads more than 1000 summaries through pages',async()=>{
       const assets=Array.from({length:1003},(_,i)=>stock('ASSET-'+String(i).padStart(5,'0')));

@@ -14,7 +14,7 @@
     });}
     return {put:r=>transaction('readwrite',s=>s.put(r)),all:()=>transaction('readonly',s=>s.getAll())};
   }
-  function create({storage=database(),scope,api,online=()=>navigator.onLine,photosAllowed=()=>true,onChange=()=>{},onAsset=()=>{},onAuthRequired=()=>{},guestKey='',active=()=>true,prepare=async file=>{
+  function create({storage=database(),scope,api,online=()=>navigator.onLine,photosAllowed=()=>true,onChange=()=>{},onAsset=()=>{},onAuthRequired=()=>{},guestKey='',legacyScope='',coordinationScope=scope,active=()=>true,prepare=async file=>{
     const {full,thumb}=await AssetImage.prepareForStorage(file);
     return {base64Data:await AssetImage.blobToBase64(full),thumbnailBase64:await AssetImage.blobToBase64(thumb),mimeType:'image/webp'};
   },lock=null}){
@@ -22,9 +22,24 @@
     const safeAsset=asset=>{const copy={...asset};delete copy.private_details;delete copy.guest_upload_token;return copy;};
     const notify=(...args)=>{if(active()){try{onChange(...args);}catch(err){console.warn('Queue display failed',err);}}};
     const supported=()=>{if(!lock&&!globalThis.navigator?.locks)throw new Error('This browser needs Web Locks for safe durable saves.');};
-    const coordinate=lock||(fn=>navigator.locks.request('assethub-saves:'+scope,fn));
+    const coordinate=lock||(fn=>navigator.locks.request('assethub-saves:'+coordinationScope,fn));
     const rows=async()=> (await storage.all()).filter(r=>r.scope===scope).sort((a,b)=>a.created-b.created);
     const persist=async r=>{await storage.put(r);notify(await rows());};
+    let migration=null;
+    function migrateLegacy(){
+      if(!legacyScope||legacyScope===scope)return Promise.resolve();
+      if(migration)return migration;
+      migration=(async()=>{supported();await coordinate(async()=>{
+        if(!active())return;
+        for(const row of await storage.all()){
+          if(!active())return;
+          // Only the older create/batch protocol may move into this queue.
+          // New operation kinds stay hidden from older frontend processors on rollback.
+          if(row.scope===legacyScope&&!row.kind){row.scope=scope;await storage.put(row);}
+        }
+      });notify(await rows());void pump();})().catch(err=>notify(null,String(err.message||err))).finally(()=>migration=null);
+      return migration;
+    }
     async function enqueue({id,params,photos=[],parent='',setName='',setId='',anchor=null,kind='',evidence=null}){
       supported();
       const existing=(await rows()).find(r=>r.id===id);if(existing)return existing;
@@ -63,7 +78,7 @@
                 await persist(row); // Freeze reviewed bytes before the first transmission.
               }
               if(!active())break;
-              const reply=await api.post(row.action||'saveAssetBatch',row.payload);
+              const reply=await api.post(row.action||'saveAssetBatch',row.payload,row.guestKey?{publicCall:true}:undefined);
               const asset=reply.result.asset||reply.result.assets?.at(-1);
               if(!asset?.asset_id)throw new Error('Backend did not confirm an asset ID. Retry reconciliation.');
               if(asset.guest_upload_token)guestGrants.set(row.id,asset.guest_upload_token);
@@ -79,15 +94,15 @@
               // Metadata queued while compression ran takes precedence over the next upload.
               if((await rows()).some(r=>!r.asset&&r.state!=='Retry'&&(!r.parent||(all.find(p=>p.id===r.parent)?.asset))))continue;
               if(row.guestKey&&!guestGrants.has(row.id)){
-                const reply=await api.post('saveAssetOperation',row.payload);
+                const reply=await api.post('saveAssetOperation',row.payload,{publicCall:true});
                 if(reply.result.asset?.guest_upload_token)guestGrants.set(row.id,reply.result.asset.guest_upload_token);
               }
               if(!active())break;
-              const sendPhoto=()=>api.post('uploadImage',{...photo.prepared,assetId:row.asset.asset_id,imageType:photo.type,operation_id:photo.id,...(row.guestKey?{guest_upload_token:guestGrants.get(row.id)}:{})});
+              const sendPhoto=()=>api.post('uploadImage',{...photo.prepared,assetId:row.asset.asset_id,imageType:photo.type,operation_id:photo.id,...(row.guestKey?{guest_upload_token:guestGrants.get(row.id)}:{})},row.guestKey?{publicCall:true}:undefined);
               let reply;try{reply=await sendPhoto();}catch(err){
                 if(!row.guestKey||!/AUTH_REQUIRED/.test(String(err.message||err)))throw err;
                 // An expired short-lived grant can only be renewed by replaying the same Guest proof.
-                const renewed=await api.post('saveAssetOperation',row.payload);guestGrants.set(row.id,renewed.result.asset.guest_upload_token);
+                const renewed=await api.post('saveAssetOperation',row.payload,{publicCall:true});guestGrants.set(row.id,renewed.result.asset.guest_upload_token);
                 if(!active())break;reply=await sendPhoto();
               }
               photo.uploaded=true;delete photo.file;delete photo.prepared;
@@ -116,7 +131,7 @@
       if(link)Object.assign(row,{parent:link.parent||'',setName:link.setName||'',setId:link.setId||'',anchor:link.anchor||null});
       row.params=structuredClone(params);if(evidence!==undefined)row.evidence=structuredClone(evidence);row.photos=photos.map((p,i)=>({...p,id:id+'-photo-'+i}));delete row.payload;delete row.action;row.error='';row.state='Saving details';await persist(row);void pump();return row;
     }
-    return {enqueue,enqueuePhotos,rows,pump,retry,revise,scope};
+    return {enqueue,enqueuePhotos,rows,pump,retry,revise,migrateLegacy,scope};
   }
   return {create};
 });

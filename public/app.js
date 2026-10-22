@@ -1507,12 +1507,16 @@
     if(!simpleLinksEnabled()){queueProtocol='legacy';return configureLegacySaveQueue();}
     const detailScope=detailStoreKey('');
     if(detailScope!==activeDetailScope){activeDetailScope=detailScope;clearSensitiveDetailCache();state.detailRequests.clear();closeDrawer();}
-    const endpoint=AssetAPI.getUrl(),credential=AssetAPI.getToken(),guest=isGuest(),guestKey=guest?guestQueueKey():'',scope=endpoint+'|'+(guest?'guest:'+guestKey:state.user?.username||state.user?.email)+'|'+role();
+    const endpoint=AssetAPI.getUrl(),credential=AssetAPI.getToken(),guest=isGuest();
+    // Cached boot deliberately paints Guest while the saved sign-in is being verified.
+    // Do not resume anonymous drafts with a signed-in token during that interval.
+    if(guest&&credential){queueScope='';queueProtocol='links';saveQueue=null;queueRows=[];linkedContext=null;paintLinkedPendingSaves();return;}
+    const guestKey=guest?guestQueueKey():'',legacyScope=endpoint+'|'+(guest?'guest:'+guestKey:state.user?.username||state.user?.email)+'|'+role(),scope='links-v1|'+legacyScope;
     if(scope===queueScope&&queueProtocol==='links'&&queueCredential===AssetAPI.getToken())return;
     if(queueCredential!==credential){clearSensitiveDetailCache();state.detailRequests.clear();}
     queueCredential=credential;
     $('saveFailureNotice')?.remove();queueScope=scope;queueProtocol='links';queueRows=[];queuePaused=false;queueStorageError='';activeSet=null;ordinarySave=null;linkedContext=null;notifiedSaves.clear();
-    const current=AssetSaveQueue.create({scope,guestKey,api:AssetAPI,
+    const current=AssetSaveQueue.create({scope,guestKey,legacyScope:guest?'':legacyScope,coordinationScope:legacyScope,api:AssetAPI,
       active:()=>queueScope===scope&&queueProtocol==='links'&&saveQueue===current&&!queuePaused&&AssetAPI.getUrl()===endpoint&&AssetAPI.getToken()===credential,
       photosAllowed:()=>!state.recognitionSession?.photos?.some(p=>p.processing||p.codeBusy),
       onAuthRequired:()=>{queuePaused=true;clearSensitiveDetailCache();document.querySelectorAll('.staff-private-section').forEach(el=>el.remove());$('profileRole').textContent='Session expired';$('signInBtn').classList.remove('hidden');paintLinkedPendingSaves();},
@@ -1533,7 +1537,7 @@
         if(metadata&&linkedContext?.operationId===row.id)setLinkedContext({...linkedContext,operationId:'',assetId:asset.asset_id});
         renderLinkedDetailSection();renderLinkContext();paintPendingRegister();
       }});
-    saveQueue=current;
+    saveQueue=current;void current.migrateLegacy();
     const contextEpoch=++linkContextEpoch;
     window.AssetStore?.get?.('entry-main:'+encodeURIComponent(scope)).then(context=>{if(saveQueue===current&&contextEpoch===linkContextEpoch&&context){linkedContext=context;renderLinkContext();}});
     current.rows().then(rows=>{if(saveQueue!==current||queueScope!==scope)return;queueRows=rows;paintLinkedPendingSaves();if(isAuthenticated())for(const row of rows){if(row.state==='Retry'&&/AUTH_REQUIRED|SESSION_EXPIRED|USER_DISABLED/.test(row.error))void current.retry(row.id);}void current.pump();}).catch(err=>toast('Pending items could not be read. '+humanError(err),'error'));
@@ -1688,6 +1692,7 @@
   function recognitionEvidence(session){return {type:'scan',entry:structuredClone(session.entry),overrides:structuredClone(session.overrides),resolutions:structuredClone(session.resolutions),matches:structuredClone(session.matches),photos:session.photos.map(p=>Object.fromEntries(['id','observation','ocr','ai','codes','warning','error','steps'].filter(k=>p[k]!==undefined).map(k=>[k,structuredClone(p[k])]))) };}
   async function saveScanDirect(incoming,session){
     if(session.locallySaved||session.localSaving)return;
+    if(!saveQueue)return toast('Connect to verify your saved sign-in before saving. Your result and photos are still here.','error');
     const region=$('scanResult').querySelector('.scan-entry');for(const input of region.querySelectorAll('input,select'))if(!input.reportValidity())return;
     const link=session.mainBinding?.link()||{};if(link.error)return toast(link.error,'error');
     const entry=scanEntry(session),params={...incoming,site_id:entry.site_id,area:entry.area,exact_location:entry.exact_location||'',assigned_to:entry.assigned_to||'',status:entry.status,custom_json:JSON.stringify(entry.custom||{})};
@@ -1703,6 +1708,7 @@
     }catch(err){toast('Draft was not saved. Keep this result open. '+humanError(err),'error');}finally{session.localSaving=false;}});
   }
   async function saveAssetFormInBackground(asset,form,photos,linkage,id){
+    if(!saveQueue)throw new Error('Connect to verify your saved sign-in before saving. Your form and photos are still here.');
     const sourceScope=queueScope;const params=Object.fromEntries(new FormData(form)),custom={};form.querySelectorAll('[data-custom]').forEach(el=>custom[el.dataset.custom]=el.value);params.custom_json=JSON.stringify(custom);
     if(asset.asset_id){params.asset_id=asset.asset_id;params.expected_updated_at=asset.updated_at||asset.expected_updated_at||'';}
     const link=linkage?.link()||{};if(link.error)throw new Error(link.error);
