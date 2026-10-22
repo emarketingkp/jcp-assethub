@@ -641,6 +641,8 @@ test('browser regressions on mobile and desktop',async t=>{
       try{
         await page.locator('#systemStatusBtn').click();
         await page.locator('[data-connection="api"][data-state="ok"]').waitFor();await page.locator('[data-connection="storage"][data-state="ok"]').waitFor();
+        assert.deepEqual(await page.evaluate(()=>{const p=window.__mock.calls.find(c=>c.action==='diagnostics'&&c.params.component==='api').params;return [p.frontend_version,p.frontend_release];}),['2.8.0','2.8.1']);
+        assert.match(await page.locator('[data-connection="version"][data-state="ok"]').textContent(),/Frontend 2\.8\.1 requires backend API 2\.8\.0/);
         await page.waitForFunction(()=>window.__mock.diagReleases.sheets&&window.__mock.diagReleases.drive);
         assert.equal(await page.locator('[data-connection="drive"]').getAttribute('data-state'),'checking');
         await page.evaluate(()=>window.__mock.diagReleases.sheets());await page.locator('[data-connection="sheets"][data-state="ok"]').waitFor();
@@ -649,6 +651,13 @@ test('browser regressions on mobile and desktop',async t=>{
         await page.evaluate(()=>window.__mock.diagReleases.drive());await page.locator('[data-connection="drive"][data-state="error"]').waitFor();
         await page.locator('[data-connection="barcode"][data-state="ok"]').waitFor();assert.match(await page.locator('[data-connection="barcode"]').textContent(),/ZXing WASM/);
         await checkNoOverflow(page);await page.screenshot({path:path.resolve('test-results/mobile-connection-checks.png'),fullPage:true});assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('frontend patch compatibility still reports a genuinely different backend API',async()=>{
+      const {page,context,errors}=await start({backendVersion:'2.7.2'});
+      try{
+        await page.locator('#systemStatusBtn').click();await page.locator('[data-connection="version"][data-state="error"]').waitFor();
+        assert.match(await page.locator('[data-connection="version"]').textContent(),/backend 2\.7\.2/);assert.deepEqual(errors,[]);
       }finally{await context.close();}
     });
     await t.test('explicit OCR/AI tests update separately and a successful sync cannot hide AI quota failure',async()=>{

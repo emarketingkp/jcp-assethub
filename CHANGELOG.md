@@ -1,10 +1,12 @@
-# 2.8.0 navigation update — Unreleased (2026-10-22)
+# 2.8.1 — 2026-10-22
 
 - Return locally saved scans to the asset register before offering linked capture; keep background saves running.
 - Preserve unfinished scan reviews across navigation. Start explicit linked/update scans with fresh evidence and the correct target.
 - Open one camera per capture, release obsolete streams, retain choices after native camera cancellation and remove the old drawer before photo-only manual entry.
 - Ignore late detail/cache/image/tag/review responses and local-save acknowledgements after changing screens. Bind detail actions immediately without waiting for images.
-- Refresh the static app cache with build `2.8.0-navigation-1`; retain the 2.8.0 backend contract and durable queue scope. No Apps Script changes or deployment.
+- Refresh the static app cache with build `2.8.1-navigation-1`; retain the 2.8.0 backend contract and durable queue scope. No Apps Script changes required.
+
+- Report frontend 2.8.1 separately from the 2.8.0 API compatibility target so frontend patch releases do not falsely flag an unchanged backend as incompatible.
 
 # 2.8.0 — Hosting deployed (2026-10-22)
 

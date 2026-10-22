@@ -16,8 +16,10 @@
     maintenanceSort:{key:'reported_at',dir:'desc'},
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
-  const APP_VERSION = '2.8.0';
-  const BUILD_ID = '2.8.0-navigation-1';
+  const APP_VERSION = '2.8.1';
+  const BUILD_ID = '2.8.1-navigation-1';
+  // Frontend patch releases retain the deployed Apps Script API contract.
+  const BACKEND_API_VERSION = '2.8.0';
   const ASSET_BASE_URL = 'https://assets.jcpmalaysia.com/';
   const CACHE_BOOT = 'jcp_assethub_cache_boot_v1';
   const CACHE_ASSETS = 'jcp_assethub_cache_assets_v1';
@@ -787,7 +789,9 @@
     ];
     let response;
     await connectionHealth.run('api',async()=>{
-      const r=await AssetAPI.get('diagnostics',{frontend_version:APP_VERSION,component:'api'});response=r.diagnostics;
+      const r=await AssetAPI.get('diagnostics',{frontend_version:BACKEND_API_VERSION,frontend_release:APP_VERSION,component:'api'});response=r.diagnostics;
+      const version=response?.components?.version;
+      if(version)version.message=`Frontend ${APP_VERSION} requires backend API ${BACKEND_API_VERSION}. `+(version.ok||version.state==='ok'?'Backend API version verified.':version.message||'Backend API version could not be verified.');
       if(!response?.components?.api?.ok)throw new Error('The backend did not return a valid diagnostic API result.');
       return {...response.components.api,state:'ok',evidence:'response'};
     });

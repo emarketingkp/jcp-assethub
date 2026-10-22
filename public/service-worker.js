@@ -1,4 +1,4 @@
-const CACHE = 'jcp-assethub-v2.8.0-navigation-1';
+const CACHE = 'jcp-assethub-v2.8.1-navigation-1';
 const CORE = [
   './','./index.html','./app.css','./store.js','./api-config.js','./api.js','./image.js','./code-scanner.js','./recognition-v27.js','./app.js',
   './manifest.webmanifest','./assets/icon-192.png','./assets/icon-512.png',

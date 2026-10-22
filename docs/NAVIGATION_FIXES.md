@@ -1,6 +1,6 @@
 # Scanner and linked-asset navigation
 
-Build `2.8.0-navigation-1` is prepared from merged main `d90f162`. No deployment was performed for this change. The existing 2.8.0 Apps Script backend is compatible; neither `.gs` file nor schema setup changes. The numeric frontend version remains 2.8.0 to preserve the backend's existing exact-version diagnostics; the distinct build ID and service-worker cache advertise this update.
+The merged navigation fixes are released as frontend **2.8.1**, build `2.8.1-navigation-1`, based on merged main `76331e0`. The existing **2.8.0 Apps Script API** remains compatible; neither `.gs` file nor schema setup changes. Diagnostics send the explicit 2.8.0 API compatibility target while reporting the actual frontend release separately. The distinct version/build ID and service-worker cache advertise the update without changing pending queue scopes.
 
 ## Resulting behavior
 
