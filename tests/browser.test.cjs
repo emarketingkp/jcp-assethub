@@ -27,6 +27,8 @@ test('browser regressions on mobile and desktop',async t=>{
     const context=await browser.newContext({viewport,serviceWorkers:'block'});
     const backend=createHarness(options);
     await context.exposeFunction('__assetBatchBridge',params=>({result:backend.request(params),assets:backend.read('Assets')}));
+    await context.exposeFunction('__assetOperationBridge',(params,user)=>({result:JSON.parse(JSON.stringify(backend.context.saveAssetOperation_(params,user))),assets:backend.read('Assets')}));
+    await context.exposeFunction('__assetReportBridge',params=>{backend.context.Session={getScriptTimeZone:()=> 'UTC'};backend.context.Utilities.formatDate=d=>d.toISOString().slice(0,10);return JSON.parse(JSON.stringify(backend.context.buildReport_(params)));});
     await context.addInitScript(({options,categories})=>{
       window.__mockOptions=options;window.__fixtureCategories=categories;
       if(!options.queue)localStorage.setItem('jcp_assethub_asset_grouping','on');
@@ -80,6 +82,133 @@ test('browser regressions on mobile and desktop',async t=>{
     if(count!==2){await page.locator('#batchQuantity').fill(String(count));await page.locator('#batchQuantity').press('Tab');}
   }
   try{
+    await t.test('cached Guest boot cannot send anonymous drafts using a saved Staff sign-in',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,delayStartup:true});
+      try{
+        await page.evaluate(async()=>{
+          const proof=crypto.randomUUID();localStorage.setItem('jcp_assethub_guest_drafts',proof);localStorage.setItem('fixture-session','test-session-test-staff');
+          localStorage.setItem('jcp_assethub_cache_boot_v1',JSON.stringify({saved_at:Date.now(),data:{success:true,features:{asset_links:1,sequential_saves:1},authenticated:false,user:{name:'Guest',username:'guest',role:'GUEST'},references:{sites:[],areas:[],categories:window.__fixtureCategories,custom_fields:[],brands:[],assignees:[],locations:[],users:[]},dashboard:{}}}));
+          const q=AssetSaveQueue.create({scope:'links-v1|/test-backend|guest:'+proof+'|GUEST',guestKey:proof,api:AssetAPI,online:()=>false});await q.enqueue({id:crypto.randomUUID(),kind:'create',params:{category:'Camera',brand:'',model:'',serial:'ANONYMOUS',site_id:'SITE-TEST',area:'Desk',custom_json:'{}'}});
+        });
+        await page.reload();await page.waitForFunction(()=>window.__mock?.syncRelease);await page.waitForTimeout(150);
+        assert.equal(backend.read('Assets').length,0);assert.equal(await page.evaluate(()=>window.__mock.calls.filter(c=>c.action==='saveAssetOperation').length),0);assert(await page.locator('#pendingSavesBtn').isHidden());
+        await page.evaluate(()=>window.__mock.syncRelease());await page.waitForFunction(()=>document.getElementById('profileRole').textContent==='STAFF');assert.equal(backend.read('Assets').length,0);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('scanning an existing asset links it only after explicit approval and preserves its placement',async()=>{
+      const main=stock('ROOT',{model:'Recorder',serial:'ROOT-SERIAL'}),old=stock('OLD',{model:'Old main'}),camera=stock('CAMERA',{brand:'Ricoh',model:'TEST-100',serial:'O01I2345',parent_asset_id:'OLD',area:'Door',area_name:'Door'});
+      const {page,context,backend,errors}=await start({links:true,queue:true,assets:[main,old,camera],matches:[{score:100,reasons:['same serial'],asset:camera}]});
+      try{await page.locator('[data-mobile-route="assets"]').click();await page.locator('[data-asset="ROOT"]').click();await page.locator('#addLinkedAsset').click();await page.locator('#linkedAssetYes').click();await page.locator('#linkedAssetOcr').click();await page.locator('#scannerFile').setInputFiles(image('known-asset-label.png'));await page.locator('[data-v27-match="0"]').waitFor();await page.waitForFunction(()=>!document.getElementById('v27Create').disabled);await page.locator('[data-v27-match="0"]').click();await page.locator('#reconcileForm').waitFor();assert(await page.locator('[name="reviewMainLink"][value="keep"]').isChecked());await page.locator('[name="reviewMainLink"][value="link"]').check();await page.locator('#reconcileForm [type="submit"]').click();await page.waitForFunction(()=>window.__mock.assets.find(a=>a.asset_id==='CAMERA').parent_asset_id==='ROOT');const saved=backend.read('Assets').find(a=>a.asset_id==='CAMERA');assert.equal(saved.area,'Door');assert.equal(backend.read('Assets').length,3);assert.equal(backend.read('Movements').length,0);assert.deepEqual(errors,[]);}finally{await context.close();}
+    });
+    await t.test('selected main context survives reopening without carrying serials or photos into a new scan',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,assets:[stock('ROOT',{model:'Recorder',serial:'ROOT-SERIAL'})]});
+      try{await page.locator('[data-mobile-route="assets"]').click();await page.locator('[data-asset="ROOT"]').click();await page.locator('#addLinkedAsset').click();await page.locator('#linkedAssetYes').click();await page.locator('#linkedAssetOcr').click();await page.waitForFunction(async()=>!!await AssetStore.get('entry-main:'+encodeURIComponent('links-v1|/test-backend|test-staff|STAFF')));await page.reload();await page.locator('#appLoading').waitFor({state:'hidden'});await page.locator('[data-mobile-route="scanner"]').click();await page.locator('#scannerMainContext').waitFor();assert.match(await page.locator('#scannerMainContext').textContent(),/Recorder/);assert.equal(await page.locator('.v27-photo').count(),0);await page.locator('#scannerFile').setInputFiles(image('new-label.png'));await page.locator('#scanMainSelected').waitFor();assert.match(await page.locator('#scanMainSelected').textContent(),/ROOT/);assert.equal(await page.locator('#scanEntryArea').inputValue(),'Test Area');assert.equal(await page.locator('[data-universal-field="serial"]').inputValue(),'O01I2345');assert.equal(await page.locator('.v27-photo').count(),1);assert.deepEqual(errors,[]);}finally{await context.close();}
+    });
+    await t.test('new workflow fallback loads more than 1000 summaries through pages',async()=>{
+      const assets=Array.from({length:1003},(_,i)=>stock('ASSET-'+String(i).padStart(5,'0')));
+      const {page,context,errors}=await start({links:true,queue:true,failStartupSync:true,assets},{width:1440,height:1000});
+      try{await page.locator('.nav-btn[data-route="assets"]').click();await page.waitForFunction(()=>document.getElementById('assetScopeCount').textContent.includes('1003 loaded'));assert.equal(await page.evaluate(()=>window.__mock.calls.filter(c=>c.action==='assetSummaryPage').length),6);assert.equal(await page.locator('.asset-group').count(),0);assert.deepEqual(errors,[]);}finally{await context.close();}
+    });
+    await t.test('direct result retains conflicts, manual overrides, placement and required custom values across two source photos',async()=>{
+      const customFields=[{field_id:'CF-OWNER',label:'Owner',field_type:'text',required:true,active:true}];
+      const {page,context,backend,errors}=await start({links:true,queue:true,customFields});
+      try{
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Keep this area');await page.locator('[data-universal-field="model"]').fill('Manual review');
+        await page.evaluate(()=>window.__mockOptions.ocrText='Brand: Ricoh\nCategory: Printer\nModel: TEST-100\nSerial: DIFFERENT-2');await page.locator('#scannerFile').setInputFiles(image('second-label.png'));await page.locator('[data-conflict$=":serial"]').waitFor();await page.waitForFunction(()=>document.querySelectorAll('.v27-photo').length===2&&!document.querySelector('.v27-step.busy'));
+        assert(await page.locator('#v27Create').isDisabled());for(const select of await page.locator('[data-conflict]').all())await select.selectOption(await select.locator('option').nth(1).getAttribute('value'));await page.waitForFunction(()=>!document.getElementById('v27Create').disabled);
+        assert.equal(await page.locator('#scanEntryArea').inputValue(),'Keep this area');assert.equal(await page.locator('[data-universal-field="model"]').inputValue(),'Manual review');await page.locator('#v27Create').click();assert.equal(backend.read('Assets').length,0);await page.locator('[data-custom="CF-OWNER"]').fill('Security');await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.waitForFunction(()=>window.__mock.assets.length===1);assert.equal(backend.read('Assets')[0].model,'Manual review');assert.equal(backend.read('CustomValues')[0].value,'Security');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('a duplicate rejection reopens the original scan evidence and revises the same unstarted operation',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,assets:[stock('EXISTING',{serial:'O01I2345'})]});
+      try{await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#scannerPendingBtn').click();await page.locator('[data-review-save]').click();assert.equal(await page.locator('.v27-photo').count(),1);assert.equal(await page.locator('#scanEntryArea').inputValue(),'Desk');await page.locator('[data-universal-field="serial"]').fill('NEW-UNIQUE');await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.waitForFunction(()=>window.__mock.assets.length===2);assert.equal(backend.read('Assets').length,2);assert.equal(backend.read('AssetBatches').length,1);assert.deepEqual(errors,[]);}finally{await context.close();}
+    });
+    await t.test('stale queued edits compare latest values and apply a draft only after explicit review',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,assets:[stock('EDIT-ME')]},{width:1440,height:1000});
+      try{
+        await page.locator('.nav-btn[data-route="assets"]').click();await page.locator('[data-asset="EDIT-ME"]').click();await page.locator('#editAssetDrawer').click();await page.locator('#assetForm [name="model"]').fill('My draft');backend.context.writeLinkedAssetPatch_('EDIT-ME',{model:'Another user edit',updated_at:'2099-01-01T00:00:00.000Z'});await page.evaluate(()=>Object.assign(window.__mock.assets[0],{model:'Another user edit',updated_at:'2099-01-01T00:00:00.000Z'}));await page.locator('#assetForm [type="submit"]').click();await page.locator('#modalWrap').waitFor({state:'hidden'});await page.locator('#saveFailureNotice').waitFor();await page.locator('#pendingSavesBtn').click();await page.locator('[data-review-save]').click();await page.locator('#pendingReviewForm').waitFor();assert.match(await page.locator('#pendingReviewForm').textContent(),/Another user edit/);assert.match(await page.locator('#pendingReviewForm').textContent(),/My draft/);assert(await page.locator('[name="review_model"][value="latest"]').isChecked());await page.locator('[name="review_model"][value="draft"]').check();await page.locator('#pendingReviewForm [type="submit"]').click();await page.waitForFunction(()=>window.__mock.assets[0].model==='My draft');assert.equal(backend.read('Assets')[0].model,'My draft');assert.equal(backend.read('Assets').length,1);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('expired authentication hides drafts, another account cannot send them, and the original account resumes',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true});
+      async function login(name){await page.locator('#loginUsername').fill(name);await page.locator('#loginPassword').fill('synthetic');await page.locator('#loginSubmit').click();await page.locator('#modalWrap').waitFor({state:'hidden'});}
+      try{
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Private draft area');await page.evaluate(()=>window.__mock.expired=true);await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#scannerPendingBtn').click();await page.locator('#resumePendingSignIn').waitFor();assert.equal((await page.locator('#modalBody').textContent()).includes('Private draft area'),false);await page.locator('#resumePendingSignIn').click();await login('other-staff');assert.equal(backend.read('Assets').length,0);assert(await page.locator('#pendingSavesBtn').isHidden());
+        await page.locator('#mobileScannerClose').click();await page.locator('#profileBtn').click();await page.locator('#logoutBtn').click();await page.waitForFunction(()=>document.getElementById('profileName').textContent==='Guest');await page.locator('#profileBtn').click();await page.locator('#signInBtn').click();await login('test-staff');await page.waitForFunction(()=>window.__mock.assets.length===1);assert.equal(backend.read('Assets').length,1);assert.equal(backend.read('Assets')[0].area,'Private draft area');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('placement updates and retirement leave related records in their original placement and status',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,role:'ADMIN',assets:[stock('ROOT'),stock('CHILD',{parent_asset_id:'ROOT'})]},{width:1440,height:1100});
+      try{
+        await page.locator('.nav-btn[data-route="assets"]').click();await page.locator('[data-asset="ROOT"]').click();await page.locator('.asset-drawer-more>summary').click();await page.locator('#moveAssetDrawer').click();await page.locator('#moveArea').fill('New room');await page.locator('#moveAssignForm [type="submit"]').click();await page.locator('#modalWrap').waitFor({state:'hidden'});await page.waitForFunction(()=>window.__mock.assets.find(a=>a.asset_id==='ROOT').area==='New room');assert.equal(backend.read('Assets').find(a=>a.asset_id==='CHILD').area,'Test Area');assert.equal(backend.read('Movements').length,1);
+        await page.locator('#adminToggle').click();await page.locator('[data-asset="ROOT"]').click();await page.locator('#editAssetDrawer').click();await page.locator('#retireAssetBtn').click();assert.match(await page.locator('#modalBody').textContent(),/linked assets keep/);await page.locator('#confirmRetirement').click();await page.waitForFunction(()=>window.__mock.assets.find(a=>a.asset_id==='ROOT').status==='Retired');const child=backend.read('Assets').find(a=>a.asset_id==='CHILD');assert.equal(child.status,'Active');assert.equal(child.parent_asset_id,'ROOT');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('reports and ordinary register search include the main asset without grouping physical records',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,assets:[stock('ROOT',{model:'Recorder'}),stock('CHILD',{parent_asset_id:'ROOT',model:'Camera'})]},{width:1440,height:1000});
+      try{await page.locator('.nav-btn[data-route="assets"]').click();await page.locator('#assetSearch').fill('Recorder');assert.equal(await page.locator('#assetList [data-asset]').count(),2);assert.equal(await page.locator('.asset-group').count(),0);await page.locator('.nav-btn[data-route="reports"]').click();await page.locator('#reportBody').getByText('Recorder',{exact:true}).first().waitFor();assert.match(await page.locator('#reportHead').textContent(),/Main Asset/);assert.match(await page.locator('#reportBody').textContent(),/CHILD/);assert.deepEqual(errors,[]);}finally{await context.close();}
+    });
+    await t.test('direct scan saves reviewed evidence and placement once, with no second Add form',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true});
+      try{
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');
+        await page.locator('[data-universal-field="model"]').fill('Reviewed model');await page.locator('#v27Create').click();await page.locator('#linkedAssetYes').waitFor();
+        assert.equal(await page.locator('#assetForm').count(),0);await page.waitForFunction(()=>window.__mock.assets.length===1);assert.equal(backend.read('Assets')[0].model,'Reviewed model');
+        const op=await page.evaluate(()=>new Promise((resolve,reject)=>{const req=indexedDB.open('jcp-assethub-operations');req.onsuccess=()=>{const tx=req.result.transaction('operations'),q=tx.objectStore('operations').getAll();q.onsuccess=()=>resolve(q.result[0]);q.onerror=()=>reject(q.error);};}));
+        assert.equal(op.evidence.type,'scan');assert.equal(op.evidence.photos.length,1);assert.equal(op.evidence.overrides.model,'Reviewed model');assert.equal(op.params.area,'Desk');
+        await page.locator('#linkedAssetNo').click();assert.equal(await page.locator('#modalWrap').isHidden(),true);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('new main and photo-only child queue offline, resolve a real parent ID after refresh, and never create a set',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true});
+      try{
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Security');await context.setOffline(true);await page.locator('#v27Create').click();await page.locator('#linkedAssetYes').click();
+        assert.equal(await page.locator('.linked-capture-choices>button').count(),2);assert.equal(backend.read('Assets').length,0);
+        const [chooser]=await Promise.all([page.waitForEvent('filechooser'),page.locator('#linkedAssetPhoto').click()]);await chooser.setFiles(image('unlabelled-camera.png'));await page.locator('#assetForm').waitFor();
+        assert.equal(await page.locator('#assetPhotoPicker .photo-picker-preview').count(),1);assert.match(await page.locator('#formMainSelected').textContent(),/Details pending/);assert.equal(await page.locator('#assetSite').inputValue(),'SITE-TEST');
+        for(const name of ['brand','model','serial'])assert.equal(await page.locator(`#assetForm [name="${name}"]`).inputValue(),'');
+        await page.locator('#assetForm [name="category"]').fill('Camera');await page.locator('#assetArea').fill('Entrance');await page.locator('#assetForm [type="submit"]').click();await page.locator('#modalWrap').waitFor({state:'hidden'});assert.equal(backend.read('Assets').length,0);
+        await context.setOffline(false);await page.reload();await page.locator('#appLoading').waitFor({state:'hidden'});await page.waitForFunction(()=>window.__mock.assets.length===2);const rows=backend.read('Assets');const child=rows.find(a=>a.category==='Camera'),root=rows.find(a=>a.category!=='Camera');assert.equal(child.parent_asset_id,root.asset_id);assert.equal(child.brand,'');assert.equal(child.model,'');assert.equal(child.area,'Entrance');assert.equal(root.area,'Security');assert.ok(rows.every(a=>!a.set_id&&!a.set_name));assert.equal(backend.read('AssetBatches').length,2);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('details integrate icon-labelled direct links and offer confirmation plus two capture choices',async()=>{
+      const rack=stock('RACK',{category_name:'Rack',model:'Rack'}),main=stock('RECORDER',{parent_asset_id:'RACK',category_name:'Network video recorder',model:'Recorder'}),child=stock('CAMERA',{parent_asset_id:'RECORDER',category_name:'Camera',model:'Camera'});
+      const {page,context,errors}=await start({links:true,queue:true,assets:[rack,main,child]},{width:1440,height:1100});
+      try{
+        await page.locator('.nav-btn[data-route="assets"]').click();await page.locator('[data-asset="RECORDER"]').click();await page.locator('#assetLinksDetail').waitFor();assert.equal(await page.locator('#assetLinksDetail [data-linked-member]').count(),2);assert.equal(await page.locator('#assetLinksDetail .detail-asset-glyph').count(),2);assert.equal(await page.locator('#addAnotherDrawer').count(),0);assert.equal(await page.locator('#drawerBody>.group-detail').count(),0);
+        await fs.mkdir(path.resolve('test-results'),{recursive:true});await page.locator('#assetDrawer').screenshot({path:path.resolve('test-results/simple-linked-details-desktop.png')});
+        await page.locator('#assetLinksDetail [data-linked-member="CAMERA"]').click();await page.waitForFunction(()=>document.getElementById('drawerId').textContent==='CAMERA');await page.locator('#assetLinksDetail [data-linked-member="RECORDER"]').waitFor();
+        await page.locator('#addLinkedAsset').click();await page.locator('#linkedAssetYes').click();assert.equal(await page.locator('.linked-capture-choices>button').count(),2);await page.locator('#linkedAssetOcr').click();assert.match(await page.locator('#scannerMainContext').textContent(),/Camera/);await checkNoOverflow(page);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('editing changes and removes a reference without duplicating assets or changing their placement',async()=>{
+      const main=stock('ROOT',{model:'Main'}),child=stock('CHILD',{parent_asset_id:'ROOT',model:'Child',area:'Separate area',area_name:'Separate area',set_id:'LEGACY',set_name:'Old set'});
+      const {page,context,backend,errors}=await start({links:true,queue:true,assets:[main,child]},{width:1440,height:1100});
+      try{
+        await page.locator('.nav-btn[data-route="assets"]').click();await page.locator('[data-asset="CHILD"]').click();await page.locator('#editAssetDrawer').click();await page.locator('#formMainRemove').click();await page.locator('#assetForm [type="submit"]').click();await page.locator('#modalWrap').waitFor({state:'hidden'});await page.waitForFunction(()=>!window.__mock.assets.find(a=>a.asset_id==='CHILD').parent_asset_id);const saved=backend.read('Assets').find(a=>a.asset_id==='CHILD');assert.equal(saved.area,'Separate area');assert.equal(saved.set_id,'LEGACY');assert.equal(saved.set_name,'Old set');assert.equal(backend.read('Assets').length,2);assert.equal(backend.read('Movements').length,0);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('lost new-operation response reconciles after reload with one physical asset and stable payload',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,loseOperationReply:true});
+      try{
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#scannerPendingBtn').click();await page.locator('[data-retry-save]').waitFor();assert.equal(backend.read('Assets').length,1);
+        await page.reload();await page.locator('#appLoading').waitFor({state:'hidden'});await page.locator('#pendingSavesBtn').click();await page.locator('[data-retry-save]').click();await page.waitForFunction(()=>window.__mock.assets.length===1&&document.getElementById('linkedPendingItems').textContent.includes('No pending'));assert.equal(backend.read('Assets').length,1);assert.equal(backend.read('AssetBatches').length,1);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('a failed background photo keeps details saved, retries only remaining uploads, and sends no success popup',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true});
+      try{
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.evaluate(()=>window.__mock.failNextUpload=true);await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#saveFailureNotice').waitFor();assert.equal(backend.read('Assets').length,1);await page.locator('#scannerPendingBtn').click();assert.match(await page.locator('#linkedPendingItems').textContent(),/DetailsSaved/);await page.locator('[data-retry-save]').click();await page.waitForFunction(()=>document.getElementById('linkedPendingItems').textContent.includes('No pending'));assert.equal(await page.evaluate(()=>window.__mock.uploadAttempts),2);assert.equal(backend.read('Assets').length,1);assert.equal(await page.locator('#toast.show:not(.error)').count(),0);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('browser persistence failure keeps the original validated result open and sends nothing',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,disableIDB:true});
+      try{await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.locator('#v27Create').click();await page.waitForFunction(()=>document.getElementById('toast').textContent.includes('not saved'));assert.equal(await page.locator('#v27Create').isVisible(),true);assert.equal(backend.read('Assets').length,0);assert.deepEqual(errors,[]);}finally{await context.close();}
+    });
+    await t.test('Guest direct saves and photo recovery remain scoped to their new asset',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,role:'GUEST'});
+      try{await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');assert.equal(await page.locator('#scanMainField').count(),0);await page.locator('#v27Create').click();await page.waitForFunction(()=>window.__mock.assets.length===1);await page.waitForFunction(()=>window.__mock.uploadAttempts===1);assert.equal(backend.read('Assets').length,1);assert.equal(await page.locator('#linkedAssetYes').count(),0);assert.deepEqual(errors,[]);}finally{await context.close();}
+    });
     await t.test('sequential set persists offline, continues without network, clears unique IDs and survives refresh',async()=>{
       const {page,context,backend,errors}=await start({queue:true});
       try{

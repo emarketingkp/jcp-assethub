@@ -5,7 +5,7 @@ function setupAssetGrouping() {
   ensureSheet_(ss,SHEETS.ASSETS,SCHEMA.Assets);
   ensureSheet_(ss,SHEETS.ASSET_BATCHES,SCHEMA.AssetBatches);
   invalidateDataCache_();
-  return 'Grouping columns and retry ledger ready. Deploy both Code.gs and AssetGroups.gs.';
+  return 'Main-asset reference and retry ledger ready. Legacy set data retained. Deploy both Code.gs and AssetGroups.gs.';
 }
 
 function groupingFeatures_() {
@@ -13,7 +13,7 @@ function groupingFeatures_() {
     const ss=getSpreadsheet_(),assets=ss.getSheetByName(SHEETS.ASSETS),ledger=ss.getSheetByName(SHEETS.ASSET_BATCHES);
     if(!assets||!ledger)return {asset_groups:0};
     const assetHeaders=new Set(headers_(assets)),ledgerHeaders=new Set(headers_(ledger));
-    const ready=['set_id','set_name'].every(k=>assetHeaders.has(k))&&SCHEMA.AssetBatches.every(k=>ledgerHeaders.has(k));return {asset_groups:ready?1:0,sequential_saves:ready&&assetHeaders.has('parent_asset_id')?1:0};
+    const ready=['set_id','set_name'].every(k=>assetHeaders.has(k))&&SCHEMA.AssetBatches.every(k=>ledgerHeaders.has(k));return {asset_groups:ready?1:0,sequential_saves:ready&&assetHeaders.has('parent_asset_id')?1:0,asset_links:ready&&assetHeaders.has('parent_asset_id')?1:0};
   } catch(_){return {asset_groups:0};}
 }
 
@@ -74,6 +74,7 @@ function batchSerials_(payload,rows,ownIds) {
     if(seen.has(key))throw new Error('DUPLICATE_SERIAL: Different units cannot share a serial. Put shared model/part codes in specifications instead.');seen.add(key);
     const duplicate=rows.find(r=>!ownIds.has(String(r.asset_id))&&normalizeIdentifier_(r.serial)===key);
     if(duplicate)throw new Error('DUPLICATE_SERIAL: '+u.serial+' already belongs to '+duplicate.asset_id+'. Choose the existing item.');
+    if(reservedAssetOperations_().some(r=>!ownIds.has(r.asset_id)&&normalizeIdentifier_(r.serial)===key))throw new Error('DUPLICATE_SERIAL: A pending save reserved this serial. Reconcile that save first.');
   });
 }
 
@@ -101,6 +102,7 @@ function validateBatchMembers_(p,rows,plan,resuming) {
   if(p.mode==='rename'&&(setMembers.length!==chosen.size||setMembers.some(r=>!chosen.has(String(r.asset_id)))))throw new Error('Set membership changed. Reload and review every component before renaming.');
   p.units.forEach(u=>{
     if(!u.existing_asset_id)return;
+    assertNoPendingAssetOperation_(u.existing_asset_id);
     const r=rows.find(a=>String(a.asset_id)===u.existing_asset_id);
     if(!r||r.status==='Merged'||(!['detach','rename'].includes(p.mode)&&r.status==='Retired'))throw new Error('Existing item unavailable: '+u.existing_asset_id);
     const desired=p.mode==='detach'?'':plan.set_id;
@@ -134,7 +136,7 @@ function batchPlan_(p,rows,ledgerRows) {
     while(used.has(id)){const m=id.match(/^(.*-)(\d+)$/);id=m[1]+String(Number(m[2])+1).padStart(4,'0');}used.add(id);return id;
   });
   const before=p.units.map(u=>{const r=rows.find(a=>a.asset_id===u.existing_asset_id);return r?{set_id:r.set_id||'',set_name:r.set_name||'',updated_at:r.updated_at||''}:null;});
-  const plan={ids:ids,set_id:setId||'',set_name:setName||'',created_at:now,before:before};
+  const plan={ids:ids,set_id:setId||'',set_name:setName||'',created_at:now,before:before,reservations:ids.map((id,i)=>({asset_id:id,serial:p.units[i].serial||''}))};
   if(JSON.stringify(plan).length>45000)throw new Error('This set change exceeds the spreadsheet retry-record limit. Ask an administrator to review the oversized set.');
   return plan;
 }
@@ -217,4 +219,160 @@ function saveAssetBatch_(params,user) {
     return batchResult_(requestId,plan);
   } catch(err){throw new Error((started?'':'BATCH_NOT_STARTED: ')+String(err.message||err));}
   finally {lock.releaseLock();}
+}
+
+/* Single physical-asset operations. Legacy set columns/operations remain intact. */
+function linkedOperation_(json) {
+  if(typeof json!=='string'||json.length>48000)throw new Error('Operation exceeds the local-save request limit.');
+  let p;try{p=JSON.parse(json);}catch(_){throw new Error('Invalid asset operation.');}
+  if(!p||!['create','update','link','reconcile','retire'].includes(p.kind))throw new Error('Invalid asset operation kind.');
+  const out={kind:p.kind,asset_id:groupText_(p.asset_id,80,'Asset ID'),expected_updated_at:groupText_(p.expected_updated_at,50,'Review timestamp'),fields:{}};
+  const limits={category:100,category_id:80,brand:120,model:160,serial:80,specifications:4800,site_id:80,area:120,exact_location:160,assigned_to:160,status:30,movement_note:500,parent_asset_id:80};
+  Object.keys(limits).forEach(k=>{if(p.fields&&Object.prototype.hasOwnProperty.call(p.fields,k))out.fields[k]=groupText_(p.fields[k],limits[k],k);});
+  if(p.custom!==undefined){
+    if(!p.custom||typeof p.custom!=='object'||Array.isArray(p.custom))throw new Error('Invalid custom values.');
+    const c={custom:Object.create(null)};Object.keys(p.custom).sort().forEach(k=>{if(!/^[A-Za-z0-9_-]{1,80}$/.test(k)||['__proto__','constructor','prototype'].includes(k))throw new Error('Invalid custom field.');c.custom[k]=groupText_(p.custom[k],1000,'Custom value');});
+    batchCustom_(c,true);out.custom=c.custom;
+  }
+  if(p.kind==='reconcile'){
+    out.incoming={};out.choices={};['category','brand','model','serial','specifications'].forEach(k=>{out.incoming[k]=groupText_(p.incoming&&p.incoming[k],limits[k],k);const v=p.choices&&p.choices[k]||'existing';if(!['existing','incoming','combine'].includes(v)||v==='combine'&&k!=='specifications')throw new Error('Invalid reviewed field choice.');out.choices[k]=v;});
+  }
+  if(p.kind!=='create'&&!out.asset_id)throw new Error('Choose an existing asset.');
+  return out;
+}
+
+function validateMainAsset_(assetId,parentId,rows) {
+  if(!parentId)return;
+  const parent=rows.find(r=>String(r.asset_id)===parentId);
+  if(!parent||['Merged','Retired'].includes(String(parent.status)))throw new Error('PARENT_NOT_READY: Choose an available main asset.');
+  let current=parent;const seen=new Set();
+  while(current){
+    if(String(current.asset_id)===assetId||seen.has(String(current.asset_id)))throw new Error('A main asset link cannot point to itself or create a cycle.');
+    seen.add(String(current.asset_id));current=rows.find(r=>String(r.asset_id)===String(current.parent_asset_id));
+  }
+}
+
+function unfinishedAssetOperation_(assetId,except) {
+  if(!getSpreadsheet_().getSheetByName(SHEETS.ASSET_BATCHES))return null;
+  return listObjects_(SHEETS.ASSET_BATCHES).find(r=>r.request_id!==except&&r.state!=='complete'&&(()=>{try{const p=JSON.parse(r.plan_json);return p.operation_version===1&&p.ids.includes(assetId);}catch(_){return false;}})());
+}
+function assertNoPendingAssetOperation_(assetId) {
+  if(unfinishedAssetOperation_(assetId,''))throw new Error('ASSET_PENDING: Reconcile the earlier save for this asset before changing it again.');
+}
+
+function planLinkedOperation_(op,user,requestId,rows,ledgerRows) {
+  const creating=op.kind==='create',existing=creating?null:rows.find(a=>String(a.asset_id)===op.asset_id);
+  if(!creating&&(!existing||existing.status==='Merged'))throw new Error('Asset not found or merged.');
+  if(existing){
+    assertNoPendingAssetOperation_(existing.asset_id);
+    if(!op.expected_updated_at||String(existing.updated_at||'')!==op.expected_updated_at)throw new Error('ITEM_CHANGED: This asset changed since review. Reload and compare before saving.');
+  }
+  if(op.custom)batchCustom_({custom:op.custom},true);
+  const f=op.fields,actor=actorKey_(user),guest=String(user.role).toUpperCase()==='GUEST';
+  if(guest&&(op.kind!=='create'||f.parent_asset_id))throw new Error('PERMISSION_DENIED: Sign in to link or change existing assets.');
+  if(op.kind==='retire')requireRole_(user,'ADMIN');
+  else if(!creating)requireRole_(user,'STAFF');
+  const stamp=new Date(Math.max(Date.now(),Date.parse(existing&&existing.updated_at||'')+1||0)).toISOString();
+  let patch={},category,site,area;
+  if(creating||op.kind==='update'){
+    const value=k=>Object.prototype.hasOwnProperty.call(f,k)?f[k]:String(existing&&existing[k]||'');
+    if(!value('category')&&!value('category_id'))throw new Error('Choose a category.');
+    if(!value('site_id')||!value('area'))throw new Error('Choose a site and enter an area.');
+    category=resolveCategory_(f.category_id||(existing&&value('category')===existing.category?existing.category_id:''),value('category'),user);
+    site=findByKey_(SHEETS.SITES,'site_id',value('site_id'));if(!site||!truthy_(site.active))throw new Error('Choose an active site.');
+    area=resolveArea_('',value('area'),site.site_id,user,false);
+    ['brand','model','serial','specifications','exact_location','assigned_to'].forEach(k=>patch[k]=value(k));
+    patch.status=value('status')||'Active';if(!['Active','Spare','Faulty','Under Repair','Missing','Retired'].includes(patch.status))throw new Error('Invalid asset status.');
+    if(creating&&patch.status==='Retired')throw new Error('Register the asset before retiring it.');
+    if(!creating&&patch.status==='Retired'&&existing.status!=='Retired')requireRole_(user,'ADMIN');
+    Object.assign(patch,{category:category.name,category_id:category.category_id,site_id:site.site_id,site:site.name,area_id:area&&area.area_id||'',area:area&&area.name||value('area')});
+    if(op.custom===undefined&&creating)batchCustom_({custom:{}},true);
+  }else if(op.kind==='reconcile'){
+    ['category','brand','model','serial','specifications'].forEach(k=>{const v=op.incoming[k];if(!v)return;if(op.choices[k]==='incoming')patch[k]=v;else if(k==='specifications'&&op.choices[k]==='combine')patch[k]=combineSpecifications_(existing[k],v);});
+    if(patch.category!==undefined){category=resolveCategory_('',patch.category,user);patch.category=category.name;patch.category_id=category.category_id;}
+  }else if(op.kind==='retire'){patch.status='Retired';patch.retired_at=stamp;}
+  if(Object.prototype.hasOwnProperty.call(patch,'serial'))assertUniqueSerial_(patch.serial,op.asset_id);
+  const used=new Set(rows.map(r=>String(r.asset_id)));
+  ledgerRows.filter(r=>r.state!=='complete').forEach(r=>{const plan=JSON.parse(r.plan_json);(plan.ids||[]).forEach(id=>used.add(id));});
+  let id=op.asset_id;
+  if(creating){id=nextAssetId_(category.prefix||'AS');while(used.has(id)){const m=id.match(/^(.*-)(\d+)$/);id=m[1]+String(Number(m[2])+1).padStart(4,'0');}}
+  if(creating||Object.prototype.hasOwnProperty.call(f,'parent_asset_id')){
+    const parent=f.parent_asset_id||'';
+    if(creating||parent!==String(existing.parent_asset_id||''))validateMainAsset_(id,parent,rows);
+    patch.parent_asset_id=parent;
+  }
+  if(op.kind==='link'&&!Object.prototype.hasOwnProperty.call(f,'parent_asset_id'))throw new Error('Choose a main asset or explicitly remove the reference.');
+  // Linking and retirement intentionally do not alter placement, legacy membership or children.
+  Object.assign(patch,{updated_at:stamp,updated_by:actor});
+  if(!creating&&patch.status==='Retired'&&existing.status!=='Retired')patch.retired_at=stamp;
+  if(creating)Object.assign(patch,{asset_id:id,created_at:stamp,created_by:actor,source_ref:'operation:'+requestId,main_image_id:'',drive_folder_id:'',retired_at:'',set_id:'',set_name:''});
+  const moved=existing&&['site','area','exact_location','assigned_to'].some(k=>patch[k]!==undefined&&String(patch[k])!==String(existing[k]||''));
+  const movement=moved?{movement_id:'MOV-Q-'+requestId,asset_id:id,from_site:existing.site,from_area:existing.area,from_location:existing.exact_location,from_assigned:existing.assigned_to,to_site:patch.site,to_area:patch.area,to_location:patch.exact_location,to_assigned:patch.assigned_to,moved_by:actor,moved_at:stamp,note:f.movement_note||''}:null;
+  const plan={operation_version:1,kind:op.kind,ids:[id],patch:patch,before:existing,custom:op.custom||null,movement:movement,created_at:stamp};
+  if(JSON.stringify(plan).length>45000)throw new Error('This save is too large for the retry ledger. Reduce specifications or custom information.');
+  return plan;
+}
+
+function writeLinkedAssetPatch_(assetId,patch) {
+  const sheet=getSheet_(SHEETS.ASSETS),data=sheet.getDataRange().getValues(),h=data[0].map(String),idCol=h.indexOf('asset_id');
+  const index=data.findIndex((r,i)=>i>0&&String(r[idCol])===assetId);if(index<1)throw new Error('Asset disappeared before saving.');
+  const row=Object.assign({},rowToObject_(h,data[index]),patch);
+  try{const range=sheet.getRange(index+1,1,1,h.length);range.setNumberFormat('@');range.setValues([h.map(k=>groupSheetValue_(row[k]==null?'':row[k]))]);}finally{clearRequestCache_(SHEETS.ASSETS);}
+}
+
+function applyLinkedOperation_(plan,op,user,requestId) {
+  const id=plan.ids[0],creating=plan.kind==='create',current=findByKey_(SHEETS.ASSETS,'asset_id',id);
+  const keys=Object.keys(plan.patch).filter(k=>!['updated_at','updated_by','main_image_id','drive_folder_id'].includes(k));
+  const applied=current&&keys.every(k=>String(current[k]||'')===String(plan.patch[k]||''));
+  if(creating){
+    if(current&&current.source_ref!==plan.patch.source_ref)throw new Error('Reserved asset ID belongs to another operation.');
+    if(!current){assertUniqueSerial_(plan.patch.serial,id);validateMainAsset_(id,plan.patch.parent_asset_id,listObjects_(SHEETS.ASSETS));appendBatchRows_(SHEETS.ASSETS,[plan.patch]);}
+  }else if(!applied){
+    if(!current||keys.some(k=>String(current[k]||'')!==String(plan.before[k]||'')))throw new Error('ITEM_CHANGED: Reconcile the incomplete operation before changing newer data.');
+    if(plan.patch.serial!==undefined)assertUniqueSerial_(plan.patch.serial,id);
+    if(plan.patch.parent_asset_id!==undefined&&plan.patch.parent_asset_id!==String(current.parent_asset_id||''))validateMainAsset_(id,plan.patch.parent_asset_id,listObjects_(SHEETS.ASSETS));
+    const patch=Object.assign({},plan.patch,{updated_at:String(current.updated_at||'')>plan.patch.updated_at?current.updated_at:plan.patch.updated_at});
+    writeLinkedAssetPatch_(id,patch);
+  }
+  if(plan.custom){
+    const values=listObjects_(SHEETS.CUSTOM_VALUES);
+    Object.keys(plan.custom).forEach(field=>{const old=values.find(r=>r.asset_id===id&&r.field_id===field);const value={asset_id:id,field_id:field,value:plan.custom[field],updated_at:plan.created_at,updated_by:actorKey_(user)};if(!old)appendBatchRows_(SHEETS.CUSTOM_VALUES,[value]);else if(old.value!==value.value)updateByComposite_(SHEETS.CUSTOM_VALUES,{asset_id:id,field_id:field},value);});
+  }
+  if(plan.movement&&!findByKey_(SHEETS.MOVEMENTS,'movement_id',plan.movement.movement_id))appendBatchRows_(SHEETS.MOVEMENTS,[plan.movement]);
+  const action={create:'CREATE_ASSET',update:'UPDATE_ASSET',link:'LINK_ASSET',reconcile:'RECONCILE_ASSET',retire:'RETIRE_ASSET'}[plan.kind];
+  if(!listObjects_(SHEETS.ACTIVITY).some(r=>r.asset_id===id&&r.action===action&&(()=>{try{return JSON.parse(r.details).request_id===requestId;}catch(_){return false;}})())){
+    appendBatchRows_(SHEETS.ACTIVITY,[{timestamp:plan.created_at,user:actorKey_(user),role:user.role,action:action,asset_id:id,before_json:JSON.stringify(plan.before),after_json:JSON.stringify(plan.patch),details:JSON.stringify({summary:plan.kind==='link'?'Main asset reference changed':'Asset '+plan.kind,request_id:requestId})}]);
+  }
+}
+
+function saveAssetOperation_(params,user) {
+  const requestId=groupText_(params.request_id,80,'Request ID');if(!/^[A-Za-z0-9-]{16,80}$/.test(requestId))throw new Error('Invalid request ID.');
+  const guest=String(user.role).toUpperCase()==='GUEST';
+  if(guest&&!/^[A-Za-z0-9-]{32,80}$/.test(String(params.guest_key||'')))throw new Error('Guest onboarding proof is missing.');
+  const actor=guest?'guest:'+hash_(params.guest_key):actorKey_(user);
+  let op;try{op=linkedOperation_(params.operation_json);}catch(err){throw new Error('OPERATION_NOT_STARTED: '+String(err.message||err));}
+  if(guest&&(op.kind!=='create'||op.fields.parent_asset_id))throw new Error('PERMISSION_DENIED: Guest access permits only creating an unlinked new asset.');
+  if(!guest)requireRole_(user,op.kind==='retire'?'ADMIN':'STAFF');
+  if(!groupingFeatures_().asset_links)throw new Error('LINKS_NOT_READY: Run setupAssetGrouping and update both backend files.');
+  const lock=LockService.getScriptLock();lock.waitLock(10000);let started=false;
+  try{
+    clearRequestCache_();const rows=listObjects_(SHEETS.ASSETS),ledgers=listObjects_(SHEETS.ASSET_BATCHES),prior=ledgers.find(r=>r.request_id===requestId);
+    started=!!prior;const fingerprint=hash_(JSON.stringify(op));
+    if(prior&&(prior.actor!==actor||prior.fingerprint!==fingerprint))throw new Error('REQUEST_REUSED: An operation ID cannot be used for different reviewed data or another user.');
+    let plan;
+    if(prior){plan=JSON.parse(prior.plan_json);if(plan.operation_version!==1)throw new Error('REQUEST_REUSED: Operation ID belongs to a legacy batch.');}
+    else{
+      if(rows.some(r=>r.source_ref==='operation:'+requestId)){started=true;throw new Error('OPERATION_LEDGER_MISSING: Restore the retry ledger before reconciling this save.');}
+      plan=planLinkedOperation_(op,user,requestId,rows,ledgers);started=true;
+      appendBatchRows_(SHEETS.ASSET_BATCHES,[{request_id:requestId,actor:actor,fingerprint:fingerprint,plan_json:JSON.stringify(plan),state:'prepared',created_at:plan.created_at,updated_at:plan.created_at}]);
+    }
+    if(!prior||prior.state!=='complete'){
+      applyLinkedOperation_(plan,op,user,requestId);
+      updateByKey_(SHEETS.ASSET_BATCHES,'request_id',requestId,{state:'complete',updated_at:new Date().toISOString()});invalidateDataCache_();
+    }
+    const asset=getAssetBundle_(plan.ids[0],user);
+    if(guest){const grant=shortId_()+shortId_();CacheService.getScriptCache().put('guest-upload:'+grant,asset.asset_id,900);asset.guest_upload_token=grant;}
+    return {request_id:requestId,asset:asset};
+  }catch(err){throw new Error((started?'':'OPERATION_NOT_STARTED: ')+String(err.message||err));}
+  finally{lock.releaseLock();}
 }

@@ -1,3 +1,7 @@
+# 2.8.0 — prepared, not deployed
+
+This release implements the later approved simple asset-link workflow and background-save behavior. See [SIMPLE_ASSET_LINKS.md](docs/SIMPLE_ASSET_LINKS.md) for the complete scope, additive backend setup, validation and rollout boundaries. The notes below are historical.
+
 # Release Notes — JCP AssetHub V2.7 Preview
 
 Date: 19 October 2026. Baseline: V2.6 (16 October 2026). **Status: code preview; not deployed.**

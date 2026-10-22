@@ -1,9 +1,9 @@
 // Synthetic backend for browser regression tests. Never connects to production.
 (() => {
   const options=window.__mockOptions||{};
-  const refs={sites:[{site_id:'SITE-TEST',name:'Test Site',active:true}],areas:[{area_id:'AREA-TEST',site_id:'SITE-TEST',name:'Test Area',active:true}],categories:window.__fixtureCategories,brands:[],custom_fields:[],assignees:[],locations:[],users:[]};
-  const user={name:'Test Staff',username:'test-staff',role:options.role||'STAFF'};
-  const state=window.__mock={calls:[],assets:cloneInitial(),uploadAttempts:0,failNextUpload:false,failUploadAt:0,aiRelease:null,ocrRelease:null,loseBatchReply:!!options.loseBatchReply&&!sessionStorage.getItem('test-batch-reply-lost')};
+  const refs={sites:[{site_id:'SITE-TEST',name:'Test Site',active:true}],areas:[{area_id:'AREA-TEST',site_id:'SITE-TEST',name:'Test Area',active:true}],categories:window.__fixtureCategories,brands:[],custom_fields:options.customFields||[],assignees:[],locations:[],users:[]};
+  const user={name:options.role==='GUEST'?'Guest':'Test Staff',username:options.role==='GUEST'?'guest':'test-staff',role:options.role||'STAFF'};let token=localStorage.getItem('fixture-session')||(user.role==='GUEST'?'':'test-session');if(token.startsWith('test-session-'))user.username=user.name=token.slice('test-session-'.length);
+  const state=window.__mock={calls:[],assets:cloneInitial(),uploadAttempts:0,failNextUpload:false,failUploadAt:0,aiRelease:null,ocrRelease:null,expired:false,loseOperationReply:!!options.loseOperationReply&&!sessionStorage.getItem('operation-reply-lost'),loseBatchReply:!!options.loseBatchReply&&!sessionStorage.getItem('test-batch-reply-lost')};
   function cloneInitial(){return structuredClone(options.assets||[]);}
   const pixel='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jgE0AAAAASUVORK5CYII=';
   const clone=x=>structuredClone(x);
@@ -18,15 +18,17 @@
     if(action==='sync'&&options.failStartupSync)throw new Error('Simulated initial sync outage');
     return options.delayStartup?new Promise(resolve=>{state[action+'Release']=()=>resolve(result);}):result;
   };
-  const api={getUrl:()=>'/test-backend',setUrl(){},getToken:()=>user.role==='GUEST'?'':'test-session',setToken(){},getLastTiming:()=>null};
+  const api={getUrl:()=>'/test-backend',setUrl(){},getToken:()=>token,setToken(value){token=value;if(value)localStorage.setItem('fixture-session',value);else localStorage.removeItem('fixture-session');},getLastTiming:()=>null};
   api.get=async(action,params={})=>{
     state.calls.push({action,params:clone(params)});
-    if(action==='bootstrap')return startupReply(action,{success:true,version:'2.7',features:{asset_groups:options.grouping===false?0:1,sequential_saves:options.queue?1:0},user,references:clone(refs),dashboard:{},authenticated:user.role!=='GUEST',ai_ocr_enabled:!!options.ai});
-    if(action==='sync')return startupReply(action,{sync:{version:'2.7',ai_ocr_enabled:!!options.ai,features:{asset_groups:options.grouping===false?0:1,sequential_saves:options.queue?1:0},user,authenticated:user.role!=='GUEST',assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}});
+    if(action==='bootstrap')return startupReply(action,{success:true,version:'2.7',features:{asset_groups:options.grouping===false?0:1,sequential_saves:options.queue?1:0,asset_links:options.links?1:0},user,references:clone(refs),dashboard:{},authenticated:user.role!=='GUEST',ai_ocr_enabled:!!options.ai});
+    if(action==='sync')return startupReply(action,{sync:{version:'2.7',ai_ocr_enabled:!!options.ai,features:{asset_groups:options.grouping===false?0:1,sequential_saves:options.queue?1:0,asset_links:options.links?1:0},user,authenticated:user.role!=='GUEST',assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}});
     if(action==='suggestMatchesV27'){if(options.matchFail)throw new Error('Matching service unavailable');return {matches:clone(options.matches||[])};}
     if(action==='listAssets')return {assets:clone(state.assets)};
+    if(action==='assetSummaryPage'){const rows=clone(state.assets).filter(a=>a.status!=='Merged'&&a.asset_id>String(params.after||'')).sort((a,b)=>a.asset_id<b.asset_id?-1:1),size=Number(params.page_size)||200;return {assets:rows.slice(0,size),next_cursor:rows.length>size?rows[size-1].asset_id:''};}
     if(action==='assetDetailsBatch')return {assets:clone(state.assets.filter(a=>JSON.parse(params.ids_json).includes(a.asset_id)).map(a=>{const b={...a};delete b.images;return b;}))};
     if(action==='getAsset')return {asset:clone(state.assets.find(a=>a.asset_id===params.asset_id))};
+    if(action==='report'&&window.__assetReportBridge)return {report:await window.__assetReportBridge(params)};
     if(action==='getImageData')return {data:{data_url:pixel}};
     if(action==='diagnostics'){
       if(options.diagDelayed&&['sheets','drive'].includes(params.component))return new Promise(resolve=>{state.diagReleases[params.component]=()=>resolve(diagnosticReply(params));});
@@ -36,6 +38,15 @@
   };
   api.post=async(action,params={})=>{
     state.calls.push({action,params:clone(params)});
+    if(action==='login'){Object.assign(user,{username:params.username,name:params.username,role:params.username==='guest'?'GUEST':'STAFF'});state.expired=false;return {token:'test-session-'+params.username,user:clone(user)};}
+    if(action==='logout'){Object.assign(user,{username:'guest',name:'Guest',role:'GUEST'});token='';return {success:true};}
+    if(action==='saveAssetOperation'){
+      if(state.expired)throw new Error('SESSION_EXPIRED');
+      const reply=await window.__assetOperationBridge(params,clone(user));
+      state.assets=reply.assets.map(a=>({...state.assets.find(old=>old.asset_id===a.asset_id),...a,...(a.asset_id===reply.result.asset.asset_id?reply.result.asset:{})}));
+      if(state.loseOperationReply){state.loseOperationReply=false;sessionStorage.setItem('operation-reply-lost','1');throw new Error('Simulated lost reply after backend committed');}
+      return {result:reply.result};
+    }
     if(action==='testScanConnection'){
       if(user.role==='GUEST')throw new Error('AUTH_REQUIRED');
       const result={check:{state:params.service==='ai'&&options.diagAiFail?'error':'ok',message:params.service==='ai'&&options.diagAiFail?'AI_RATE_LIMIT_PROVIDER: Groq quota reached.':'Built-in sample verified.',checked_at:new Date().toISOString(),evidence:'provider_test'}};
