@@ -34,6 +34,7 @@
       const unknown=key?'':unmarkedKey(asset);if(unknown){if(!unmarked.has(unknown))unmarked.set(unknown,[]);unmarked.get(unknown).push(asset);if(!asset.set_id)unmarkedTotals.set(unknown,(unmarkedTotals.get(unknown)||0)+1);}
       keys.set(asset.asset_id,{model:key,unmarked:unknown});
     }
+    for(const asset of all){if(asset.parent_asset_id){const main=byId.get(asset.parent_asset_id);searchText.set(asset.asset_id,searchText.get(asset.asset_id)+' '+[asset.parent_asset_id,main?.brand,main?.model,main?.category_name].filter(Boolean).join(' ').toLowerCase());}}
     return {all,byId,searchText,keys,serials,sets,models,unmarked,modelTotals,unmarkedTotals};
   }
   function project(rows,index,{grouped=true}={}){

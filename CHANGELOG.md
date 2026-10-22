@@ -1,3 +1,12 @@
+# 2.8.0 — Unreleased (2026-10-22)
+
+- Save new assets directly from the original recognition result, retaining evidence, manual corrections, conflicts, barcode approval, placement and required custom values.
+- Replace set names/overview/Finish set with one optional main-asset reference. Add confirmation and OCR/photo-only entry choices; unknown brand/model/serial may remain blank for unlabelled devices.
+- Integrate icon-labelled links into details; Edit unlinks/relinks existing records without duplicating them or moving their related assets.
+- Queue creates, edits, reviewed scan updates, placement, retirement and photos with server-side deduplication, dependency handling, stale-edit review and scoped recovery. Guest onboarding stays limited to its own new asset.
+- Keep uploads quiet, prioritize metadata/recognition, retain cached list/detail/image behavior and add main asset references to search/report exports.
+- Update both Apps Script files and run the additive setup. Preserve legacy set data. No production deployment.
+
 # V2.6 — 2026-10-16
 
 - Explicit mobile category/brand/area dropdowns (with editable text) and site-scoped area chooser.

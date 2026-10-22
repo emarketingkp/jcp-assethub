@@ -1,5 +1,7 @@
 # Sequential linked assets and durable saves
 
+> Historical 2.7.2 release notes. The later approved workflow replaces the set overview/name/Finish set and adds one-step scan saving. See [Simple asset links and background saves](SIMPLE_ASSET_LINKS.md) for 2.8.0. Production remains on its previously approved release until separately authorized.
+
 Implementation branch: `feature/sequential-set-workflow`, based on `main` at `f930577`.
 Scope: `docs/V27_IMPLEMENTATION_HANDOFF.md` on `docs/implementation-handoff-2026-10-21`.
 Frontend **2.7.2** was deployed with explicit approval on 2026-10-21. Firebase Hosting version: `ab466fda15b3e8b7`; previous version: `48f33716821493cc`. All 32 published files were verified through the Hosting API, and the live `api-config.js` hash was preserved exactly. Direct website checks were blocked by environment network policy. The Apps Script changes have **not** been deployed; the owner must complete the backend steps below.

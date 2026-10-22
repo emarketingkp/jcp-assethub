@@ -1,6 +1,10 @@
 # jcp-assethub
 JCP AssetHub, a mobile-first asset management application built with Firebase Hosting, Google Apps Script, Google Sheets, Google Drive, OCR.Space and Groq AI.
 
+## 2.8.0 — prepared for review, not deployed
+
+The approved workflow now saves directly from scan results, uses one optional main-asset reference, and offers OCR or photo-only manual entry for linked assets. Metadata changes and photo uploads run through a scoped durable queue. See [workflow, additive backend setup and validation](docs/SIMPLE_ASSET_LINKS.md). Update **both** `Code.gs` and `AssetGroups.gs`; the owner controls Apps Script deployment. No production deployment is included.
+
 ## V2.7 source snapshot
 
 This repository includes the source from `JCP_AssetHub_V2_7_PREVIEW.zip`. The owner reports that V2.7 is deployed. The supplied archive has not been compared against that deployment; its original release documents describe the earlier preview status.

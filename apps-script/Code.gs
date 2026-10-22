@@ -9,7 +9,7 @@
   - GROQ_API_KEY (optional: free-tier Groq AI interpretation, server side)
   - GROQ_MODEL (optional: defaults to openai/gpt-oss-20b)
 
-  Existing V1.9 sheets need no schema migration; redeploy this Web App as a new version.
+  V2.8: update both backend files and run setupAssetGrouping for the additive parent reference/retry ledger.
   Guest READ + ADD ASSET are public. Staff handles operational changes. Admin handles configuration/destructive actions.
 */
 
@@ -17,7 +17,7 @@ const SCRIPT_PROPERTIES = PropertiesService.getScriptProperties();
 const SPREADSHEET_ID = String(SCRIPT_PROPERTIES.getProperty('SPREADSHEET_ID') || '').trim();
 const DRIVE_FOLDER_ID = String(SCRIPT_PROPERTIES.getProperty('DRIVE_FOLDER_ID') || '').trim();
 const AUTH_REQUIRED = true;
-const APP_VERSION = '2.7.2';
+const APP_VERSION = '2.8.0';
 const SESSION_HOURS = 12;
 const LEGACY_IMPORT_SOURCE = 'JCP DEVICES LIST - SUMMARRY.csv';
 const LEGACY_IMPORT_TOTAL = 83;
@@ -202,6 +202,10 @@ function doPost(e) {
 
     // OCR and adding a brand-new asset are intentionally Guest-friendly.
     if (action === 'ocr') return postReply_(p, {success:true, result:runOcr_(p.image), user:optionalUser_(p.token)});
+    if (action === 'saveAssetOperation') {
+      const actor = p.token?requireUser_(p.token,'STAFF'):optionalUser_(p.token);
+      return postReply_(p,{success:true,result:saveAssetOperation_(p,actor),user:actor});
+    }
     if (action === 'createAsset') {
       const actor = optionalUser_(p.token);
       return postReply_(p, {success:true, asset:createAsset_(p, actor), user:actor});
@@ -211,7 +215,7 @@ function doPost(e) {
     if (action === 'uploadImage') {
       const actor = optionalUser_(p.token);
       if (String(actor.role || '').toUpperCase() === 'GUEST') assertGuestImageAdd_(p.assetId, p.guest_upload_token);
-      return postReply_(p, {success:true, image:p.operation_id?uploadQueuedImage_(p, actor):uploadImage_(p, actor), user:actor});
+      return postReply_(p, {success:true, image:p.operation_id?uploadQueuedImage_(p, actor):withAssetWriteLock_(()=>uploadImage_(p, actor)), user:actor});
     }
 
     if (action === 'logout') {
@@ -238,11 +242,11 @@ function doPost(e) {
     // Destructive/configuration actions require Admin.
     requireRole_(user, 'ADMIN');
     if (action === 'retireAsset') return postReply_(p, {success:true, asset:withAssetWriteLock_(()=>retireAsset_(p.asset_id, user)), user:user});
-    if (action === 'deleteImage') return postReply_(p, {success:true, deleted:deleteImage_(p.image_id, user), user:user});
-    if (action === 'replaceImage') return postReply_(p, {success:true, image:replaceImage_(p, user), user:user});
+    if (action === 'deleteImage') return postReply_(p, {success:true, deleted:withAssetWriteLock_(()=>deleteImage_(p.image_id, user)), user:user});
+    if (action === 'replaceImage') return postReply_(p, {success:true, image:withAssetWriteLock_(()=>replaceImage_(p, user)), user:user});
     if (action === 'adminSave') return postReply_(p, {success:true, row:adminSave_(p, user), user:user});
     if (action === 'saveUser') return postReply_(p, {success:true, row:saveUser_(p, user), user:user});
-    if (action === 'importLegacyInventory') return postReply_(p, {success:true, result:importLegacyInventory_(user), user:user});
+    if (action === 'importLegacyInventory') return postReply_(p, {success:true, result:withAssetWriteLock_(()=>importLegacyInventory_(user)), user:user});
     return postReply_(p, {success:false, error:'Unknown POST action: ' + action});
   } catch (err) {
     const message = String(err.message || err);
@@ -429,12 +433,13 @@ function listAssets_(p) {
   const limit = Math.min(5000, Math.max(1, Number(p.limit || 1000)));
   const includeRetired = String(p.include_retired || '') === 'true';
   const q = String(p.q || '').toLowerCase().trim();
+  const byId=objectMap_(rows,'asset_id');
 
   return rows
     .filter(r => String(r.status) !== 'Merged')
     .filter(r => includeRetired || String(r.status) !== 'Retired')
     .map(r => decorateAsset_(r, catMap, siteMap, areaMap, mainImages))
-    .filter(r => !q || [r.asset_id,r.category_name,r.brand,r.model,r.serial,r.site_name,r.area_name,r.assigned_to,r.status]
+    .filter(r => !q || [r.asset_id,r.category_name,r.brand,r.model,r.serial,r.site_name,r.area_name,r.assigned_to,r.status,r.parent_asset_id,(byId[r.parent_asset_id]||{}).brand,(byId[r.parent_asset_id]||{}).model]
       .join(' ').toLowerCase().includes(q))
     .sort((a,b)=>String(b.updated_at).localeCompare(String(a.updated_at)))
     .slice(0, limit);
@@ -516,6 +521,7 @@ function updateAsset_(p, user) {
   if (!assetId) throw new Error('asset_id is required.');
   const existing = findByKey_(SHEETS.ASSETS,'asset_id',assetId);
   if (!existing) throw new Error('Asset not found.');
+  assertNoPendingAssetOperation_(assetId);
   const category = resolveCategory_(p.category_id || (clean_(p.category)===clean_(existing.category)?existing.category_id:''), p.category || existing.category, user);
   const site = findByKey_(SHEETS.SITES,'site_id',p.site_id || existing.site_id);
   if (!site) throw new Error('Invalid site.');
@@ -553,6 +559,7 @@ function updateAsset_(p, user) {
 function retireAsset_(assetId, user) {
   const row = findByKey_(SHEETS.ASSETS,'asset_id',assetId);
   if (!row) throw new Error('Asset not found.');
+  assertNoPendingAssetOperation_(assetId);
   const now = new Date().toISOString();
   updateByKey_(SHEETS.ASSETS,'asset_id',assetId,{status:'Retired',retired_at:now,updated_at:now,updated_by:actorKey_(user)});
   log_(user,'RETIRE_ASSET',assetId,'Asset retired',row,{status:'Retired',retired_at:now});
@@ -712,6 +719,7 @@ function reconcileAsset_(p,user) {
   if(!assetId) throw new Error('asset_id is required.');
   const existing=findByKey_(SHEETS.ASSETS,'asset_id',assetId);
   if(!existing || String(existing.status)==='Merged') throw new Error('Existing asset not found.');
+  assertNoPendingAssetOperation_(assetId);
   const incoming=parseJsonObject_(p.incoming_json);
   const choices=parseJsonObject_(p.choices_json);
   const fields=['category','brand','model','serial','specifications'];
@@ -756,6 +764,8 @@ function mergeAssets_(p,user) {
   const source=findByKey_(SHEETS.ASSETS,'asset_id',sourceId);
   const target=findByKey_(SHEETS.ASSETS,'asset_id',targetId);
   if(!source || !target) throw new Error('One of the selected assets does not exist.');
+  assertNoPendingAssetOperation_(sourceId);assertNoPendingAssetOperation_(targetId);
+  if(source.parent_asset_id||listObjects_(SHEETS.ASSETS).some(a=>a.parent_asset_id===sourceId&&a.status!=='Merged'))throw new Error('ASSET_LINK_CONFLICT: Review and remove or change the source asset main/child references before merging. No links were changed.');
   if(source.set_id&&source.set_id!==target.set_id)throw new Error('SET_MEMBERSHIP_CONFLICT: Remove the source item from its equipment set before merging into a different set or ungrouped record.');
   if(String(source.status)==='Merged' || String(target.status)==='Merged') throw new Error('A merged record cannot be merged again.');
 
@@ -824,6 +834,7 @@ function assertUniqueSerial_(serial, excludeAssetId) {
     String(r.asset_id) !== String(excludeAssetId || '') && normalizeIdentifier_(r.serial) === normalized
   );
   if (duplicate) throw new Error('DUPLICATE_SERIAL: Serial ' + clean_(serial) + ' is already registered to ' + duplicate.asset_id + '.');
+  if(reservedAssetOperations_().some(r=>r.asset_id!==String(excludeAssetId||'')&&normalizeIdentifier_(r.serial)===normalized))throw new Error('DUPLICATE_SERIAL: A pending save already reserved this serial. Reconcile that save before registering it again.');
 }
 
 function resolveCategory_(categoryId, name, user) {
@@ -862,8 +873,18 @@ function resolveArea_(areaId, name, siteId, user, adminCreate) {
   return found;
 }
 
+// All current writers share reservations, including older clients during rollout.
+function reservedAssetOperations_(){
+  if(!getSpreadsheet_().getSheetByName(SHEETS.ASSET_BATCHES))return [];
+  const result=[];listObjects_(SHEETS.ASSET_BATCHES).filter(r=>r.state!=='complete').forEach(row=>{
+    let plan;try{plan=JSON.parse(row.plan_json);}catch(_){throw new Error('Retry ledger contains invalid data. Ask an administrator to inspect it.');}
+    for(const id of plan.ids||[]){const reserved=(plan.reservations||[]).find(r=>r.asset_id===id);result.push({asset_id:String(id),serial:plan.operation_version===1&&plan.patch?plan.patch.serial||'':reserved?.serial||''});}
+  });return result;
+}
+
 function nextAssetId_(prefix) {
   const ids = listObjects_(SHEETS.ASSETS).map(r=>String(r.asset_id || ''));
+  reservedAssetOperations_().forEach(r=>ids.push(r.asset_id));
   const safe = String(prefix || 'AS').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,5) || 'AS';
   const re = new RegExp('^JCP-' + safe + '-(\\d+)$');
   let max = 0;
@@ -886,18 +907,18 @@ function assertGuestImageAdd_(assetId, token) {
 
 // A queue photo has a stable actor-scoped identity; Drive names reconcile partial writes.
 function uploadQueuedImage_(p,user) {
-  requireRole_(user,'STAFF');
+  if(String(user.role||'').toUpperCase()==='GUEST')assertGuestImageAdd_(p.assetId,p.guest_upload_token);else requireRole_(user,'STAFF');
   const operation=groupText_(p.operation_id,100,'Photo operation');
   if(!/^[A-Za-z0-9-]{16,100}$/.test(operation))throw new Error('Invalid photo operation ID.');
   const id='IMG-Q-'+hash_(actorKey_(user)+'|'+operation).slice(0,32);
   const fingerprint=hash_(JSON.stringify([p.assetId,p.imageType,p.mimeType,p.base64Data,p.thumbnailBase64]));
-  const stamp='queue-'+fingerprint;
+  const marker='queue-'+fingerprint,stamp=marker+'-'+id;
   const lock=LockService.getScriptLock();lock.waitLock(10000);
   try {
     clearRequestCache_();
     const previous=findByKey_(SHEETS.ASSET_IMAGES,'image_id',id);
     if(previous){
-      if(previous.asset_id!==p.assetId||String(previous.file_name).indexOf(stamp)<0)throw new Error('REQUEST_REUSED: Photo operation changed.');
+      if(previous.asset_id!==p.assetId||String(previous.file_name).indexOf(marker)<0)throw new Error('REQUEST_REUSED: Photo operation changed.');
       const asset=findByKey_(SHEETS.ASSETS,'asset_id',p.assetId);
       // Only repair an unfinished image touch. A completed replay must not undo later edits/main-photo selection.
       if(asset&&(!asset.updated_at||String(asset.updated_at)<String(previous.uploaded_at))){
@@ -1507,7 +1528,8 @@ function buildReport_(p) {
   const assets = listAssets_({limit:'5000',include_retired:'true'});
   const assetMap = objectMap_(assets,'asset_id');
   // Export the complete Assets sheet schema, not just the shortened phone table.
-  const assetColumns=SCHEMA.Assets.slice();
+  const assetColumns=SCHEMA.Assets.concat(['main_asset_id','main_asset_name']);
+  assets.forEach(a=>{const main=assetMap[a.parent_asset_id];a.main_asset_id=a.parent_asset_id||'';a.main_asset_name=main?([main.brand,main.model].filter(Boolean).join(' ')||main.category_name||main.asset_id):'';});
   function attachAssetIdentity_(row) {
     const a=assetMap[row.asset_id]||{};
     return Object.assign({},row,{
@@ -2012,6 +2034,7 @@ function importOriginalDeviceList() {
 
 function importLegacyInventory_(user) {
   requireRole_(user,'ADMIN');
+  if(reservedAssetOperations_().length)throw new Error('ASSET_PENDING: Reconcile pending metadata saves before importing the original inventory.');
   const rows = legacyInventoryRows_();
   const privateBySource = legacyPrivateDetails_();
   const existing = listObjects_(SHEETS.ASSETS);
@@ -2022,7 +2045,7 @@ function importLegacyInventory_(user) {
   const categoryMap = objectMap_(categoryRows,'category_id');
   const nextByPrefix = {};
   categoryRows.forEach(c=>{ nextByPrefix[String(c.prefix||'AS').toUpperCase()] = 1; });
-  existing.forEach(a=>{
+  existing.concat(reservedAssetOperations_().map(r=>({asset_id:r.asset_id}))).forEach(a=>{
     const m=String(a.asset_id||'').match(/^JCP-([A-Z0-9]+)-(\d+)$/i);
     if(!m) return;
     const pfx=m[1].toUpperCase();

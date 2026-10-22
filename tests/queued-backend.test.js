@@ -47,3 +47,7 @@ test('server rejects parent cycles and removal of a parent with linked children'
 test('a single ordinary asset retains unique specification evidence; shared multi-item fields do not',()=>{
   const h=createHarness(),p={mode:'same',common:{category:'Monitor',brand:'Sample',model:'M',specifications:'Serial: EVIDENCE-1',site_id:'SITE-TEST',area:'Test Area'},units:[{serial:'EVIDENCE-1'}]};assert.equal(h.batch(p).assets[0].specifications,'Serial: EVIDENCE-1');p.units=[{serial:'X'},{serial:'Y'}];assert.throws(()=>h.batch(p),/Unique device identifiers/);
 });
+
+test('distinct photo operations do not share deletable Drive files even when image bytes match',()=>{
+  const h=photos();h.send();h.p.operation_id='22222222-2222-4222-8222-222222222222-photo-0';h.send();assert.equal(h.read('AssetImages').length,2);assert.equal(h.files.size,4);assert.notEqual(h.read('AssetImages')[0].drive_file_id,h.read('AssetImages')[1].drive_file_id);
+});

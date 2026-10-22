@@ -1,5 +1,7 @@
 # JCP AssetHub — implementation handoff
 
+> Historical approval snapshot from 21 October. Later decisions replace set names/overview/Finish set and the second Add form. The current scope and backend steps are in [SIMPLE_ASSET_LINKS.md](SIMPLE_ASSET_LINKS.md). This file is retained to document the original requirements.
+
 Updated 21 October 2026. The user has approved building the workflow and optimizations below. Implementation has NOT started; recent work only produced standalone mockups. Begin implementation in a fresh session, using this document as the agreed scope.
 
 ## Repository and release boundaries
