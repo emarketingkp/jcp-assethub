@@ -1,6 +1,8 @@
 # Scanner and linked-asset navigation
 
-The merged navigation fixes are released as frontend **2.8.1**, build `2.8.1-navigation-1`, based on merged main `76331e0`. The existing **2.8.0 Apps Script API** remains compatible; neither `.gs` file nor schema setup changes. Diagnostics send the explicit 2.8.0 API compatibility target while reporting the actual frontend release separately. The distinct version/build ID and service-worker cache advertise the update without changing pending queue scopes.
+The merged navigation fixes were deployed to Firebase Hosting on 2026-10-22 as frontend **2.8.1**, build `2.8.1-navigation-1`, based on merged main `76331e0`. The existing **2.8.0 Apps Script API** remains compatible; neither `.gs` file nor schema setup changes. Diagnostics send the explicit 2.8.0 API compatibility target while reporting the actual frontend release separately. The distinct version/build ID and service-worker cache advertise the update without changing pending queue scopes.
+
+Hosting version `a5b76011d6786eca` replaces `0d45238bcbd3bb33`. All 30 public files were verified after deployment; the existing backend URL/configuration was preserved exactly. No Apps Script deployment or production asset writes were performed.
 
 ## Resulting behavior
 
@@ -28,8 +30,10 @@ The service-worker cache name changes for the static build. Durable saves, pendi
 
 Run `node --test --test-isolation=none tests/*.test.js` and `PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium npm run test:browser`. Syntax checks cover all frontend JavaScript and Apps Script files; run `git diff --check` too.
 
-Final validation passed **119 unit/backend/transport checks** and **80 browser scenarios (81 TAP tests including their parent)**, frontend/backend syntax checks and `git diff --check`.
+Final validation passed **119 unit/backend/transport checks** and **81 browser scenarios (82 TAP tests including their parent)**, frontend/backend syntax checks and `git diff --check`.
 
 Eleven new browser scenarios exercise the real frontend with a synthetic backend: scan-save confirmation and one fresh camera; unfinished review navigation during OCR; update-to-linked target isolation; native camera cancellation/photo-only entry; late scan review; late stale-draft review; late image delivery across linked details; late cached detail lookup; cancelled main-tag lookup; delayed scan-save acknowledgement; and delayed reconciliation acknowledgement. Existing offline/reload, duplicate/stale handling, scoped queue, mobile/desktop and legacy workflows remain covered.
 
 Physical Android/iPhone camera permission/picker behavior and suspension still need device acceptance. Automated camera tests use canvas streams and native file-chooser events; no production asset is changed.
+
+The 2.8.1 release also verifies that diagnostics accept the supported 2.8.0 backend API without hiding a genuinely different API version.

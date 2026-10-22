@@ -1,6 +1,8 @@
-# 2.8.1 — navigation fixes
+# 2.8.1 — navigation fixes deployed
 
 Build `2.8.1-navigation-1` corrects scanner/camera entry, preserves unfinished reviews, returns saved scans to the register and ignores obsolete screen responses. See [navigation fixes](docs/NAVIGATION_FIXES.md). This frontend build remains compatible with the 2.8.0 backend and needs no Apps Script changes.
+
+Deployed to Firebase Hosting on 2026-10-22. Hosting version `a5b76011d6786eca`; previous version `0d45238bcbd3bb33` is retained for rollback. All 30 public files match the tested release, and `api-config.js` was preserved exactly. Validation: 119 unit/backend checks and 82 browser TAP tests passed. No Apps Script deployment was performed.
 
 The base `2.8.0-simple-links-1` frontend was deployed on 2026-10-22. It implements the later approved simple asset-link workflow and background-save behavior. See [SIMPLE_ASSET_LINKS.md](docs/SIMPLE_ASSET_LINKS.md) for the complete scope, additive backend setup, validation and rollout boundaries. The notes below are historical.
 

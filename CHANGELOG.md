@@ -1,4 +1,4 @@
-# 2.8.1 — 2026-10-22
+# 2.8.1 — Hosting deployed (2026-10-22)
 
 - Return locally saved scans to the asset register before offering linked capture; keep background saves running.
 - Preserve unfinished scan reviews across navigation. Start explicit linked/update scans with fresh evidence and the correct target.
