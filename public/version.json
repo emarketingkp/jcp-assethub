@@ -1,8 +1,8 @@
 {
   "version": "2.8.0",
-  "build": "2.8.0-simple-links-1",
+  "build": "2.8.0-navigation-1",
   "released": "2026-10-22",
   "status": "unreleased",
-  "name": "Simple asset links and background saves",
-  "notes": "Direct scan saving, optional main asset references, photo-only manual entry and scoped background saves. Requires both updated Apps Script files and setupAssetGrouping. Prepared for review; not deployed."
+  "name": "Linked asset navigation fixes",
+  "notes": "Preserve unfinished scan reviews, return locally saved scans to the register, isolate new linked captures and ignore stale screen responses. Compatible with the existing 2.8.0 backend; prepared for review."
 }

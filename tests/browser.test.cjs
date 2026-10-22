@@ -33,6 +33,12 @@ test('browser regressions on mobile and desktop',async t=>{
       window.__mockOptions=options;window.__fixtureCategories=categories;
       if(!options.queue)localStorage.setItem('jcp_assethub_asset_grouping','on');
       if(options.disableIDB)Object.defineProperty(window,'indexedDB',{value:undefined});
+      if(options.delayLocalAck){
+        let queue;
+        Object.defineProperty(window,'AssetSaveQueue',{configurable:true,get:()=>queue,set:value=>{
+          const create=value.create;value.create=args=>{const q=create(args),enqueue=q.enqueue;q.enqueue=async(...args)=>{const row=await enqueue(...args);if(window.__holdLocalAck)await new Promise(resolve=>window.__releaseLocalSave=resolve);return row;};return q;};queue=value;
+        }});
+      }
       // Native capture is exercised with a file fixture, without granting real camera access.
       navigator.mediaDevices.getUserMedia=async()=>{throw new Error('No physical camera in automated tests');};
     },{options,categories:data.categories.map(r=>({category_id:r.categoryId,name:r.name,active:true}))});
@@ -82,6 +88,139 @@ test('browser regressions on mobile and desktop',async t=>{
     if(count!==2){await page.locator('#batchQuantity').fill(String(count));await page.locator('#batchQuantity').press('Tab');}
   }
   try{
+    await t.test('scan save returns to the register before confirmation and linked OCR starts one fresh camera',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true});
+      try{
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');
+        await page.locator('#v27Create').click();await page.locator('#linkedAssetYes').waitFor();
+        assert(await page.locator('#page-assets').evaluate(el=>el.classList.contains('active')));
+        assert.equal(await page.locator('#scannerVideo').evaluate(el=>el.srcObject),null);
+        await page.evaluate(()=>{
+          window.__cameraRequests=0;
+          navigator.mediaDevices.getUserMedia=async()=>{window.__cameraRequests++;const c=document.createElement('canvas');c.width=320;c.height=240;c.getContext('2d').fillRect(0,0,320,240);return c.captureStream(10);};
+        });
+        await page.locator('#linkedAssetYes').click();assert.equal(await page.evaluate(()=>window.__cameraRequests),0);
+        await page.locator('#linkedAssetOcr').click();await page.waitForFunction(()=>document.getElementById('scannerVideo').videoWidth===320);
+        assert.equal(await page.evaluate(()=>window.__cameraRequests),1);assert(await page.locator('#modalWrap').isHidden());assert.equal(await page.locator('.v27-photo').count(),0);
+        assert(await page.locator('#scannerMainContext').isVisible());assert.equal(await page.locator('#page-scanner').evaluate(el=>el.scrollTop),0);
+        await page.locator('#mobileScannerClose').click();await page.waitForFunction(()=>!document.getElementById('scannerVideo').srcObject);
+        assert.equal(backend.read('Assets').length,1);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('leaving and returning to a processing scan preserves the review and never restarts its camera',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,ocrDelayed:true});
+      try{
+        await page.locator('[data-mobile-route="scanner"]').click();await page.locator('#scannerFile').setInputFiles(image('unfinished.png'));
+        await page.waitForFunction(()=>window.__mock.ocrRelease);await page.locator('[data-universal-field="model"]').fill('Keep reviewed model');
+        await page.locator('#scanEntryArea').fill('Keep placement');await page.locator('#mobileScannerResultClose').click();
+        await page.evaluate(()=>{window.__cameraRequests=0;navigator.mediaDevices.getUserMedia=async()=>{window.__cameraRequests++;throw Error('Should not open');};window.__mock.ocrRelease();});
+        await page.waitForFunction(()=>!document.getElementById('v27Create').disabled);
+        assert(await page.locator('#page-dashboard').evaluate(el=>el.classList.contains('active')));
+        await page.locator('[data-mobile-route="scanner"]').click();
+        assert(await page.locator('#v27Create').isVisible());assert.equal(await page.locator('[data-universal-field="model"]').inputValue(),'Keep reviewed model');
+        assert.equal(await page.locator('#scanEntryArea').inputValue(),'Keep placement');assert.equal(await page.evaluate(()=>window.__cameraRequests),0);
+        await page.locator('#v27Reset').click();assert.equal(await page.locator('.v27-photo').count(),0);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('scan-to-update starts fresh and a later linked scan cannot inherit that update target',async()=>{
+      const main=stock('ROOT',{model:'Recorder'}),existing=stock('UPDATE-ME');
+      const {page,context,errors}=await start({links:true,queue:true,assets:[main,existing]});
+      try{
+        await scan(page);await page.locator('[data-universal-field="model"]').fill('Previous evidence');await page.locator('#mobileScannerResultClose').click();
+        await page.locator('[data-mobile-route="assets"]').click();await page.locator('[data-asset="UPDATE-ME"]').click();await page.locator('#editAssetDrawer').click();
+        await page.locator('#scanUpdateAsset').click();assert.equal(await page.locator('.v27-photo').count(),0);
+        await page.locator('#scannerFile').setInputFiles(image('update-label.png'));await page.locator('#v27UpdateTarget').waitFor();
+        await page.locator('#mobileScannerResultClose').click();await page.locator('[data-mobile-route="assets"]').click();
+        await page.locator('[data-asset="ROOT"]').click();await page.locator('#addLinkedAsset').click();await page.locator('#linkedAssetYes').click();await page.locator('#linkedAssetOcr').click();
+        await page.locator('#scannerFile').setInputFiles(image('child-label.png'));await page.locator('#v27Create').waitFor();
+        assert.equal(await page.locator('#v27UpdateTarget').count(),0);assert.equal(await page.locator('.v27-photo').count(),1);assert.match(await page.locator('#scanMainSelected').textContent(),/ROOT/);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('photo-only linking retains choices on camera cancellation and dismisses the old drawer on manual entry',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,assets:[stock('ROOT')]});
+      try{
+        await page.locator('[data-mobile-route="assets"]').click();await page.locator('[data-asset="ROOT"]').click();await page.locator('#addLinkedAsset').click();await page.locator('#linkedAssetYes').click();
+        const first=await Promise.all([page.waitForEvent('filechooser'),page.locator('#linkedAssetPhoto').click()]);await first[0].setFiles([]);
+        assert(await page.locator('#linkedAssetPhoto').isVisible());assert.equal(await page.locator('#assetForm').count(),0);
+        const next=await Promise.all([page.waitForEvent('filechooser'),page.locator('#linkedAssetPhoto').click()]);await next[0].setFiles(image('unlabelled.png'));
+        await page.locator('#assetForm').waitFor();assert.equal(await page.locator('#assetDrawer').evaluate(el=>el.classList.contains('open')),false);
+        assert.match(await page.locator('#formMainSelected').textContent(),/ROOT/);assert.equal(await page.locator('#assetPhotoPicker .photo-picker-preview').count(),1);
+        await page.locator('#cancelAssetForm').click();assert(await page.locator('#modalWrap').isHidden());assert(await page.locator('#page-assets').evaluate(el=>el.classList.contains('active')));assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('late scan reconciliation cannot reopen a popup after navigating elsewhere',async()=>{
+      const existing=stock('EXISTING',{brand:'Ricoh',model:'TEST-100',serial:'O01I2345'});
+      const {page,context,errors}=await start({links:true,queue:true,delayAssetDetails:true,assets:[existing],matches:[{score:100,asset:existing,reasons:['same serial']}]});
+      try{
+        await scan(page);await page.locator('[data-v27-match="0"]').click();await page.waitForFunction(()=>window.__mock.detailReleases?.EXISTING);
+        await page.locator('#mobileScannerResultClose').click();await page.evaluate(()=>window.__mock.detailReleases.EXISTING());await page.waitForTimeout(100);
+        assert(await page.locator('#modalWrap').isHidden());assert(await page.locator('#page-dashboard').evaluate(el=>el.classList.contains('active')));assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('a closed pending-draft review cannot replace a newly opened form when detail loading finishes',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,assets:[stock('EDIT')],delayAssetDetails:true});
+      try{
+        await page.evaluate(async()=>{
+          const q=AssetSaveQueue.create({scope:'links-v1|/test-backend|test-staff|STAFF',api:AssetAPI,online:()=>false});
+          const row=await q.enqueue({id:crypto.randomUUID(),kind:'update',params:{asset_id:'EDIT',brand:'New brand',model:'New model',site_id:'SITE-TEST',area:'Desk',custom_json:'{}'}});
+          row.state='Retry';row.error='OPERATION_NOT_STARTED: STALE_ASSET';
+          const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('jcp-assethub-operations',1);req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});
+          await new Promise((resolve,reject)=>{const tx=db.transaction('operations','readwrite');tx.objectStore('operations').put(row);tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);});db.close();
+        });
+        await page.reload();await page.locator('#appLoading').waitFor({state:'hidden'});await page.locator('#pendingSavesBtn').click();await page.locator('[data-review-save]').click();await page.waitForFunction(()=>window.__mock.detailReleases?.EDIT);
+        await page.locator('#modalCloseBtn').click();await page.locator('[data-mobile-route="assets"]').click();await page.locator('#addAssetBtn').click();await page.locator('#assetForm [name="model"]').fill('Keep this form');
+        await page.evaluate(()=>window.__mock.detailReleases.EDIT());await page.waitForTimeout(100);assert.equal(await page.locator('#assetForm [name="model"]').inputValue(),'Keep this form');assert.equal(await page.locator('#pendingReviewForm').count(),0);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('late image delivery cannot attach the old asset actions to a linked asset drawer',async()=>{
+      const a=stock('A',{model:'Main model',thumbnail_file_id:'SLOW-IMAGE'}),b=stock('B',{model:'Child model',parent_asset_id:'A'});
+      const {page,context,errors}=await start({links:true,queue:true,assets:[a,b],delayImages:true},{width:1440,height:1000});
+      try{
+        await page.locator('.nav-btn[data-route="assets"]').click();await page.locator('[data-asset="A"]').click();await page.waitForFunction(()=>window.__mock.imageReleases?.['SLOW-IMAGE']);
+        await page.locator('[data-linked-member="B"]').click();await page.waitForFunction(()=>document.getElementById('drawerId').textContent==='B');
+        await page.evaluate(()=>window.__mock.imageReleases['SLOW-IMAGE']());await page.waitForTimeout(100);
+        await page.locator('#editAssetDrawer').click();assert.equal(await page.locator('#assetForm [name="model"]').inputValue(),'Child model');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('a delayed cached detail lookup cannot replace a newer drawer with a loading screen',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,assets:[stock('A'),stock('B',{model:'Newest drawer'})]},{width:1440,height:1000});
+      try{
+        await page.evaluate(()=>{const get=AssetStore.get;AssetStore.get=(key,...args)=>String(key).startsWith('detail:')&&String(key).endsWith(':A')?new Promise(resolve=>window.__releaseCachedDetail=()=>resolve(null)):get(key,...args);});
+        await page.locator('.nav-btn[data-route="assets"]').click();await page.locator('[data-asset="A"]').click();await page.waitForFunction(()=>window.__releaseCachedDetail);
+        await page.locator('#closeDrawerBtn').click();await page.locator('[data-asset="B"]').click();await page.locator('#editAssetDrawer').waitFor();
+        await page.evaluate(()=>window.__releaseCachedDetail());await page.waitForTimeout(100);await page.locator('#editAssetDrawer').click();assert.equal(await page.locator('#assetForm [name="model"]').inputValue(),'Newest drawer');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('a main-tag lookup finishing after cancel cannot change a replacement form',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true});
+      try{
+        await page.locator('[data-mobile-route="assets"]').click();await page.locator('#addAssetBtn').click();await page.locator('#formMainField summary').click();await page.locator('[name="formMainMode"][value="link"]').check();
+        await page.evaluate(()=>{AssetCode.scanAll=()=>new Promise(resolve=>window.__releaseTag=()=>resolve([]));});
+        const chooser=await Promise.all([page.waitForEvent('filechooser'),page.locator('#formMainScan').click()]);await chooser[0].setFiles(image('tag.png'));await page.waitForFunction(()=>window.__releaseTag);
+        await page.locator('#cancelAssetForm').click();await page.locator('#addAssetBtn').click();await page.locator('#assetForm [name="model"]').fill('New form');
+        await page.evaluate(()=>window.__releaseTag());await page.waitForTimeout(100);assert.equal(await page.locator('#formMainError').textContent(),'');assert.equal(await page.locator('#assetForm [name="model"]').inputValue(),'New form');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('a scan save finishing after leaving does not close the new form or reopen the saved review',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,delayLocalAck:true});
+      try{
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.evaluate(()=>window.__holdLocalAck=true);
+        await page.locator('#v27Create').click();await page.waitForFunction(()=>window.__releaseLocalSave);await page.locator('#mobileScannerResultClose').click();
+        await page.locator('[data-mobile-route="assets"]').click();await page.locator('#addAssetBtn').click();await page.locator('#assetForm [name="model"]').fill('Next form');
+        await page.evaluate(()=>window.__releaseLocalSave());await page.waitForTimeout(100);assert.equal(await page.locator('#assetForm [name="model"]').inputValue(),'Next form');
+        await page.locator('#cancelAssetForm').click();await page.locator('[data-mobile-route="scanner"]').click();assert.equal(await page.locator('.v27-photo').count(),0);assert.equal(await page.locator('#linkedAssetYes').count(),0);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('a reviewed scan update finishing after cancel cannot replace a new form',async()=>{
+      const existing=stock('EXISTING',{brand:'Ricoh',model:'TEST-100',serial:'O01I2345'});
+      const {page,context,errors}=await start({links:true,queue:true,delayLocalAck:true,assets:[existing],matches:[{score:100,asset:existing,reasons:['same serial']}]});
+      try{
+        await scan(page);await page.locator('[data-v27-match="0"]').click();await page.locator('#reconcileForm').waitFor();await page.evaluate(()=>window.__holdLocalAck=true);
+        await page.locator('#reconcileForm [type="submit"]').click();await page.waitForFunction(()=>window.__releaseLocalSave);await page.locator('#modalCloseBtn').click();await page.locator('#mobileScannerResultClose').click();
+        await page.locator('[data-mobile-route="assets"]').click();await page.locator('#addAssetBtn').click();await page.locator('#assetForm [name="model"]').fill('Next form');
+        await page.evaluate(()=>window.__releaseLocalSave());await page.waitForTimeout(100);assert.equal(await page.locator('#assetForm [name="model"]').inputValue(),'Next form');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
     await t.test('cached Guest boot cannot send anonymous drafts using a saved Staff sign-in',async()=>{
       const {page,context,backend,errors}=await start({links:true,queue:true,delayStartup:true});
       try{
@@ -121,7 +260,7 @@ test('browser regressions on mobile and desktop',async t=>{
     });
     await t.test('a duplicate rejection reopens the original scan evidence and revises the same unstarted operation',async()=>{
       const {page,context,backend,errors}=await start({links:true,queue:true,assets:[stock('EXISTING',{serial:'O01I2345'})]});
-      try{await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#scannerPendingBtn').click();await page.locator('[data-review-save]').click();assert.equal(await page.locator('.v27-photo').count(),1);assert.equal(await page.locator('#scanEntryArea').inputValue(),'Desk');await page.locator('[data-universal-field="serial"]').fill('NEW-UNIQUE');await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.waitForFunction(()=>window.__mock.assets.length===2);assert.equal(backend.read('Assets').length,2);assert.equal(backend.read('AssetBatches').length,1);assert.deepEqual(errors,[]);}finally{await context.close();}
+      try{await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#pendingSavesBtn').click();await page.locator('[data-review-save]').click();assert.equal(await page.locator('.v27-photo').count(),1);assert.equal(await page.locator('#scanEntryArea').inputValue(),'Desk');await page.locator('[data-universal-field="serial"]').fill('NEW-UNIQUE');await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.waitForFunction(()=>window.__mock.assets.length===2);assert.equal(backend.read('Assets').length,2);assert.equal(backend.read('AssetBatches').length,1);assert.deepEqual(errors,[]);}finally{await context.close();}
     });
     await t.test('stale queued edits compare latest values and apply a draft only after explicit review',async()=>{
       const {page,context,backend,errors}=await start({links:true,queue:true,assets:[stock('EDIT-ME')]},{width:1440,height:1000});
@@ -133,8 +272,8 @@ test('browser regressions on mobile and desktop',async t=>{
       const {page,context,backend,errors}=await start({links:true,queue:true});
       async function login(name){await page.locator('#loginUsername').fill(name);await page.locator('#loginPassword').fill('synthetic');await page.locator('#loginSubmit').click();await page.locator('#modalWrap').waitFor({state:'hidden'});}
       try{
-        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Private draft area');await page.evaluate(()=>window.__mock.expired=true);await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#scannerPendingBtn').click();await page.locator('#resumePendingSignIn').waitFor();assert.equal((await page.locator('#modalBody').textContent()).includes('Private draft area'),false);await page.locator('#resumePendingSignIn').click();await login('other-staff');assert.equal(backend.read('Assets').length,0);assert(await page.locator('#pendingSavesBtn').isHidden());
-        await page.locator('#mobileScannerClose').click();await page.locator('#profileBtn').click();await page.locator('#logoutBtn').click();await page.waitForFunction(()=>document.getElementById('profileName').textContent==='Guest');await page.locator('#profileBtn').click();await page.locator('#signInBtn').click();await login('test-staff');await page.waitForFunction(()=>window.__mock.assets.length===1);assert.equal(backend.read('Assets').length,1);assert.equal(backend.read('Assets')[0].area,'Private draft area');assert.deepEqual(errors,[]);
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Private draft area');await page.evaluate(()=>window.__mock.expired=true);await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#pendingSavesBtn').click();await page.locator('#resumePendingSignIn').waitFor();assert.equal((await page.locator('#modalBody').textContent()).includes('Private draft area'),false);await page.locator('#resumePendingSignIn').click();await login('other-staff');assert.equal(backend.read('Assets').length,0);assert(await page.locator('#pendingSavesBtn').isHidden());
+        await page.locator('#profileBtn').click();await page.locator('#logoutBtn').click();await page.waitForFunction(()=>document.getElementById('profileName').textContent==='Guest');await page.locator('#profileBtn').click();await page.locator('#signInBtn').click();await login('test-staff');await page.waitForFunction(()=>window.__mock.assets.length===1);assert.equal(backend.read('Assets').length,1);assert.equal(backend.read('Assets')[0].area,'Private draft area');assert.deepEqual(errors,[]);
       }finally{await context.close();}
     });
     await t.test('placement updates and retirement leave related records in their original placement and status',async()=>{
@@ -191,14 +330,14 @@ test('browser regressions on mobile and desktop',async t=>{
     await t.test('lost new-operation response reconciles after reload with one physical asset and stable payload',async()=>{
       const {page,context,backend,errors}=await start({links:true,queue:true,loseOperationReply:true});
       try{
-        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#scannerPendingBtn').click();await page.locator('[data-retry-save]').waitFor();assert.equal(backend.read('Assets').length,1);
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#pendingSavesBtn').click();await page.locator('[data-retry-save]').waitFor();assert.equal(backend.read('Assets').length,1);
         await page.reload();await page.locator('#appLoading').waitFor({state:'hidden'});await page.locator('#pendingSavesBtn').click();await page.locator('[data-retry-save]').click();await page.waitForFunction(()=>window.__mock.assets.length===1&&document.getElementById('linkedPendingItems').textContent.includes('No pending'));assert.equal(backend.read('Assets').length,1);assert.equal(backend.read('AssetBatches').length,1);assert.deepEqual(errors,[]);
       }finally{await context.close();}
     });
     await t.test('a failed background photo keeps details saved, retries only remaining uploads, and sends no success popup',async()=>{
       const {page,context,backend,errors}=await start({links:true,queue:true});
       try{
-        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.evaluate(()=>window.__mock.failNextUpload=true);await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#saveFailureNotice').waitFor();assert.equal(backend.read('Assets').length,1);await page.locator('#scannerPendingBtn').click();assert.match(await page.locator('#linkedPendingItems').textContent(),/DetailsSaved/);await page.locator('[data-retry-save]').click();await page.waitForFunction(()=>document.getElementById('linkedPendingItems').textContent.includes('No pending'));assert.equal(await page.evaluate(()=>window.__mock.uploadAttempts),2);assert.equal(backend.read('Assets').length,1);assert.equal(await page.locator('#toast.show:not(.error)').count(),0);assert.deepEqual(errors,[]);
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.evaluate(()=>window.__mock.failNextUpload=true);await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#saveFailureNotice').waitFor();assert.equal(backend.read('Assets').length,1);await page.locator('#pendingSavesBtn').click();assert.match(await page.locator('#linkedPendingItems').textContent(),/DetailsSaved/);await page.locator('[data-retry-save]').click();await page.waitForFunction(()=>document.getElementById('linkedPendingItems').textContent.includes('No pending'));assert.equal(await page.evaluate(()=>window.__mock.uploadAttempts),2);assert.equal(backend.read('Assets').length,1);assert.equal(await page.locator('#toast.show:not(.error)').count(),0);assert.deepEqual(errors,[]);
       }finally{await context.close();}
     });
     await t.test('browser persistence failure keeps the original validated result open and sends nothing',async()=>{

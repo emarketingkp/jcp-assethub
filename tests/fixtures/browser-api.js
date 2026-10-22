@@ -27,9 +27,17 @@
     if(action==='listAssets')return {assets:clone(state.assets)};
     if(action==='assetSummaryPage'){const rows=clone(state.assets).filter(a=>a.status!=='Merged'&&a.asset_id>String(params.after||'')).sort((a,b)=>a.asset_id<b.asset_id?-1:1),size=Number(params.page_size)||200;return {assets:rows.slice(0,size),next_cursor:rows.length>size?rows[size-1].asset_id:''};}
     if(action==='assetDetailsBatch')return {assets:clone(state.assets.filter(a=>JSON.parse(params.ids_json).includes(a.asset_id)).map(a=>{const b={...a};delete b.images;return b;}))};
-    if(action==='getAsset')return {asset:clone(state.assets.find(a=>a.asset_id===params.asset_id))};
+    if(action==='getAsset'){
+      const result={asset:clone(state.assets.find(a=>a.asset_id===params.asset_id))};
+      if(options.delayAssetDetails)return new Promise(resolve=>{(state.detailReleases||={})[params.asset_id]=()=>resolve(result);});
+      return result;
+    }
     if(action==='report'&&window.__assetReportBridge)return {report:await window.__assetReportBridge(params)};
-    if(action==='getImageData')return {data:{data_url:pixel}};
+    if(action==='getImageData'){
+      const result={data:{data_url:pixel}};
+      if(options.delayImages)return new Promise(resolve=>{(state.imageReleases||={})[params.file_id]=()=>resolve(result);});
+      return result;
+    }
     if(action==='diagnostics'){
       if(options.diagDelayed&&['sheets','drive'].includes(params.component))return new Promise(resolve=>{state.diagReleases[params.component]=()=>resolve(diagnosticReply(params));});
       return diagnosticReply(params);
