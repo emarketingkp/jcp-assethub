@@ -1,9 +1,14 @@
 # jcp-assethub
+
+## 2.9.0 — complete asset workflows preview
+
+The approved shared editor, optional asset names, generic matching units and background recovery are prepared on this branch. Existing fields and records are retained. **Not deployed.** Both Apps Script files and additive `setupAssetGrouping()` are required to enable the new editor. See [workflow, preservation and owner setup](docs/UNIFIED_ASSET_WORKFLOWS.md).
+
 JCP AssetHub, a mobile-first asset management application built with Firebase Hosting, Google Apps Script, Google Sheets, Google Drive, OCR.Space and Groq AI.
 
-## 2.8.0 — navigation fixes prepared
+## 2.8.1 — navigation fixes deployed
 
-Build `2.8.0-simple-links-1` was deployed to Firebase Hosting on 2026-10-22. The follow-up `2.8.0-navigation-1` build is prepared for review, with no further deployment performed. See [navigation fixes and validation](docs/NAVIGATION_FIXES.md); it works with the existing 2.8.0 Apps Script backend.
+Build `2.8.0-simple-links-1` was deployed to Firebase Hosting on 2026-10-22. The merged navigation fixes were deployed as `2.8.1-navigation-1` on 2026-10-22. All 30 Hosting files were verified, and the live backend configuration was preserved. See [navigation fixes and validation](docs/NAVIGATION_FIXES.md); it works with the existing 2.8.0 Apps Script backend.
 
 The approved workflow now saves directly from scan results, uses one optional main-asset reference, and offers OCR or photo-only manual entry for linked assets. Metadata changes and photo uploads run through a scoped durable queue. See [workflow, additive backend setup and validation](docs/SIMPLE_ASSET_LINKS.md). Update **both** `Code.gs` and `AssetGroups.gs`; the owner controls Apps Script deployment. The navigation fix requires no additional backend setup.
 

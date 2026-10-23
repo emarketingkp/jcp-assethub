@@ -16,8 +16,11 @@
     maintenanceSort:{key:'reported_at',dir:'desc'},
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
-  const APP_VERSION = '2.8.0';
-  const BUILD_ID = '2.8.0-navigation-1';
+  const APP_VERSION = '2.9.0';
+  const BUILD_ID = '2.9.0-unified-assets-1';
+  // Full-field writes require the additive 2.9 backend setup; older services keep the legacy editor.
+  const BACKEND_API_VERSION = '2.9.0';
+  let workflows=null;
   const ASSET_BASE_URL = 'https://assets.jcpmalaysia.com/';
   const CACHE_BOOT = 'jcp_assethub_cache_boot_v1';
   const CACHE_ASSETS = 'jcp_assethub_cache_assets_v1';
@@ -317,6 +320,8 @@
 
   function esc(v){ return String(v ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function assetDisplayName(a){
+    if(a?.asset_name)return String(a.asset_name).trim();
+    if(workflows?.enabled())return AssetEditor.displayName(a);
     const brand=String(a?.brand||'').trim(),model=String(a?.model||'').trim();
     if(!brand)return model||a?.category_name||a?.category||'Unknown device';
     return model.toLowerCase().startsWith(brand.toLowerCase()+' ')?model:[brand,model].filter(Boolean).join(' ');
@@ -464,13 +469,31 @@
     });
   }
 
+  let workflowHistory=false,historyNavigation=false;
+  function installWorkflowHistory(){
+    if(workflowHistory||!workflows?.enabled())return;workflowHistory=true;
+    history.replaceState({...history.state,assetHub:true,route:state.route},'');
+    window.addEventListener('pagehide',()=>workflows.flush());
+    window.addEventListener('popstate',event=>{
+      if(!workflows?.enabled())return;
+      const hold=()=>history.pushState({assetHub:true,route:state.route},'');
+      const viewer=document.querySelector('.asset-media-dialog[open]');
+      if(viewer){viewer.close();hold();return;}
+      if(!$('modalWrap').classList.contains('hidden')){closeModal();hold();return;}
+      if(returnToInterruptedTask()){hold();return;}
+      if(state.openAssetId){closeDrawer();hold();return;}
+      if(event.state?.assetHub&&event.state.route){historyNavigation=true;try{setRoute(event.state.route);}finally{historyNavigation=false;}}
+    });
+  }
   function setRoute(route){
+    if(workflows?.enabled()){workflows.flush();if(route==='scanner')workflows.noteScannerOrigin();}
     if(route==='admin' && !isAdmin()){
       withAccess('ADMIN',()=>setRoute('admin'));
       return;
     }
-    if(state.route!==route)state.navigationVersion++;
-    closeModal();closeDrawer();
+    if(state.route!==route){state.navigationVersion++;if(workflows?.enabled())$('saveFailureNotice')?.remove();}
+    closeModal(workflows?.enabled()?{all:true}:undefined);closeDrawer();
+    if(workflowHistory&&!historyNavigation&&state.route!==route)history.pushState({assetHub:true,route},'');
     state.route=route;
     $$('.page').forEach(p=>p.classList.toggle('active',p.id===`page-${route}`));
     $$('.nav-btn').forEach(b=>b.classList.toggle('active',b.dataset.route===route));
@@ -547,6 +570,7 @@
   }
 
   async function init(){
+    workflows=AssetWorkflows.create({state,esc,icon,isAuthenticated,isAdmin,scope:()=>queueScope,queue:()=>saveQueue,rows:()=>queueRows,toast,stopCamera,resumeScannerCamera,openModal,closeModal,hasModalReturn:()=>modalStack.length>0,returnToInterruptedTask,openAsset,openAssetForm,setRoute,renderDrawer,scanEntry,mainAssetFields,bindMainAssetFields,linkedAssetFields,customFieldsHtml,recognitionEvidence,resetScannerResult,showUniversalRecognition,confirmAddLinkedAsset,contextFromRow,setLinkedContext,openLocalOperation,restoreScanDraft,openPending:openLinkedPendingSaves});
     void window.AssetInput?.ready();
     bindStaticEvents();
     applyReportDatePreset(false);
@@ -689,8 +713,8 @@
     $('mobileMoreBtn').addEventListener('click',toggleSidebar);
     $$('.admin-tab').forEach(b=>b.addEventListener('click',()=>{state.adminTab=b.dataset.admin;$$('.admin-tab').forEach(x=>x.classList.toggle('active',x===b));renderAdmin();}));
     $('startCameraBtn').addEventListener('click',()=>state.cameraStream?stopCamera():startCamera());
-    $('mobileScannerClose').addEventListener('click',()=>setRoute('dashboard'));
-    $('mobileScannerResultClose').addEventListener('click',()=>setRoute('dashboard'));
+    $('mobileScannerClose').addEventListener('click',()=>workflows?.enabled()?workflows.exitScanner():setRoute('dashboard'));
+    $('mobileScannerResultClose').addEventListener('click',()=>workflows?.enabled()?workflows.exitScanner():setRoute('dashboard'));
     $('mobileTorchBtn').addEventListener('click',toggleMobileTorch);
     $('captureBtn').addEventListener('click',()=>{
       if(window.matchMedia('(max-width:760px)').matches && state.cameraStream) captureMobileFrame();
@@ -705,9 +729,20 @@
     $('sidebar').classList.toggle('open',open); $('sidebarBackdrop').classList.toggle('show',open); document.body.classList.toggle('sidebar-open',open);
   }
   function closeSidebar(){ $('sidebar').classList.remove('open'); $('sidebarBackdrop').classList.remove('show'); document.body.classList.remove('sidebar-open'); }
+  const modalStack=[],interruptedTasks=[];
+  function takeModal(){
+    const wrap=$('modalWrap');if(wrap.classList.contains('hidden'))return null;
+    const fragment=document.createDocumentFragment();fragment.append(...$('modalBody').childNodes);
+    const saved={fragment,title:$('modalTitle').textContent,className:wrap.querySelector('.modal').className,locked:wrap.classList.contains('locked'),cleanup:state.modalCleanup,restoreFocus:state.modalRestoreFocus,focus:document.activeElement,scroll:wrap.querySelector('.modal').scrollTop,scope:queueScope};
+    state.modalCleanup=null;state.modalRestoreFocus=null;return saved;
+  }
+  function restoreModal(saved){
+    if(!saved||saved.scope!==queueScope)return;const wrap=$('modalWrap');$('modalBody').replaceChildren(saved.fragment);$('modalTitle').textContent=saved.title;wrap.querySelector('.modal').className=saved.className;wrap.classList.toggle('locked',saved.locked);$('modalCloseBtn').classList.toggle('hidden',saved.locked);wrap.classList.remove('hidden');document.body.classList.add('modal-open');state.modalCleanup=saved.cleanup;state.modalRestoreFocus=saved.restoreFocus;wrap.querySelector('.modal').scrollTop=saved.scroll;requestAnimationFrame(()=>{if(saved.focus?.isConnected)saved.focus.focus({preventScroll:true});});
+  }
   function openModal(title,html,onReady,options={}){
     const version=++state.modalVersion;
     stopCamera();
+    if(workflows?.enabled()){workflows.flush();if(options.stack||title==='Pending on this device'||title==='Review pending changes'||title==='Sign in to resume'){const saved=takeModal();if(saved)modalStack.push(saved);}}
     state.modalCleanup?.();state.modalCleanup=null;
     const wrap=$('modalWrap'), modal=wrap.querySelector('.modal');
     if(wrap.classList.contains('hidden'))state.modalRestoreFocus=document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -720,12 +755,27 @@
     if(onReady) onReady();
     requestAnimationFrame(()=>{if(version!==state.modalVersion||wrap.classList.contains('hidden')||wrap.contains(document.activeElement)&&document.activeElement.id!=='modalCloseBtn')return;const target=wrap.querySelector('input:not([type=hidden]),select,textarea,button:not(#modalCloseBtn)');target?.focus?.({preventScroll:true});});
   }
-  function closeModal(){
+  function closeModal(options={}){
     const wrap=$('modalWrap'); if(wrap.classList.contains('hidden'))return;
+    workflows?.enabled()&&workflows.flush();
     state.modalVersion++;
     state.modalCleanup?.();state.modalCleanup=null;
     wrap.classList.add('hidden');wrap.classList.remove('locked');$('modalBody').innerHTML='';document.body.classList.remove('modal-open');
+    if(workflows?.enabled()){
+      if(options?.all){for(const saved of modalStack.splice(0))saved.cleanup?.();}
+      else if(modalStack.length){restoreModal(modalStack.pop());return;}
+    }
     $('modalCloseBtn').classList.remove('hidden');const focus=state.modalRestoreFocus;state.modalRestoreFocus=null;if(focus?.isConnected&&focus.getClientRects().length)focus.focus({preventScroll:true});resumeScannerCamera();
+  }
+  function suspendTaskForScanReview(operationId){
+    if(!workflows?.enabled())return;
+    if($('modalTitle').textContent==='Pending on this device')closeModal();
+    workflows.flush();const snapshot={operationId,scope:queueScope,route:state.route,assetId:state.openAssetId,session:state.recognitionSession,target:state.scanUpdateTarget,context:linkedContext,scroll:window.scrollY,scannerScroll:$('page-scanner').scrollTop,modal:takeModal(),modalStack:modalStack.splice(0)};
+    interruptedTasks.push(snapshot);state.recognitionSession=null;state.scanUpdateTarget=null;$('modalWrap').classList.add('hidden');document.body.classList.remove('modal-open');
+  }
+  function returnToInterruptedTask(operationId=''){
+    const task=interruptedTasks.at(-1);if(!task||task.scope!==queueScope||operationId&&task.operationId!==operationId)return false;
+    interruptedTasks.pop();resetScannerResult({restartCamera:false});closeModal({all:true});setRoute(task.route);state.recognitionSession=task.session;state.scanUpdateTarget=task.target;setLinkedContext(task.context);if(task.session){showUniversalRecognition();if(task.session.photos.some(p=>p.steps.matched==='pending'&&!p.processing))void updateUniversalMatches();}if(task.assetId)void openAsset(task.assetId);modalStack.push(...task.modalStack);restoreModal(task.modal);requestAnimationFrame(()=>{scrollTo(0,task.scroll);$('page-scanner').scrollTop=task.scannerScroll;});return true;
   }
   let connectionProtocol=0,connectionRun=0,connectionPanelBusy=false,providerChecksBusy=false;
   const connectionHealth=ConnectionStatus.create({onChange:()=>{
@@ -787,7 +837,9 @@
     ];
     let response;
     await connectionHealth.run('api',async()=>{
-      const r=await AssetAPI.get('diagnostics',{frontend_version:APP_VERSION,component:'api'});response=r.diagnostics;
+      const r=await AssetAPI.get('diagnostics',{frontend_version:BACKEND_API_VERSION,frontend_release:APP_VERSION,component:'api'});response=r.diagnostics;
+      const version=response?.components?.version;
+      if(version)version.message=`Frontend ${APP_VERSION} requires backend API ${BACKEND_API_VERSION}. `+(version.ok||version.state==='ok'?'Backend API version verified.':version.message||'Backend API version could not be verified.');
       if(!response?.components?.api?.ok)throw new Error('The backend did not return a valid diagnostic API result.');
       return {...response.components.api,state:'ok',evidence:'response'};
     });
@@ -1012,10 +1064,10 @@
   }
   function groupUnitHtml(a,index){
     const duplicate=index.serials.get(AssetGroups.serialKey(a.serial))?.length>1;
-    return `<div class="group-unit"><button type="button" data-asset="${esc(a.asset_id)}"><b>${esc(assetDisplayName(a))}</b><small>${esc(a.asset_id)} · Serial: ${esc(a.serial||'Not recorded')}</small><small>${esc([a.site_name,a.area_name,a.exact_location,a.assigned_to].filter(Boolean).join(' · '))}</small>${duplicate?'<span class="group-duplicate">Repeated serial · review records</span>':''}</button><div>${statusBadge(a.status)}${a.set_id&&isAuthenticated()?`<details class="group-unit-menu"><summary aria-label="Actions for ${esc(a.asset_id)}">⋯</summary><button type="button" class="btn light sm" data-unlink-asset="${esc(a.asset_id)}">Remove from set</button></details>`:''}</div></div>`;
+    return `<div class="group-unit"><button type="button" data-asset="${esc(a.asset_id)}"><b>${esc(assetDisplayName(a))}</b><small>${esc(a.asset_id)} · Serial: ${esc(a.serial||'Not recorded')}</small><small>${esc([a.site_name,a.area_name,a.exact_location,a.assigned_to].filter(Boolean).join(' · '))}</small>${duplicate?'<span class="group-duplicate">Repeated serial · review records</span>':''}</button><div>${statusBadge(a.status)}${a.set_id&&isAuthenticated()&&!workflows?.enabled()?`<details class="group-unit-menu"><summary aria-label="Actions for ${esc(a.asset_id)}">⋯</summary><button type="button" class="btn light sm" data-unlink-asset="${esc(a.asset_id)}">Remove from set</button></details>`:''}</div></div>`;
   }
   function groupCardHtml(entry,i,index){
-    const a=entry.assets[0],isSet=entry.kind==='set',title=isSet?(a.set_name||'Unnamed set'):entry.kind==='unmarked'?([a.category_name||a.category,AssetGroups.template(a).brand,AssetGroups.template(a).model].filter(Boolean).join(' · ')):assetDisplayName(a);
+    const a=entry.assets[0],isSet=entry.kind==='set',title=isSet?(a.set_name||'Unnamed set'):entry.kind==='unmarked'?([a.category_name||a.category,AssetGroups.template(a).brand,AssetGroups.template(a).model].filter(Boolean).join(' · ')):workflows?.enabled()?AssetEditor.productName(a):assetDisplayName(a);
     const sites=new Set(entry.assets.map(r=>[r.site_name,r.area_name].filter(Boolean).join(' / ')).filter(Boolean));
     const locations=sites.size===1?[...sites][0]:sites.size+' locations';
     const statuses=new Map();entry.assets.forEach(a=>statuses.set(a.status||'Unrecorded',(statuses.get(a.status||'Unrecorded')||0)+1));
@@ -1025,7 +1077,7 @@
   }
   function renderAssets(){
     const box=$('assetList'), header=$('assetListHeader');
-    if(simpleLinksEnabled()){state.assetGrouping=false;$('assetGroupToggle').checked=false;}
+    if(simpleLinksEnabled()&&!workflows?.enabled()){state.assetGrouping=false;$('assetGroupToggle').checked=false;}
     document.querySelector('.asset-group-tools').classList.toggle('hidden',simpleLinksEnabled());
     paintPendingRegister();
     if(!state.assets.length){ header.innerHTML='';$('assetScopeCount').textContent='0 loaded physical items'; box.innerHTML='<div class="empty-state">No assets found.</div>'; return; }
@@ -1043,7 +1095,7 @@
       if(q&&!index.searchText.get(a.asset_id)?.includes(q))return false;
       return true;
     });
-    const entries=AssetGroups.project(rows,index,{grouped:state.assetGrouping}),visible=entries.slice(0,state.groupPageLimit);
+    const entries=AssetGroups.project(rows,index,{grouped:state.assetGrouping,productOnly:!!workflows?.enabled()}),visible=entries.slice(0,state.groupPageLimit);
     const listMode=state.assetView!=='grid',hasGroups=entries.some(e=>e.kind!=='asset');
     box.className=(listMode?'asset-list mode-list':'asset-list mode-grid')+(state.assetGrouping?' grouped-register':'');
     header.classList.toggle('hidden',!listMode||hasGroups);
@@ -1079,7 +1131,7 @@
       let autoExpanded=!!(q&&rows.length<=25&&!state.groupOpen.has(entry.key));
       const paint=()=>{
         const limit=state.groupUnitLimits.get(entry.key)||25,body=details.querySelector('.asset-group-content');
-        body.innerHTML=`<div class="group-actions">${isAuthenticated()?(entry.kind==='set'?'<button data-group-add class="btn light sm">Add new</button><button data-group-link class="btn light sm">Link existing</button><button data-group-rename class="btn light sm">Rename</button>':'<button data-group-add class="btn light sm">Add units</button>'):''}</div>`+entry.assets.slice(0,limit).map(a=>groupUnitHtml(a,index)).join('');
+        body.innerHTML=`<div class="group-actions">${isAuthenticated()&&!workflows?.enabled()?(entry.kind==='set'?'<button data-group-add class="btn light sm">Add new</button><button data-group-link class="btn light sm">Link existing</button><button data-group-rename class="btn light sm">Rename</button>':'<button data-group-add class="btn light sm">Add units</button>'):''}</div>`+entry.assets.slice(0,limit).map(a=>groupUnitHtml(a,index)).join('');
         bindUnits(body);
         body.querySelector('[data-group-add]')?.addEventListener('click',()=>openGroupEntry(entry.kind==='set'?{mode:'set',set:{id:first.set_id,name:first.set_name},units:[{source:'new'}]}:{mode:'same',template:AssetGroups.template(first)}));
         body.querySelector('[data-group-link]')?.addEventListener('click',()=>openGroupEntry({mode:'attach',set:{id:first.set_id,name:first.set_name},units:[{source:'existing'}]}));
@@ -1269,6 +1321,7 @@
     return promise;
   }
   async function openAsset(id,{force=false}={}){
+    if(workflows?.enabled()&&String(id).startsWith('local:'))return openLocalOperation(queueRows.find(r=>r.id===String(id).slice(6)));
     id=String(id||'').trim(); if(!id)return;
     const version=++state.drawerVersion,view=currentView();
     const current=()=>version===state.drawerVersion&&state.openAssetId===id&&view();
@@ -1345,6 +1398,7 @@
     $$('[data-drawer-maint]').forEach(b=>b.addEventListener('click',()=>openMaintenanceManage((a.maintenance||[]).find(m=>String(m.maintenance_id)===String(b.dataset.drawerMaint)))));
     $('addAssetImage').addEventListener('click',()=>withAccess('STAFF',()=>openImageUpload(a.asset_id,'camera')));
     $('addAssetGallery').addEventListener('click',()=>withAccess('STAFF',()=>openImageUpload(a.asset_id,'gallery')));
+    workflows?.enabled()&&workflows.decorateDetail(a);
     // Image delivery may finish after another linked record has replaced this drawer.
     const version=state.drawerVersion,hero=$('drawerBody').firstElementChild,scope=detailStoreKey('');
     const current=()=>state.openAssetId===String(a.asset_id)&&state.drawerVersion===version&&$('drawerBody').firstElementChild===hero&&scope===detailStoreKey('');
@@ -1378,7 +1432,7 @@
 
   function showAssetQr(asset){
     const url=assetPublicUrl(asset.asset_id);
-    openModal('JCP Asset QR Label',`<div class="qr-label-wrap"><div class="qr-card"><div class="qr-brand">JCP ASSETHUB</div><div id="assetQrCode" class="qr-code"></div><div class="qr-asset-id">${esc(asset.asset_id)}</div><div class="qr-device">${esc((asset.brand||'')+' '+(asset.model||''))}</div></div><div class="qr-info"><h3>Permanent JCP asset tag</h3><p>Attach this label to the device. Scanning it opens the exact AssetHub record. Manufacturer barcodes remain separate and are used mainly during onboarding.</p><div class="qr-link">${esc(url)}</div><div class="qr-actions"><button id="downloadQrBtn" class="btn light">Download QR</button><button id="printQrBtn" class="btn blue">Print Label</button></div><div id="qrStatus" style="font-size:10px;color:var(--muted);margin-top:8px"></div></div></div>`,()=>{
+    openModal('JCP Asset QR Label',`<div class="qr-label-wrap"><div class="qr-card"><div class="qr-brand">JCP ASSETHUB</div><div id="assetQrCode" class="qr-code"></div><div class="qr-asset-id">${esc(asset.asset_id)}</div><div class="qr-device">${esc(asset.asset_name||(asset.brand||'')+' '+(asset.model||''))}</div></div><div class="qr-info"><h3>Permanent JCP asset tag</h3><p>Attach this label to the device. Scanning it opens the exact AssetHub record. Manufacturer barcodes remain separate and are used mainly during onboarding.</p><div class="qr-link">${esc(url)}</div><div class="qr-actions"><button id="downloadQrBtn" class="btn light">Download QR</button><button id="printQrBtn" class="btn blue">Print Label</button></div><div id="qrStatus" style="font-size:10px;color:var(--muted);margin-top:8px"></div></div></div>`,()=>{
       const holder=$('assetQrCode');
       if(!window.QRCode){
         $('qrStatus').textContent='QR library did not load. Check internet access, then reopen this label.';
@@ -1402,6 +1456,7 @@
   }
 
   async function renderGallery(a){
+    if(workflows?.enabled())return renderUnifiedGallery(a);
     const box=$('drawerGallery');
     const imgs=(a.images||[]).filter(x=>String(x.active)!=='false');
     box.innerHTML=imgs.length
@@ -1415,6 +1470,7 @@
   }
 
   async function openGalleryViewer(asset,index){
+    if(workflows?.enabled())return previewUnifiedImages(asset,index);
     const imgs=(asset.images||[]).filter(x=>String(x.active)!=='false');
     if(!imgs.length)return;
     const i=((index%imgs.length)+imgs.length)%imgs.length;
@@ -1452,7 +1508,7 @@
 
   function openReplaceImage(asset,img){
     openModal('Replace Asset Image',`<div class="login-note">The replacement keeps the same image type: <b>${esc(img.image_type)}</b>.</div><div id="replacePhotoPicker"></div><div class="modal-actions"><button id="replaceImageSubmit" class="btn blue">Compress & Replace</button></div><div id="replaceImageStatus" style="font-size:11px;color:var(--muted);margin-top:8px"></div>`,()=>{
-      const picker=AssetPhotoPicker.mount($('replacePhotoPicker'),{multiple:false,maxFiles:1,onError:message=>toast(message,'error')});
+      const picker=AssetPhotoPicker.mount($('replacePhotoPicker'),{multiple:false,maxFiles:1,preview:!!workflows?.enabled(),onError:message=>toast(message,'error')});
       state.modalCleanup=()=>picker.dispose();
       $('replaceImageSubmit').addEventListener('click',async()=>{
         const file=picker.items[0]?.file; if(!file)return toast('Choose an image first.','error');
@@ -1525,30 +1581,97 @@
   let linkedContext=null,queueProtocol='',queuePaused=false,queueCredential='',guestMemoryKey='',linkContextEpoch=0,queueStorageError='';
   const notifiedSaves=new Map();
   const simpleLinksEnabled=()=>!!state.boot?.features?.asset_links;
+  const localPhotoUrls=new Map();
+  function previewUnifiedImages(asset,index=0){
+    const expected=queueScope,images=(asset.images||[]).filter(i=>String(i.active)!=='false');
+    return AssetMedia.preview({items:images.map(i=>({id:i.image_id,src:i._localPreview||'',load:()=>imageData(i.drive_file_id||i.thumbnail_file_id,{persistent:true}),caption:i.image_type||'Asset photo',main:i.image_id===asset.main_image_id,image:i,removable:!i._pending,replaceable:!i._pending})),index,active:()=>expected===queueScope,onMain:isAuthenticated()?async item=>{
+      await saveQueue.enqueueMain({id:crypto.randomUUID(),asset,image:item.image});asset.main_image_id=item.id;if(String(asset.asset_id).startsWith('local:'))state.assetDetails.set(asset.asset_id,{data:asset,savedAt:Date.now(),role:role()});else cacheAssetDetail(asset);if(state.openAssetId===asset.asset_id)void renderDrawer(asset);
+    }:null,onReplace:isAdmin()?item=>openReplaceImage(asset,item.image):null,onRemove:isAdmin()?async item=>{
+      if(!confirm('Delete this image from AssetHub and move the Drive files to trash?'))return false;
+      await AssetAPI.post('deleteImage',{image_id:item.id});invalidateImageCache([item.image.drive_file_id,item.image.thumbnail_file_id]);asset.images=asset.images.filter(i=>i.image_id!==item.id);if(asset.main_image_id===item.id)asset.main_image_id='';invalidateAssetDetail(asset.asset_id);if(state.openAssetId===asset.asset_id)void openAsset(asset.asset_id,{force:true});scheduleSync('image-deleted',20);
+    }:null});
+  }
+  function renderUnifiedGallery(asset){
+    const box=$('drawerGallery'),images=(asset.images||[]).filter(i=>String(i.active)!=='false');if(!box)return;
+    box.innerHTML=images.map((i,n)=>`<button class="gallery-item ${i.image_id===asset.main_image_id?'is-main':''}" data-preview-index="${n}"><div class="asset-thumb" ${i._localPreview?'':'data-thumb="'+esc(i.thumbnail_file_id||i.drive_file_id||'')+'"'}>${i._localPreview?'<img src="'+esc(i._localPreview)+'" alt="'+esc(i.image_type||'Asset photo')+'">':icon('image','lg')}</div><span class="gallery-label">${i.image_id===asset.main_image_id?'★ Main photo':esc(i.image_type||'Photo')}${i._pending?' · Pending':''}</span></button>`).join('')||'<div class="empty-state compact">No images yet.</div>';
+    box.querySelectorAll('[data-preview-index]').forEach(b=>b.onclick=()=>previewUnifiedImages(asset,Number(b.dataset.previewIndex)));void hydrateThumbs(box);
+    const main=images.find(i=>i.image_id===asset.main_image_id)||images[0];if(main?._localPreview&&$('drawerMainPhoto')){$('drawerMainPhoto').innerHTML='<img src="'+esc(main._localPreview)+'" alt="Main asset photo">';$('drawerMainPhoto').onclick=()=>previewUnifiedImages(asset,images.indexOf(main));}
+  }
+  async function openUnifiedStaleReview(row){
+    const current=currentView();try{const full=await fetchAssetDetail(row.params.asset_id);if(!current()||!full)return;
+      if(row.kind==='main_photo')return toast('Choose an active photo from this asset to change its main image.','error');
+      let proposed={...row.params};if(row.kind==='reconcile'){
+        const incoming=JSON.parse(row.params.incoming_json||'{}'),choices=JSON.parse(row.params.choices_json||'{}');proposed=AssetEditor.reviewed(full,incoming,choices);if(choices.specifications==='combine')proposed.specifications=combineReviewedSpecifications(full.specifications,incoming.specifications);
+      }
+      const priv=JSON.parse(row.params.private_json||'{}'),entry={changed:Object.fromEntries(Object.keys(proposed).map(k=>[k,true])),custom:JSON.parse(row.params.custom_json||'{}'),customChanged:row.params.custom_json!==undefined,private:priv,privateChanged:Object.fromEntries(Object.keys(priv).map(k=>[k,true]))};
+      AssetReview.open({full,incoming:proposed,files:row.photos.map(p=>p.file).filter(Boolean),session:null,entry,queueRow:row,context:{state,esc,scope:()=>queueScope,rows:()=>queueRows,queue:()=>saveQueue,isAuthenticated,isAdmin,customFieldsHtml,reviewControls:host=>workflows.catalogs(host),openModal,closeModal,hasModalReturn:()=>modalStack.length>0,recognitionEvidence,returnToInterruptedTask,resetScannerResult,openLocalOperation,toast},forget:async()=>{}});
+    }catch(err){if(current())toast('Could not open the pending changes. '+humanError(err),'error');}
+  }
+  function localPhotoSource(photo){
+    if(photo.preview)return photo.preview;
+    if(!localPhotoUrls.has(photo.id)&&photo.file)localPhotoUrls.set(photo.id,URL.createObjectURL(photo.file));
+    return localPhotoUrls.get(photo.id)||'';
+  }
+  function localAssetRecord(row,asset=row.asset){
+    const id=asset?.asset_id||row.params?.asset_id||'local:'+row.id,previous=detailMemoryRecord(id)?.data||state.assets.find(a=>a.asset_id===id)||{},params=row.params||{};
+    const reviewed=row.kind==='reconcile'?AssetEditor.reviewed(previous,JSON.parse(params.incoming_json||'{}'),JSON.parse(params.choices_json||'{}')):{};
+    const core={...previous,...params,...reviewed,...asset,asset_id:id,category_name:asset?.category_name||reviewed.category||params.category||previous.category_name,site_name:asset?.site_name||state.refs.sites.find(s=>s.site_id===(reviewed.site_id||params.site_id))?.name||previous.site_name,area_name:asset?.area_name||reviewed.area||params.area||previous.area_name};
+    if(!asset){core._localOperation=row.id;core.updated_at='';}else delete core._localOperation;
+    const images=new Map((core.images||[]).map(i=>[i.image_id,i]));
+    for(const photo of row.photos||[]){const preview=localPhotoSource(photo),image={...photo.image,image_id:photo.image?.image_id||photo.id,image_type:photo.type,active:true,_localPreview:preview,_photoOperation:row.id,_pending:!photo.uploaded};images.set(image.image_id,{...images.get(image.image_id),...image});if(photo.main&&!core.main_image_id)core.main_image_id=image.image_id;}
+    core.images=[...images.values()];
+    if(!core.custom_fields)core.custom_fields=Object.entries(JSON.parse(params.custom_json||'{}')).map(([field_id,value])=>({...state.refs.custom_fields.find(f=>f.field_id===field_id),field_id,value}));
+    if(isAuthenticated()&&params.private_json)core.private_details={...previous.private_details,...JSON.parse(params.private_json)};
+    for(const key of ['private_json','custom_json','incoming_json','choices_json'])delete core[key];
+    return core;
+  }
+  function applyLocalAssetResult(asset,row,metadata){
+    const previous=detailMemoryRecord(asset.asset_id)?.data;
+    if(previous?.updated_at&&asset.updated_at&&String(previous.updated_at)>String(asset.updated_at))return;
+    const merged=metadata?asset:{...previous,...Object.fromEntries(['asset_id','updated_at','main_image_id','thumbnail_file_id','image_file_id','images'].filter(k=>asset[k]!==undefined).map(k=>[k,asset[k]]))};
+    const local=localAssetRecord(row,merged);cacheAssetDetail(local);
+    if(state.openAssetId==='local:'+row.id){state.openAssetId=asset.asset_id;$('drawerId').textContent=asset.asset_id;}
+    if(state.openAssetId===asset.asset_id&&$('assetDrawer').classList.contains('open'))void renderDrawer(local);
+    if(linkedContext?.operationId===row.id)setLinkedContext({...linkedContext,assetId:asset.asset_id,operationId:''});
+    renderLinkContext();paintPendingRegister();
+  }
+  function openLocalOperation(row){
+    if(!row)return;row=queueRows.find(r=>r.id===row.id)||row;const asset=localAssetRecord(row);closeModal({all:true});closeDrawer();if(state.route==='scanner')setRoute('assets');
+    state.drawerVersion++;state.openAssetId=asset.asset_id;$('drawerId').textContent=row.asset?.asset_id||'Asset ID pending';$('assetDrawer').classList.add('open');$('drawerBackdrop').classList.remove('hidden');document.body.classList.add('drawer-open');
+    if(row.asset)cacheAssetDetail(asset);else state.assetDetails.set(asset.asset_id,{data:asset,savedAt:Date.now(),role:role()});void renderDrawer(asset);
+  }
+  function restoreScanDraft(row){
+    closeModal({all:true});closeDrawer();stopCamera();resetScannerResult({restartCamera:false});const e=structuredClone(row.evidence);
+    state.recognitionSession={photos:e.photos.map((p,i)=>({...p,file:row.photos[i].file,main:row.photos[i].main,url:URL.createObjectURL(row.photos[i].file),processing:false,codeBusy:false})),overrides:e.overrides||{},touched:e.touched||{},resolutions:e.resolutions||{},entry:e.entry,matches:e.matches||[],matchVersion:0,draftId:row.id};
+    showUniversalRecognition();setRoute('scanner');
+  }
   function guestQueueKey(){try{let key=localStorage.getItem('jcp_assethub_guest_drafts');if(!key){key=crypto.randomUUID();localStorage.setItem('jcp_assethub_guest_drafts',key);}return key;}catch{return guestMemoryKey||(guestMemoryKey=crypto.randomUUID());}}
   function setLinkedContext(context){
     linkedContext=context;linkContextEpoch++;
-    if(queueScope&&queueProtocol==='links')window.AssetStore?.set?.('entry-main:'+encodeURIComponent(queueScope),context?{operationId:context.operationId||'',assetId:context.assetId||'',name:context.name||'',placement:context.placement||{}}:null);
+    if(queueScope&&queueProtocol==='links')window.AssetStore?.set?.('entry-main:'+encodeURIComponent(queueScope),context?{operationId:context.operationId||'',assetId:context.assetId||'',name:context.name||'',placement:context.placement||{},custom:context.custom||{}}:null);
   }
   function configureSaveQueue(){
     if(!simpleLinksEnabled()){queueProtocol='legacy';return configureLegacySaveQueue();}
+    if(workflows?.enabled()&&localStorage.getItem('jcp_assethub_asset_grouping')===null){state.assetGrouping=true;$('assetGroupToggle').checked=true;}
     const detailScope=detailStoreKey('');
     if(detailScope!==activeDetailScope){activeDetailScope=detailScope;clearSensitiveDetailCache();state.detailRequests.clear();closeDrawer();}
     const endpoint=AssetAPI.getUrl(),credential=AssetAPI.getToken(),guest=isGuest();
     // Cached boot deliberately paints Guest while the saved sign-in is being verified.
     // Do not resume anonymous drafts with a signed-in token during that interval.
     if(guest&&credential){queueScope='';queueProtocol='links';saveQueue=null;queueRows=[];linkedContext=null;paintLinkedPendingSaves();return;}
-    const guestKey=guest?guestQueueKey():'',legacyScope=endpoint+'|'+(guest?'guest:'+guestKey:state.user?.username||state.user?.email)+'|'+role(),scope='links-v1|'+legacyScope;
+    const guestKey=guest?guestQueueKey():'',legacyScope=endpoint+'|'+(guest?'guest:'+guestKey:state.user?.username||state.user?.email)+'|'+role(),scope=(workflows?.enabled()?'editor-v2|':'links-v1|')+legacyScope;
     if(scope===queueScope&&queueProtocol==='links'&&queueCredential===AssetAPI.getToken())return;
     if(queueCredential!==credential){clearSensitiveDetailCache();state.detailRequests.clear();}
     queueCredential=credential;
+    if(workflows?.enabled()){workflows.flush();closeModal({all:true});resetScannerResult({restartCamera:false});for(const task of interruptedTasks.splice(0)){task.modal?.cleanup?.();task.modalStack.forEach(s=>s.cleanup?.());task.session?.photos.forEach(p=>{p.codeAbort?.abort();URL.revokeObjectURL(p.url);});}}
     $('saveFailureNotice')?.remove();queueScope=scope;queueProtocol='links';queueRows=[];queuePaused=false;queueStorageError='';activeSet=null;ordinarySave=null;linkedContext=null;notifiedSaves.clear();
-    const current=AssetSaveQueue.create({scope,guestKey,legacyScope:guest?'':legacyScope,coordinationScope:legacyScope,api:AssetAPI,
+    const current=AssetSaveQueue.create({scope,guestKey,protocol:workflows?.enabled()?2:1,legacyScope:guest?'':legacyScope,legacyScopes:workflows?.enabled()?['links-v1|'+legacyScope]:[],coordinationScope:legacyScope,api:AssetAPI,
       active:()=>queueScope===scope&&queueProtocol==='links'&&saveQueue===current&&!queuePaused&&AssetAPI.getUrl()===endpoint&&AssetAPI.getToken()===credential,
       photosAllowed:()=>!state.recognitionSession?.photos?.some(p=>p.processing||p.codeBusy),
       onAuthRequired:()=>{queuePaused=true;clearSensitiveDetailCache();document.querySelectorAll('.staff-private-section').forEach(el=>el.remove());$('profileRole').textContent='Session expired';$('signInBtn').classList.remove('hidden');paintLinkedPendingSaves();},
       onChange:(rows,error)=>{if(rows)queueRows=rows;paintLinkedPendingSaves();if(error){console.warn('Background saves paused:',error);if(queueStorageError!==error){queueStorageError=error;showQueueStorageFailure();}}},
       onAsset:(asset,row,metadata)=>{
+        if(workflows?.enabled()){applyLocalAssetResult(asset,row,metadata);return;}
         const previous=state.assets.find(a=>a.asset_id===asset.asset_id);
         if(metadata){
           for(const a of row.relatedAssets||[asset]){
@@ -1564,17 +1687,18 @@
         if(metadata&&linkedContext?.operationId===row.id)setLinkedContext({...linkedContext,operationId:'',assetId:asset.asset_id});
         renderLinkedDetailSection();renderLinkContext();paintPendingRegister();
       }});
-    saveQueue=current;void current.migrateLegacy();
+    saveQueue=current;workflows?.syncScope();installWorkflowHistory();void current.migrateLegacy();
     const contextEpoch=++linkContextEpoch;
     window.AssetStore?.get?.('entry-main:'+encodeURIComponent(scope)).then(context=>{if(saveQueue===current&&contextEpoch===linkContextEpoch&&context){linkedContext=context;renderLinkContext();}});
     current.rows().then(rows=>{if(saveQueue!==current||queueScope!==scope)return;queueRows=rows;paintLinkedPendingSaves();if(isAuthenticated())for(const row of rows){if(row.state==='Retry'&&/AUTH_REQUIRED|SESSION_EXPIRED|USER_DISABLED/.test(row.error))void current.retry(row.id);}void current.pump();}).catch(err=>toast('Pending items could not be read. '+humanError(err),'error'));
     paintLinkedPendingSaves();
+    if(workflows?.enabled()){for(const id of ['addAssetBtn','addAssetGroupBtn'])$(id)?.classList.add('hidden');let manual=$('scannerManualEntry');if(!manual){manual=document.createElement('button');manual.id='scannerManualEntry';manual.type='button';manual.className='btn light scanner-manual-entry';manual.textContent='Photo / manual entry';document.querySelector('#page-scanner .scanner-card').append(manual);}manual.onclick=()=>{stopCamera();openAssetForm({...linkedContext?.placement,custom_fields:Object.entries(linkedContext?.custom||{}).map(([field_id,value])=>({field_id,value})),_mainContext:linkedContext||undefined,_photoOnly:true});};}
   }
   function paintPendingSaves(){return simpleLinksEnabled()?paintLinkedPendingSaves():paintLegacyPendingSaves();}
   function paintLinkedPendingSaves(){
     let button=$('pendingSavesBtn');
     if(!button){button=document.createElement('button');button.id='pendingSavesBtn';button.type='button';button.className='btn light sm pending-saves-button';document.querySelector('.topbar .top-spacer').before(button);}
-    const pending=queueRows.filter(r=>r.state!=='Saved');button.onclick=openLinkedPendingSaves;button.textContent=pending.length+' pending';button.classList.toggle('hidden',!pending.length);
+    workflows?.onQueueChange();const pending=queueRows.filter(r=>r.state!=='Saved');button.onclick=openLinkedPendingSaves;button.textContent=pending.length+' pending';button.classList.toggle('hidden',!pending.length);
     let scanButton=$('scannerPendingBtn');if(!scanButton){scanButton=document.createElement('button');scanButton.id='scannerPendingBtn';scanButton.className='btn light sm scanner-pending-button';scanButton.type='button';$('scannerConnectionBtn').after(scanButton);}
     scanButton.onclick=openLinkedPendingSaves;scanButton.textContent=button.textContent;scanButton.classList.toggle('hidden',!pending.length);
     if($('linkedPendingItems'))paintLinkedPendingItems();
@@ -1613,7 +1737,7 @@
     }).join('')||'<p>No pending items.</p>';
     list.querySelectorAll('[data-retry-save]').forEach(b=>b.onclick=()=>{notifiedSaves.delete(b.dataset.retrySave);$('saveFailureNotice')?.remove();void saveQueue.retry(b.dataset.retrySave);});
     list.querySelectorAll('[data-review-save],[data-review-main]').forEach(b=>b.onclick=()=>reviewQueuedSave(queueRows.find(r=>r.id===(b.dataset.reviewSave||b.dataset.reviewMain))));
-    list.querySelectorAll('[data-open-saved]').forEach(b=>b.onclick=()=>{closeModal();openAsset(b.dataset.openSaved);});
+    list.querySelectorAll('[data-open-saved]').forEach(b=>b.onclick=async()=>{if(workflows?.enabled()&&modalStack.length){const expected=queueScope,asset=await fetchAssetDetail(b.dataset.openSaved);if(expected!==queueScope||!b.isConnected)return;openModal(assetDisplayName(asset),workflows.referenceHtml(asset,{full:true})+'<div class="detail-grid">'+AssetEditor.fields.filter(f=>f.key!=='movement_note').map(f=>'<div class="detail-field"><label>'+esc(f.label)+'</label><div>'+esc(AssetEditor.values(asset)[f.key]||'—')+'</div></div>').join('')+'</div>',null,{stack:true});return;}closeModal();openAsset(b.dataset.openSaved);});
   }
   function showSaveFailure(row){
     let notice=$('saveFailureNotice');if(!notice){notice=document.createElement('aside');notice.id='saveFailureNotice';notice.className='save-failure-notice';notice.setAttribute('role','alert');document.body.append(notice);}
@@ -1638,8 +1762,8 @@
     const queued=context.operationId&&queueRows.find(r=>r.id===context.operationId),asset=queued?.asset||state.assets.find(a=>a.asset_id===context.assetId)||context.asset;
     return {...context,assetId:asset?.asset_id||context.assetId||'',asset:asset||null,name:asset?assetDisplayName(asset):queued?assetDisplayName(queued.params):context.name||context.assetId||'New main asset',pending:!!context.operationId&&!queued?.asset};
   }
-  function contextFromRow(row){return {operationId:row.id,assetId:row.asset?.asset_id||'',name:assetDisplayName(row.params),asset:row.asset||null,placement:Object.fromEntries(['site_id','area','exact_location','assigned_to'].map(k=>[k,row.params[k]||'']))};}
-  function contextFromAsset(asset){return {assetId:asset.asset_id,asset:publicAssetSummary(asset),name:assetDisplayName(asset),placement:{site_id:asset.site_id,area:asset.area_name||asset.area||'',exact_location:asset.exact_location||'',assigned_to:asset.assigned_to||''}};}
+  function contextFromRow(row){return {custom:workflows?.enabled()?AssetEditor.sharedCustom(JSON.parse(row.params.custom_json||'{}'),state.refs.custom_fields):{},operationId:row.id,assetId:row.asset?.asset_id||'',name:assetDisplayName(row.params),asset:row.asset||null,placement:Object.fromEntries(['site_id','area','exact_location','assigned_to'].map(k=>[k,row.params[k]||'']))};}
+  function contextFromAsset(asset){return {custom:workflows?.enabled()?AssetEditor.sharedCustom(asset.custom_fields,state.refs.custom_fields):{},assetId:asset.asset_id,asset:publicAssetSummary(asset),name:assetDisplayName(asset),placement:{site_id:asset.site_id,area:asset.area_name||asset.area||'',exact_location:asset.exact_location||'',assigned_to:asset.assigned_to||''}};}
   function renderLinkContext(){
     if(!simpleLinksEnabled())return;
     const layout=document.querySelector('#page-scanner .scanner-layout');let box=$('scannerMainContext');
@@ -1660,7 +1784,7 @@
     openModal('Add linked asset',`<div class="linked-capture-choices"><p>Link the next asset to <b>${esc(main.name)}</b>.</p><button type="button" id="linkedAssetOcr" class="btn blue"><span>Scan label with OCR<small>Read the device label, then review the result.</small></span></button><button type="button" id="linkedAssetPhoto" class="btn light"><span>Take asset photo<small>No label needed. Continue to manual entry.</small></span></button><input type="file" id="linkedAssetPhotoFile" accept="image/*" capture="environment" hidden></div>`,()=>{
       $('linkedAssetOcr').onclick=()=>beginScanner({context});
       $('linkedAssetPhoto').onclick=()=>$('linkedAssetPhotoFile').click();
-      $('linkedAssetPhotoFile').onchange=e=>{const file=e.target.files?.[0];if(!file)return;closeDrawer();openAssetForm({...context.placement,_mainContext:context,_photoOnly:true,_assetPhotos:[{file,type:'main'}]});};
+      $('linkedAssetPhotoFile').onchange=e=>{const file=e.target.files?.[0];if(!file)return;closeDrawer();openAssetForm({...context.placement,custom_fields:Object.entries(context.custom||{}).map(([field_id,value])=>({field_id,value})),_mainContext:context,_photoOnly:true,_assetPhotos:[{file,type:'main'}]});};
     },{size:'sm'});
   }
   function initialMainChoice(asset={}){
@@ -1701,10 +1825,12 @@
     }};
   }
   function scanEntry(session){
-    if(!session.entry)session.entry={...(linkedContext?.placement||{}),site_id:linkedContext?.placement?.site_id||'',area:linkedContext?.placement?.area||'',status:'Active',custom:{},main:linkedContext?{mode:'link',context:linkedContext}:{mode:'none'}};
+    if(!session.entry&&workflows?.enabled()&&state.scanUpdateTarget){const a=detailMemoryRecord(state.scanUpdateTarget.asset_id)?.data||state.assets.find(a=>a.asset_id===state.scanUpdateTarget.asset_id)||state.scanUpdateTarget;session.entry={...AssetEditor.values(a),...state.scanUpdateTarget._editorValues,custom:Object.fromEntries((a.custom_fields||[]).map(f=>[f.field_id,f.value])),...(state.scanUpdateTarget._editorCustom?{custom:state.scanUpdateTarget._editorCustom,customChanged:true}:{}),private:{...a.private_details,...state.scanUpdateTarget._editorPrivate},privateChanged:Object.fromEntries(Object.keys(state.scanUpdateTarget._editorPrivate||{}).map(k=>[k,true])),changed:Object.fromEntries(Object.keys(state.scanUpdateTarget._editorValues||{}).filter(k=>AssetEditor.fields.some(f=>f.key===k)&&state.scanUpdateTarget._editorValues[k]!==AssetEditor.values(a)[k]).map(k=>[k,true])),main:a.parent_asset_id?{mode:'link',context:contextFromAsset(state.assets.find(x=>x.asset_id===a.parent_asset_id)||{asset_id:a.parent_asset_id})}:{mode:'none'}};}
+    if(!session.entry)session.entry={...(linkedContext?.placement||{}),site_id:linkedContext?.placement?.site_id||'',area:linkedContext?.placement?.area||'',status:'Active',custom:{...(linkedContext?.custom||{})},main:linkedContext?{mode:'link',context:linkedContext}:{mode:'none'}};
     return session.entry;
   }
   function enhanceScanEntry(){
+    if(workflows?.enabled()){workflows.scanContext(state.recognitionSession);return;}
     if(!simpleLinksEnabled())return;
     const session=state.recognitionSession;if(!session)return;const entry=scanEntry(session),actions=$('scanResult').querySelector('.scan-match-primary');if(!actions)return;
     const custom=Object.entries(entry.custom||{}).map(([field_id,value])=>({field_id,value}));
@@ -1717,8 +1843,9 @@
     const title=actions.querySelector('b');if(title)title.textContent='Review and save from this result';
   }
   function truthyClient(v){return v===true||String(v).toLowerCase()==='true';}
-  function recognitionEvidence(session){return {type:'scan',entry:structuredClone(session.entry),overrides:structuredClone(session.overrides),resolutions:structuredClone(session.resolutions),matches:structuredClone(session.matches),photos:session.photos.map(p=>Object.fromEntries(['id','observation','ocr','ai','codes','warning','error','steps'].filter(k=>p[k]!==undefined).map(k=>[k,structuredClone(p[k])]))) };}
+  function recognitionEvidence(session){return {type:'scan',touched:structuredClone(session.touched||{}),entry:structuredClone(session.entry),overrides:structuredClone(session.overrides),resolutions:structuredClone(session.resolutions),matches:structuredClone(session.matches),photos:session.photos.map(p=>Object.fromEntries(['id','observation','ocr','ai','codes','warning','error','steps'].filter(k=>p[k]!==undefined).map(k=>[k,structuredClone(p[k])]))) };}
   async function saveScanDirect(incoming,session){
+    if(workflows?.enabled())return workflows.saveScan(incoming,session);
     if(session.locallySaved||session.localSaving)return;
     if(!saveQueue)return toast('Connect to verify your saved sign-in before saving. Your result and photos are still here.','error');
     const region=$('scanResult').querySelector('.scan-entry');for(const input of region.querySelectorAll('input,select'))if(!input.reportValidity())return;
@@ -1736,6 +1863,7 @@
     }catch(err){toast('Draft was not saved. Keep this result open. '+humanError(err),'error');}finally{session.localSaving=false;}});
   }
   async function saveAssetFormInBackground(asset,form,photos,linkage,id){
+    if(workflows?.enabled())return workflows.saveForm(asset,form,photos,linkage,id);
     if(!saveQueue)throw new Error('Connect to verify your saved sign-in before saving. Your form and photos are still here.');
     const sourceScope=queueScope;const params=Object.fromEntries(new FormData(form)),custom={};form.querySelectorAll('[data-custom]').forEach(el=>custom[el.dataset.custom]=el.value);params.custom_json=JSON.stringify(custom);
     if(asset.asset_id){params.asset_id=asset.asset_id;params.expected_updated_at=asset.updated_at||asset.expected_updated_at||'';}
@@ -1753,8 +1881,9 @@
     if(!row)return;if(row.asset||!/(?:BATCH|OPERATION)_NOT_STARTED:/.test(row.error))return openLinkedPendingSaves();
     if(row.params.asset_id)return openStaleDraftReview(row);
     if(row.evidence?.type==='scan'){
+      if(workflows?.enabled())suspendTaskForScanReview(row.id);
       closeModal();closeDrawer();stopCamera();resetScannerResult({restartCamera:false});
-      const e=structuredClone(row.evidence);state.recognitionSession={photos:e.photos.map((p,i)=>({...p,file:row.photos[i].file,url:URL.createObjectURL(row.photos[i].file),processing:false,codeBusy:false})),overrides:e.overrides||{},resolutions:e.resolutions||{},entry:e.entry,matches:e.matches||[],matchVersion:0,queueId:row.id};showUniversalRecognition();setRoute('scanner');if(navigator.onLine)void updateUniversalMatches();
+      const e=structuredClone(row.evidence);state.recognitionSession={photos:e.photos.map((p,i)=>({...p,file:row.photos[i].file,url:URL.createObjectURL(row.photos[i].file),processing:false,codeBusy:false})),overrides:e.overrides||{},touched:e.touched||{},resolutions:e.resolutions||{},entry:e.entry,matches:e.matches||[],matchVersion:0,queueId:row.id};showUniversalRecognition();setRoute('scanner');if(navigator.onLine)void updateUniversalMatches();
     }else openAssetForm({...row.params,_queueRow:row,_assetPhotos:row.photos.map(p=>({file:p.file,type:p.type})),_photoOnly:!row.params.brand||!row.params.model});
   }
   function combineReviewedSpecifications(current,incoming){
@@ -1762,6 +1891,7 @@
     const parts=lines(current),keys=new Set(parts.map(label).filter(Boolean));for(const part of lines(incoming)){const key=label(part);if(key&&keys.has(key)||parts.some(p=>normalize(p)===normalize(part)))continue;parts.push(part);if(key)keys.add(key);}return parts.join('\n').slice(0,4800);
   }
   async function openStaleDraftReview(row){
+    if(workflows?.enabled()&&row.kind!=='retire')return openUnifiedStaleReview(row);
     const current=currentView();
     try{
       const latest=await fetchAssetDetail(row.params.asset_id,{label:'Loading latest asset…'});
@@ -1796,7 +1926,7 @@
     const markup=`${asset.parent_asset_id?`<h3 class="detail-icon-heading">${detailLinkIcon()}<span>Main asset</span></h3>${main?row(main):`<button class="linked-detail-row" data-linked-member="${esc(asset.parent_asset_id)}"><div><b>${esc(asset.parent_asset_id)}</b><small>Open main asset</small></div>${icon('arrow','sm')}</button>`}`:''}<div class="panel-head"><h3 class="detail-icon-heading">${detailLinkIcon()}<span>Linked assets</span><span class="linked-count">${members.length}</span></h3>${isAuthenticated()&&!['Retired','Merged'].includes(asset.status)?`<button type="button" id="addLinkedAsset" class="btn light sm">${icon('plus','sm')}Add linked asset</button>`:''}</div>${members.map(row).join('')}${queued.map(r=>`<button class="linked-detail-row pending" data-pending-link="${esc(r.id)}"><div><b>${esc(assetDisplayName(r.params))}</b><small>${esc(r.params.serial||'No serial')} · ${esc(r.state)}</small></div><span class="pending-status">Pending</span></button>`).join('')}${!members.length&&!queued.length?'<small class="linked-empty">No linked assets.</small>':''}${asset.set_id?'<details class="legacy-membership-note"><summary>Earlier set reference</summary><p>'+esc(asset.set_name||asset.set_id)+'. Existing data is retained. Main asset links are shown separately.</p></details>':''}`;
     if(section._markup===markup)return;section._markup=markup;section.innerHTML=markup;
     section.querySelectorAll('[data-linked-member]').forEach(b=>b.onclick=()=>openAsset(b.dataset.linkedMember));section.querySelectorAll('[data-pending-link]').forEach(b=>b.onclick=openLinkedPendingSaves);
-    $('addLinkedAsset')?.addEventListener('click',()=>confirmAddLinkedAsset(contextFromAsset(asset)));
+    $('addLinkedAsset')?.addEventListener('click',()=>confirmAddLinkedAsset(asset._localOperation?contextFromRow(queueRows.find(r=>r.id===asset._localOperation)):contextFromAsset(asset)));
   }
   function decorateDetailHeadings(){
     if(!simpleLinksEnabled())return;
@@ -1864,7 +1994,7 @@
     return `<section class="field full"><label>Linked asset / set (optional)</label><input id="linkedAssetSearch" placeholder="Search by name, tag or serial" autocomplete="off"><select id="linkedAssetChoice" aria-label="Linked asset"><option value="">No linked asset</option></select><div class="modal-actions"><button type="button" class="btn light sm" id="scanLinkedTag">Scan tag</button><button type="button" class="btn light sm" id="removeLinkedAsset">Remove</button></div><input type="file" id="linkedTagPhoto" accept="image/*" capture="environment" hidden><small id="linkedAssetSummary"></small><label><input id="startsAssetSet" type="checkbox" ${a._startSet||a._queueRow?.setName&&!a._queueRow?.parent&&!a._queueRow?.anchor?'checked':''}> This asset starts a set</label><input id="linkedSetName" aria-label="Set name" placeholder="Set name" value="${esc(a._setContext?.setName||a._queueRow?.setName||a.set_name||'')}"></section>`;
   }
   function bindLinkedAssetFields(form,a){
-    if(simpleLinksEnabled())return bindMainAssetFields(form,a,'form',initialMainChoice(a),choice=>{if(a.asset_id||choice.mode!=='link')return;const p=mainDescriptor(choice.context)?.asset;if(!p)return;if(!$('assetSite').value){$('assetSite').value=p.site_id||'';$('assetSite').dispatchEvent(new Event('change'));}if(!$('assetArea').value)$('assetArea').value=p.area_name||p.area||'';});
+    if(simpleLinksEnabled())return bindMainAssetFields(form,a,'form',initialMainChoice(a),choice=>{form.dispatchEvent(new Event('change',{bubbles:true}));if(a.asset_id||choice.mode!=='link')return;const p=mainDescriptor(choice.context)?.asset;if(!p)return;if(!$('assetSite').value){$('assetSite').value=p.site_id||'';$('assetSite').dispatchEvent(new Event('change'));}if(!$('assetArea').value)$('assetArea').value=p.area_name||p.area||'';});
     if(!$('linkedAssetChoice'))return null;
     let selected=a._queueRow?.anchor||null,removed=false;
     const choice=$('linkedAssetChoice'),search=$('linkedAssetSearch'),starts=$('startsAssetSet'),name=$('linkedSetName'),summary=$('linkedAssetSummary');
@@ -1902,11 +2032,13 @@
   setInterval(()=>void saveQueue?.pump(),5000);
 
   function assetFormHtml(a={}){
+    if(workflows?.enabled())return workflows.formHtml(a);
     const catValue=a.category_name||a.category||''; const site=a.site_id||''; const area=a.area_name||a.area||'';
     return `<form id="assetForm" class="form-grid">${a.asset_id?`<div class="field full asset-form-scan-action"><div><b>Update from a device photo</b><small>Scan a label or Windows specifications screen, then review differences before saving.</small></div><button type="button" id="scanUpdateAsset" class="btn light">${icon('scan','sm')} Scan to update</button></div>`:''}<div class="field"><label>Category</label>${editablePicker("assetCategory","category",catValue,state.refs.categories.map(x=>x.name),"Enter category")}<small>You can type a new device type. Admin can later add it to the master category list.</small></div><div class="field"><label>Brand</label>${editablePicker("assetBrand","brand",a.brand||"",[...state.refs.brands,...(window.AssetInput?.current?.brands()||[])],"Enter brand")}</div><div class="field"><label>Model</label><input name="model" value="${esc(a.model||'')}" autocomplete="off" ${a.asset_id&&!a.model?'':'required'}></div><div class="field"><label>Serial number</label><input name="serial" value="${esc(a.serial||'')}"></div><div class="field"><label>Site</label><select name="site_id" id="assetSite" required><option value="">Select site</option>${state.refs.sites.map(x=>`<option value="${esc(x.site_id)}" ${String(x.site_id)===String(site)?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div><div class="field"><label>Area / Department</label>${editablePicker("assetArea","area",area,[],"Enter area / department")}</div><div class="field"><label>Status</label><select name="status">${['Active','Spare','Faulty','Under Repair','Missing','Retired'].map(s=>`<option ${String(a.status||'Active')===s?'selected':''}>${s}</option>`).join('')}</select></div><details class="asset-form-extra field full"><summary>Additional information <small>Location, assignment and specifications</small></summary><div class="asset-form-extra-grid form-grid"><div class="field"><label>Exact location <span style="font-weight:500">(optional)</span></label><input name="exact_location" list="locationOptions" value="${esc(a.exact_location||'')}" placeholder="e.g. DTF A3 Station"><datalist id="locationOptions">${state.refs.locations.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field"><label>Assigned person / team <span style="font-weight:500">(optional)</span></label><input name="assigned_to" list="assigneeOptions" value="${esc(a.assigned_to||'')}" placeholder="Person or team"><datalist id="assigneeOptions">${state.refs.assignees.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field full"><label>Specifications</label><textarea name="specifications" rows="3">${esc(a.specifications||'')}</textarea></div><div class="field"><label>Movement note <span style="font-weight:500">(only if placement changes)</span></label><input name="movement_note" placeholder="Optional reason"></div></div></details>${state.refs.custom_fields.some(f=>String(f.required)==='true'||f.required===true)?`<div id="customFieldsForm" class="field full"><span class="label">Required custom information</span><div class="form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>String(f.required)==='true'||f.required===true))}</div></div>`:''}${state.refs.custom_fields.some(f=>!(String(f.required)==='true'||f.required===true))?`<details class="asset-form-extra field full"><summary>Other custom information</summary><div class="asset-form-extra-grid form-grid">${customFieldsHtml(a.custom_fields||[],state.refs.custom_fields.filter(f=>!(String(f.required)==='true'||f.required===true)))}</div></details>`:''}${linkedAssetFields(a)}<section class="field full asset-form-photos"><h3>Photos</h3><p>${a._scanFiles?.length||a._scanFile?'Scan photos are included. ':''}Take photos or choose from your gallery. These attach to this asset without restarting recognition.</p><div id="assetPhotoPicker"></div><small>Photos are compressed before upload. Review the selected photos below.</small></section><div id="assetSaveStatus" class="asset-save-status" role="status" aria-live="polite"></div><div class="field full"><div class="modal-actions">${a.asset_id&&a.status!=='Retired'&&isAdmin()?'<button type="button" id="retireAssetBtn" class="btn danger">Retire Asset</button>':''}<button type="button" id="cancelAssetForm" class="btn light">Cancel</button><button type="submit" class="btn blue">${a.asset_id?'Save Changes':simpleLinksEnabled()?'Save asset':'Create Asset'}</button></div></div></form>`;
   }
-  function customFieldsHtml(existing,fields=state.refs.custom_fields){ const map={}; existing.forEach(x=>map[x.field_id]=x.value); return fields.map(f=>{ const v=map[f.field_id]||''; const req=String(f.required)==='true'||f.required===true?'required':''; if(f.field_type==='select'){let opts=[];try{opts=JSON.parse(f.options_json||'[]')}catch{} return `<div class="field"><label>${esc(f.label)}</label><select data-custom="${esc(f.field_id)}" ${req}><option value="">—</option>${opts.map(o=>`<option ${String(o)===String(v)?'selected':''}>${esc(o)}</option>`).join('')}</select></div>`;} if(f.field_type==='boolean') return `<div class="field"><label>${esc(f.label)}</label><select data-custom="${esc(f.field_id)}" ${req}><option value="">—</option><option value="Yes" ${v==='Yes'?'selected':''}>Yes</option><option value="No" ${v==='No'?'selected':''}>No</option></select></div>`; return `<div class="field"><label>${esc(f.label)}</label><input type="${['date','number'].includes(f.field_type)?f.field_type:'text'}" data-custom="${esc(f.field_id)}" value="${esc(v)}" ${req}></div>`; }).join('')||'<div class="empty-state compact">No custom fields configured.</div>'; }
+  function customFieldsHtml(existing,fields=state.refs.custom_fields){ const map={}; existing.forEach(x=>map[x.field_id]=x.value); return fields.map(f=>{ const v=map[f.field_id]||''; const req=String(f.required)==='true'||f.required===true?'required':''; if(f.field_type==='select'){let opts=[];try{opts=JSON.parse(f.options_json||'[]')}catch{} return `<div class="field"><label>${esc(f.label)}</label><select data-custom="${esc(f.field_id)}" ${req}><option value="">—</option>${opts.map(o=>`<option ${String(o)===String(v)?'selected':''}>${esc(o)}</option>`).join('')}${v&&!opts.includes(v)?`<option selected>${esc(v)}</option>`:''}</select></div>`;} if(f.field_type==='boolean') return `<div class="field"><label>${esc(f.label)}</label><select data-custom="${esc(f.field_id)}" ${req}><option value="">—</option><option value="Yes" ${v==='Yes'?'selected':''}>Yes</option><option value="No" ${v==='No'?'selected':''}>No</option></select></div>`; return `<div class="field"><label>${esc(f.label)}</label><input type="${['date','number'].includes(f.field_type)?f.field_type:'text'}" data-custom="${esc(f.field_id)}" value="${esc(v)}" ${req}></div>`; }).join('')||'<div class="empty-state compact">No custom fields configured.</div>'; }
   function openAssetForm(asset={}){
+    if(workflows?.enabled()&&!asset._origin)asset={...asset,_origin:workflows.origin()};
     if(!simpleLinksEnabled()&&!asset.asset_id&&activeSet)asset={...activeSet.placement,...asset,_setContext:activeSet};
     if(simpleLinksEnabled()&&asset.asset_id&&!asset._queueRow&&queueRows.some(r=>r.params.asset_id===asset.asset_id&&r.state!=='Saved'))return openLinkedPendingSaves();
     if(asset.asset_id && !isAuthenticated()) return withAccess('STAFF',()=>openAssetForm(asset));
@@ -1916,23 +2048,25 @@
       const form=$('assetForm'); const siteSel=$('assetSite'); const areaInput=$('assetArea');
       function updateAreas(){ const rows=state.refs.areas.filter(x=>!siteSel.value||String(x.site_id)===String(siteSel.value)); form.querySelector('[data-picker-for="assetArea"]').innerHTML='<option value="">Choose…</option>'+chooserOptions(rows.map(x=>x.name)).map(x=>`<option value="${esc(x)}" ${x===areaInput.value?'selected':''}>${esc(x)}</option>`).join(''); }
       bindEditablePickers(form);
-      siteSel.addEventListener('change',updateAreas); updateAreas();
+      if(!workflows?.enabled()){siteSel.addEventListener('change',updateAreas);updateAreas();}
       $('scanUpdateAsset')?.addEventListener('click',()=>{
-        beginScanner({target:{asset_id:asset.asset_id,brand:asset.brand,model:asset.model},context:null});
+        const values=workflows?.enabled()?Object.fromEntries(new FormData(form)):null;const custom=workflows?.enabled()?Object.fromEntries([...form.querySelectorAll('[data-custom]')].map(el=>[el.dataset.custom,el.value])):{};const privateValues=workflows?.enabled()?Object.fromEntries([...form.querySelectorAll('[data-private][data-dirty]')].map(el=>[el.dataset.private,el.value])):{};
+        beginScanner({target:{asset_id:asset.asset_id,brand:asset.brand,model:asset.model,...(values?{_editorValues:values,_editorCustom:custom,_editorPrivate:privateValues}:{})},context:null});
         toast('Scan a label to compare against '+asset.asset_id+'.');
       });
       if(asset._photoOnly||simpleLinksEnabled()&&asset.asset_id&&(!asset.brand||!asset.model)){for(const name of ['brand','model','serial']){const input=form.querySelector('[name="'+name+'"]');input.required=false;const label=input.closest('.field').querySelector('label');if(label)label.textContent+=' (optional)';}form.insertAdjacentHTML('afterbegin','<p class="field full photo-only-note">'+(asset._photoOnly?'Photo attached. ':'')+'Choose a category and enter what you know. Brand, model and serial are optional.</p>');}
-      if(simpleLinksEnabled()&&!asset.asset_id){
+      if(simpleLinksEnabled()&&!workflows?.enabled()&&!asset.asset_id){
         const main=initialMainChoice(asset).context;
         const previous=queueRows.slice().reverse().find(r=>r.kind==='create'&&r.params.brand&&r.params.model&&(main?.operationId?r.parent===main.operationId:main?.assetId?r.anchor?.asset_id===main.assetId:!r.parent&&!r.anchor));
         if(previous){const extra=form.querySelector('.asset-form-extra-grid');const row=document.createElement('div');row.className='field full';row.innerHTML='<button type="button" id="reusePreviousModel" class="btn light sm">Use previous model</button><small>Copy category, brand, model and shared specifications. This asset keeps its own serial and photos.</small>';extra.prepend(row);$('reusePreviousModel').onclick=()=>{const template=AssetGroups.template(previous.params);for(const key of ['category','brand','model','specifications']){const input=form.querySelector('[name="'+key+'"]');input.value=template[key]||'';input.dispatchEvent(new Event('input',{bubbles:true}));}};}
       }
       bindInputAssistance(form);
       const linkage=bindLinkedAssetFields(form,asset);
-      const operationId=asset._queueRow?.id||crypto.randomUUID();
+      const operationId=asset._queueRow?.id||asset._operationId||crypto.randomUUID();
       let locallySaved=false;
-      const photos=AssetPhotoPicker.mount($('assetPhotoPicker'),{initial:initialScanFiles,onError:message=>toast(message,'error')});
-      state.modalCleanup=()=>photos.dispose();
+      const photos=AssetPhotoPicker.mount($('assetPhotoPicker'),{initial:initialScanFiles,preview:!!workflows?.enabled(),onChange:()=>form.dispatchEvent(new Event('change',{bubbles:true})),onError:message=>toast(message,'error')});
+      if(workflows?.enabled())workflows.mountForm(form,asset,photos,linkage,operationId);
+      state.modalCleanup=()=>{form.querySelector('#matchingUnits')?._dispose?.();photos.dispose();};
       let savedAsset=null,guestUploadToken='',linkPayload=null;
       const viewSaved=()=>{
         const id=savedAsset.asset_id;
@@ -2013,6 +2147,7 @@
     const currentSite=a.site_id||'';
     openModal('Move / Assign Asset',`<form id="moveAssignForm" class="form-grid"><div class="field"><label>Asset</label><input value="${esc(a.asset_id)} — ${esc((a.brand||'')+' '+(a.model||''))}" disabled></div><div class="field"><label>Site</label><select name="site_id" id="moveSite" required>${state.refs.sites.map(s=>`<option value="${esc(s.site_id)}" ${String(s.site_id)===String(currentSite)?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div><div class="field"><label>Area / Department</label><input name="area" id="moveArea" list="moveAreaOptions" value="${esc(a.area_name||a.area||'')}" required><datalist id="moveAreaOptions"></datalist></div><div class="field"><label>Exact location <span style="font-weight:500">(optional)</span></label><input name="exact_location" value="${esc(a.exact_location||'')}" list="locationOptionsMove"><datalist id="locationOptionsMove">${state.refs.locations.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field"><label>Assigned person / team <span style="font-weight:500">(optional)</span></label><input name="assigned_to" value="${esc(a.assigned_to||'')}" list="assigneeOptionsMove"><datalist id="assigneeOptionsMove">${state.refs.assignees.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field full"><label>Movement note</label><input name="movement_note" placeholder="Reason / note (optional)"></div><div class="field full"><div class="modal-actions"><button type="button" id="cancelMoveAssign" class="btn light">Cancel</button><button class="btn blue" type="submit">Save Move / Assignment</button></div></div></form>`,()=>{
       const form=$('moveAssignForm'), site=$('moveSite'), area=$('moveArea');
+      if(workflows?.enabled()){form.insertAdjacentHTML('beforeend',workflows.referenceHtml(a,{full:true}));workflows.catalogs(form);}
       if(simpleLinksEnabled())form.insertAdjacentHTML('afterbegin','<p class="field full single-asset-note">Only this asset moves. Its main asset and linked assets keep their own placement and history.</p>');
       const updateAreas=()=>{const rows=state.refs.areas.filter(x=>!site.value||String(x.site_id)===String(site.value));$('moveAreaOptions').innerHTML=rows.map(x=>`<option value="${esc(x.name)}">`).join('');};
       site.addEventListener('change',()=>{area.value='';updateAreas();}); updateAreas();
@@ -2023,8 +2158,9 @@
 
   function openImageUpload(assetId,source=''){
     if(!isAuthenticated()) return withAccess('STAFF',()=>openImageUpload(assetId,source));
-    openModal('Add Asset Photos',`<div class="field"><label>Image type</label><select id="imageType"><option value="main">Main Photo</option><option value="serial_label">Serial / Device Label</option><option value="condition">Condition</option><option value="damage">Damage</option><option value="repair">Repair</option><option value="other" selected>Additional Photo</option></select></div><div id="detailPhotoPicker"></div><div class="modal-actions"><button id="uploadImageSubmit" class="btn blue">Upload selected photos</button></div><div id="imageUploadStatus" role="status" aria-live="polite"></div>`,()=>{
-      const picker=AssetPhotoPicker.mount($('detailPhotoPicker'),{onError:message=>toast(message,'error')});
+    openModal('Add Asset Photos',`<div class="field"><label>Image type</label><select id="imageType"><option value="main">Main Photo</option><option value="serial_label">Serial / Device Label</option><option value="condition">Condition</option><option value="damage">Damage</option><option value="repair">Repair</option><option value="other" selected>Additional Photo</option></select></div><div id="detailPhotoPicker"></div><div class="modal-actions"><button id="uploadImageSubmit" class="btn blue">${workflows?.enabled()?'Add photos':'Upload selected photos'}</button></div><div id="imageUploadStatus" role="status" aria-live="polite"></div>`,()=>{
+      const reference=detailMemoryRecord(assetId)?.data;if(workflows?.enabled()&&reference)$('detailPhotoPicker').insertAdjacentHTML('beforebegin',workflows.referenceHtml(reference,{full:true}));
+      const picker=AssetPhotoPicker.mount($('detailPhotoPicker'),{preview:!!workflows?.enabled(),onError:message=>toast(message,'error')});
       state.modalCleanup=()=>picker.dispose();
       $('uploadImageSubmit').addEventListener('click',async()=>{
         const pending=picker.items.filter(item=>!item.uploaded);
@@ -2035,7 +2171,7 @@
             try{
               const a=detailMemoryRecord(assetId)?.data||state.assets.find(a=>a.asset_id===assetId);
               if(!a)throw new Error('Reopen the asset before attaching photos.');
-              await saveQueue.enqueuePhotos({id:crypto.randomUUID(),asset:a,photos:pending.map(item=>({file:item.file,type:imageType.value}))});
+              await saveQueue.enqueuePhotos({id:crypto.randomUUID(),asset:a,photos:pending.map(item=>({file:item.file,type:imageType.value,main:!!item.main}))});
               if(!btn.isConnected)return;closeModal();if(!simpleLinksEnabled())toast('Photos saved locally. Follow progress using the pending count.');
             }catch(err){toast('Photos were not saved. Keep this form open. '+humanError(err),'error');}
           });return;
@@ -2425,14 +2561,14 @@
 
   function reportColumnLabel(c){const names={asset_id:'Asset ID',asset_name:'Asset / device',category_name:'Type',site_name:'Site',area_name:'Area',reported_at:'Reported',updated_at:'Updated',assigned_to:'Assigned to',audit_id:'Audit ID',expected_count:'Expected',checked_count:'Checked',mismatch_count:'Mismatches',not_found_count:'Not found'};return names[c]||c.replaceAll('_',' ').replace(/\b\w/g,x=>x.toUpperCase());}
   function reportCell(v,c){if(v===null||v===undefined)return'';if(['timestamp','reported_at','completed_at','started_at','moved_at','updated_at'].includes(c)){const d=new Date(v);return isNaN(d)?v:d.toLocaleString('en-MY');}return v;}
-  function reportIdentity(r){return [r.brand,r.model].filter(Boolean).join(' ')||r.asset_name||r.asset_id||'Unspecified asset';}
+  function reportIdentity(r){return r.asset_name||[r.brand,r.model].filter(Boolean).join(' ')||r.asset_id||'Unspecified asset';}
   function reportDisplayColumns(type){
     if(type==='maintenance')return ['asset_name','category_name','asset_id','issue','status','assigned_to','reported_at','cost'];
     if(type==='audit')return ['name','site_name','area_name','status','expected_count','checked_count','pending_count','mismatch_count','not_found_count'];
     if(type==='movement')return ['asset_name','category_name','asset_id','from_site','to_site','from_area','to_area','moved_at'];
     if(type==='activity')return ['timestamp','action','asset_name','category_name','asset_id','user','details'];
     if(type==='warranty')return ['asset_id','brand','model','category_name','site_name','area_name','warranty_expiry','status'];
-    return ['asset_id','brand','model','category_name','serial','site_name','area_name',...(simpleLinksEnabled()?['main_asset_id','main_asset_name']:[]),'assigned_to','status'];
+    return ['asset_id',...(workflows?.enabled()?['asset_name']:[]),'brand','model','category_name','serial','site_name','area_name',...(simpleLinksEnabled()?['main_asset_id','main_asset_name']:[]),'assigned_to','status'];
   }
   function reportDisplayValue(row,col){return col==='asset_name'?reportIdentity(row):row[col];}
   function renderReport(){
@@ -2737,6 +2873,7 @@
 
   function resetScannerResult({restartCamera=true}={}){
     state.scannerVersion++;state.scanUpdateTarget=null;clearTimeout(universalMatchTimer);
+    $('scanMatchingUnits')?._dispose?.();
     $('scanResult').innerHTML='<div class="empty-state compact">Ready for another scan.</div>';
     state.lastRecognition=null;
     state.scanFile=null;
@@ -2776,7 +2913,7 @@
     return window.AssetRecognition.consolidate(observations,r.resolutions);
   }
   function recognitionIncoming(){
-    return window.AssetRecognition.toIncoming(recognitionProposal(),recognitionState().overrides);
+    const incoming=window.AssetRecognition.toIncoming(recognitionProposal(),recognitionState().overrides);return workflows?.enabled()?workflows.scanIncoming(recognitionState(),incoming):incoming;
   }
   function recognitionPhotos(){return recognitionState().photos.map(x=>x.file);}
   function recognitionStatusHtml(){
@@ -2799,8 +2936,8 @@
     const hasPhotos=session.photos.length>0;
     const running=session.photos.some(x=>x.processing);
     const unresolved=proposal.hasUnresolved;
-    const photoHtml=session.photos.map((x,i)=>`<div class="v27-photo"><img src="${esc(x.url)}" alt="Source photo ${i+1}"><div><b>Image ${i+1}</b><small>${esc(x.processing?'Processing…':x.error?'Needs review':x.ai?'AI + OCR':x.observation?'OCR':'No OCR text')}</small></div><button type="button" class="v27-remove" data-remove-image="${esc(x.id)}" title="Remove this source" ${running?'disabled':''}>×</button></div>`).join('');
-    const core=[['category','Category'],['brand','Brand'],['model','Model'],['serial','Serial number']].map(([k,label])=>{
+    const photoHtml=session.photos.map((x,i)=>`<div class="v27-photo"><img src="${esc(x.url)}" alt="Source photo ${i+1}"><div><b>Image ${i+1}${workflows?.enabled()&&x.main?' · ★ Main':''}</b><small>${esc(x.processing?'Processing…':x.error?'Needs review':x.ai?'AI + OCR':x.observation?'OCR':'No OCR text')}</small></div><button type="button" class="v27-remove" data-remove-image="${esc(x.id)}" title="Remove this source" ${running?'disabled':''}>×</button></div>`).join('');
+    const core=[...(workflows?.enabled()?[['asset_name','Asset name']]:[]),['category','Category'],['brand','Brand'],['model','Model'],['serial','Serial number']].map(([k,label])=>{
       const original=proposal.fields[k];
       return `<label class="v27-edit-field"><span>${label}</span><input data-universal-field="${k}" value="${esc(incoming[k]||'')}" placeholder="Not detected — enter manually"><div class="input-suggestions">${(proposal.suggestions?.[k]||[]).slice(0,3).filter(x=>x.value!==incoming[k]).map(x=>`<button type="button" class="btn light sm" data-recognition-suggestion="${esc(k)}" data-value="${esc(x.value)}" title="${esc(x.reason||x.evidence)}">${esc(x.value)}</button>`).join('')}</div><small>${Object.hasOwn(session.overrides,k)?'Manual entry':original?.evidence?`Image ${esc(original.source_image.split('_')[1]||'?')} · ${esc(original.status)} · ${esc(original.evidence.slice(0,95))}`:'Not detected; manual confirmation required'}</small></label>`;
     }).join('');
@@ -2815,6 +2952,7 @@
     const barcodeHtml=`<section class="v27-core v27-barcodes" aria-label="Detected barcodes"><h4>Barcode observations · confirm before using</h4><p class="v27-barcode-help">A barcode can identify a model, part or warranty page. Use it as a serial only after checking the device label.</p>${session.photos.map((photo,index)=>`<small class="v27-barcode-status">Image ${index+1}: ${photo.codeBusy?'Checking barcodes on this device…':photo.codeWarning?esc(photo.codeWarning):(photo.codes?.length?'Barcode search complete.':'No readable barcode. Try a closer label photo or enter the serial manually.')}</small>`).join('')}${barcodeCandidates.map((code,index)=>`<div class="v27-barcode-row"><div><b>${esc(code.value)}</b><small>Image ${code.photo} · ${esc(code.format)} · ${esc(code.label)}</small></div>${code.kind==='candidate'?`<button type="button" class="btn light sm" data-barcode-candidate="${index}">Use as serial</button>`:''}</div>`).join('')}</section>`;
     const sourceCount=session.photos.length;
     const pendingTarget=state.scanUpdateTarget;
+    $('scanMatchingUnits')?._dispose?.();
     $('scanResult').innerHTML=`<div class="result-card v27-result"><div class="recognition-badges"><span class="recognition-badge">Universal recognition V2.7</span><span class="recognition-badge">${sourceCount} photo${sourceCount===1?'':'s'}</span>${running?'<span class="recognition-badge warn">Processing · preliminary fields visible</span>':''}</div><strong>One asset · multiple evidence sources</strong>${recognitionStatusHtml()}
       <div class="v27-photo-strip">${photoHtml}</div><div class="v27-photo-actions"><button id="v27AddPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Choose from gallery</button><button id="v27CameraPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Take photo</button><button id="v27Reset" class="btn light sm" type="button">${running?'Cancel recognition':'Start new asset'}</button></div>
       ${errors}${session.matchWarning?`<div class="scan-warning">${esc(session.matchWarning)}</div>`:''}${conflictHtml}
@@ -2834,6 +2972,7 @@
     setScannerStage('result');
     enhanceScanEntry();
     bindInputAssistance($('scanResult'));
+    if(workflows?.enabled()){document.querySelectorAll('.v27-photo img').forEach((img,i)=>{img.tabIndex=0;img.setAttribute('role','button');img.onclick=()=>workflows.scanPreview(session,i);img.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();img.click();}};});}
     $$('[data-recognition-suggestion]').forEach(button=>button.addEventListener('click',()=>{
       session.overrides[button.dataset.recognitionSuggestion]=button.dataset.value;showUniversalRecognition();scheduleUniversalMatches();
     }));
@@ -2860,8 +2999,8 @@
       else delete session.resolutions[el.dataset.conflict];
       showUniversalRecognition();updateUniversalMatches();
     }));
-    $$('[data-universal-field]').forEach(el=>el.addEventListener('input',()=>{session.overrides[el.dataset.universalField]=el.value.trim();scheduleUniversalMatches();}));
-    $('v27Specs')?.addEventListener('input',e=>{session.overrides.specifications=e.target.value;});
+    $$('[data-universal-field]').forEach(el=>el.addEventListener('input',()=>{session.overrides[el.dataset.universalField]=el.value.trim();(session.touched||={})[el.dataset.universalField]=true;if(workflows?.enabled())workflows.persistScan(session);scheduleUniversalMatches();}));
+    $('v27Specs')?.addEventListener('input',e=>{session.overrides.specifications=e.target.value;(session.touched||={}).specifications=true;workflows?.persistScan(session);});
     if(selection){
       const replacement=editingSpecs?$('v27Specs'):document.querySelector(`[data-universal-field="${editingField}"]`);
       replacement?.focus({preventScroll:true});replacement?.setSelectionRange(...selection);
@@ -2876,7 +3015,7 @@
     };
     $('v27Create')?.addEventListener('click',async()=>{
       const f=getIncoming();
-      if(!f.brand||!f.model)return toast('Brand and model are required; enter them manually if OCR could not detect them.','error');
+      if(!workflows?.enabled()&&(!f.brand||!f.model))return toast('Brand and model are required; enter them manually if OCR could not detect them.','error');
       if(session.matches.length && !confirm('Possible existing assets were found. Create a separate asset anyway?'))return;
       if(simpleLinksEnabled())return saveScanDirect(f,session);
       openAssetForm({category_name:f.category,brand:f.brand,model:f.model,serial:f.serial,specifications:f.specifications,_scanFiles:recognitionPhotos()});
@@ -2910,13 +3049,14 @@
       session.matchWarning='';return 'done';
     }catch(err){session.matchWarning='Existing-asset check failed. Review identifiers before creating a new record. '+humanError(err);console.warn('Optional match suggestions unavailable',err);return 'failed';}
   }
+  const scanSessionAlive=session=>state.recognitionSession===session||interruptedTasks.some(t=>t.scope===queueScope&&t.session===session);
   async function processScanFile(file){
     if(!file)return;
     const session=recognitionState();
     if(session.photos.some(x=>x.file.name===file.name && x.file.size===file.size && x.file.lastModified===file.lastModified))return toast('That image is already in this session.','error');
     if(session.photos.length>=6)return toast('Up to six photos per recognition session. Remove one to add another.','error');
     const id='image_'+String(session.photos.length+1).padStart(2,'0')+'_'+Date.now().toString(36);
-    const item={id,file,url:URL.createObjectURL(file),steps:{captured:'done',ocr:'busy',ai:'pending',matched:'pending'},processing:true,ocr:null,observation:null,ai:null,error:'',warning:'',codes:[],codeBusy:true,codeWarning:'',codeAbort:new AbortController()};
+    const item={id,file,main:session.photos.length===0,url:URL.createObjectURL(file),steps:{captured:'done',ocr:'busy',ai:'pending',matched:'pending'},processing:true,ocr:null,observation:null,ai:null,error:'',warning:'',codes:[],codeBusy:true,codeWarning:'',codeAbort:new AbortController()};
     session.photos.push(item);
     state.scanFile=session.photos[0]?.file||file;
     setScannerBusy(true);showUniversalRecognition();
@@ -2924,9 +3064,9 @@
       const codePromise=(window.AssetCode?.scanAll?AssetCode.scanAll(file,{
         signal:item.codeAbort.signal,
         onUpdate:({codes,warning})=>{
-          if(state.recognitionSession!==session||item.codeAbort.signal.aborted)return;
+          if(!scanSessionAlive(session)||item.codeAbort.signal.aborted)return;
           item.codes=codes;if(warning)item.codeWarning=warning;
-          showUniversalRecognition();
+          if(state.recognitionSession===session)showUniversalRecognition();
         }
       }):Promise.resolve([])).catch(()=>{item.codeWarning='Barcode reader unavailable. Enter the serial manually.';return [];}).finally(()=>{
         item.codeBusy=false;
@@ -2936,13 +3076,13 @@
       let ocr,ocrSubmitted=false;
       try{
         const image=await AssetImage.prepareForOcr(file);
-        if(state.recognitionSession!==session)return;
+        if(!scanSessionAlive(session))return;
         connectionHealth.record('ocr',{state:'checking',message:'Reading the latest scan image…',checked_at:null,evidence:'scan'});
         ocrSubmitted=true;
         const answer=await AssetAPI.post('ocr',{image});ocr=answer.result;
         if(state.recognitionSession===session)connectionEvent('ocr',{state:ocr?.text?'ok':'warning',message:ocr?.text?'OCR.Space returned text for the latest scan. Extraction still requires review.':'OCR.Space replied but found no usable text in this image.',evidence:'scan'});
       }catch(err){item.steps.ocr='failed';item.error='OCR unavailable: '+humanError(err)+'. Retake or enter manually.';if(state.recognitionSession===session)connectionEvent('ocr',{state:ocrSubmitted?'error':'not_tested',message:ocrSubmitted?humanError(err):'Image preparation failed; OCR.Space was not contacted.',evidence:'scan'});}
-      if(state.recognitionSession!==session)return;
+      if(!scanSessionAlive(session))return;
       if(ocr?.text){
         item.ocr=ocr;item.observation=window.AssetRecognition.fromOcr(ocr,item.id,inputEngine?.analyze(ocr.text,{categories:state.refs.categories}));
         if(!inputEngine)item.warning='Local recognition data is unavailable; review OCR suggestions carefully.';
@@ -2951,22 +3091,23 @@
       // Partial fields appear now, without waiting for Groq.
       item.steps.ai=ocr?.text && state.boot?.ai_ocr_enabled && isAuthenticated()?'busy':'skipped';
       if(ocr?.text&&item.steps.ai==='skipped')item.warning=!isAuthenticated()?'AI was not run: sign in as Staff/Admin. OCR results are retained.':'AI was not run: Groq is not configured. OCR results are retained.';
-      showUniversalRecognition();
+      if(state.recognitionSession===session)showUniversalRecognition();
       if(item.steps.ai==='busy'){
         connectionHealth.record('ai',{state:'checking',message:'Mapping the latest OCR text…',checked_at:null,evidence:'scan'});
         try{
           const r=await AssetAPI.post('interpretOcrUniversal',{text:ocr.text,base_fields_json:JSON.stringify(ocr.fields||{}),source_image:item.id});
-          if(state.recognitionSession!==session)return;
+          if(!scanSessionAlive(session))return;
           if(!r.result?.fields||typeof r.result.fields!=='object'||Array.isArray(r.result.fields))throw new Error('AI_INVALID_SCHEMA: Groq returned no valid field mapping.');
           item.ai={...r.result,attributes:(r.result?.attributes||[]).map(a=>inputEngine?inputEngine.canonicalAttribute(a):a)};
           item.observation=window.AssetRecognition.attachAi(item.observation,item.ai,(field,value)=>inputEngine?.canonical(field,value,{categories:state.refs.categories})||'');
           item.steps.ai='done';
           connectionEvent('ai',{state:'ok',message:'Groq returned a structured mapping for the latest scan. Fields still require evidence review.',evidence:'scan'});
-        }catch(err){if(state.recognitionSession!==session)return;item.steps.ai='failed';item.warning='Groq unavailable; OCR fallback retained ('+humanError(err)+').';connectionEvent('ai',{state:'error',message:humanError(err),evidence:'scan'});}
-        showUniversalRecognition();
+        }catch(err){if(!scanSessionAlive(session))return;item.steps.ai='failed';item.warning='Groq unavailable; OCR fallback retained ('+humanError(err)+').';connectionEvent('ai',{state:'error',message:humanError(err),evidence:'scan'});}
+        if(state.recognitionSession===session)showUniversalRecognition();
       }
       await codePromise;
-      if(state.recognitionSession!==session)return;
+      if(!scanSessionAlive(session))return;
+      if(state.recognitionSession!==session){item.steps.matched='pending';return;}
       item.steps.matched='busy';showUniversalRecognition();
       item.steps.matched=await updateUniversalMatches()||'skipped';
     }finally{
@@ -3083,6 +3224,7 @@
     catch(err){if(current())toast('Could not load the latest asset record: '+humanError(err),'error');return;}
     if(!current())return;
     if(!full){toast('Unable to compare: the asset record is unavailable.','error');return;}
+    if(workflows?.enabled())return workflows.openReconcile(full,incoming,scanFiles);
     const fields=['category','brand','model','serial','specifications'];
     const changed=fields.filter(key=>{
       const current=key==='category'?(full.category_name||full.category||''):full[key]||'';

@@ -51,3 +51,14 @@ test('a single ordinary asset retains unique specification evidence; shared mult
 test('distinct photo operations do not share deletable Drive files even when image bytes match',()=>{
   const h=photos();h.send();h.p.operation_id='22222222-2222-4222-8222-222222222222-photo-0';h.send();assert.equal(h.read('AssetImages').length,2);assert.equal(h.files.size,4);assert.notEqual(h.read('AssetImages')[0].drive_file_id,h.read('AssetImages')[1].drive_file_id);
 });
+test('delayed new main-photo upload cannot replace a main image chosen after it was queued',()=>{
+  const h=photos();h.p.imageType='serial_label';h.p.make_main='true';h.p.expected_main_id='';
+  h.context.updateByKey_('Assets','asset_id','A',{main_image_id:'LATER-CHOICE'});
+  const result=h.send();assert.equal(result.asset_main_image_id,'LATER-CHOICE');assert.equal(h.read('Assets')[0].main_image_id,'LATER-CHOICE');assert.equal(result.image_type,'serial_label');
+});
+test('unfinished photo replay repairs metadata but respects a different selected main image',()=>{
+  const h=photos();h.p.imageType='serial_label';h.p.make_main='true';h.p.expected_main_id='';
+  h.fail({sheet:'Assets',when:'before'});assert.throws(h.send,/Injected/);
+  h.context.updateByKey_('Assets','asset_id','A',{main_image_id:'LATER-CHOICE'});
+  const replay=h.send();assert.equal(replay.asset_main_image_id,'LATER-CHOICE');assert.equal(h.read('Assets')[0].main_image_id,'LATER-CHOICE');assert.equal(h.files.size,2);
+});

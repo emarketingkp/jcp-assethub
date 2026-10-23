@@ -69,3 +69,27 @@ test('authentication errors pause subsequent writes until explicit retry after s
 test('photo-only operations do not persist private detail fields or upload credentials',async()=>{
   const h=setup();await h.q.enqueuePhotos({id:'11111111-1111-4111-8111-111111111111',asset:{asset_id:'A',model:'M',private_details:{account_number:'private'},guest_upload_token:'never-store'},photos:[{file:new Blob(['photo']),type:'condition'}]});const row=(await h.q.rows())[0];assert.equal(row.asset.private_details,undefined);assert.equal(row.params.guest_upload_token,undefined);assert.equal(row.photos[0].file.size,5);
 });
+
+test('multiple units persist atomically before starting any writes, in input order',async()=>{
+  let online=false;const data=new Map(),calls=[];
+  const storage={all:async()=>structuredClone([...data.values()]),put:async r=>data.set(r.id,structuredClone(r)),putMany:async rows=>{for(const r of rows)data.set(r.id,structuredClone(r));}};
+  const q=create({scope:'atomic',protocol:2,storage,online:()=>online,lock:fn=>fn(),api:{post:async(a,p)=>{calls.push(p);return {result:{asset:{asset_id:'A'+calls.length,images:[]}}};}}});
+  await q.enqueueMany([{id:'Z',kind:'create',params:params('1')},{id:'A',kind:'create',params:params('2')}]);
+  assert.equal(calls.length,0);assert.deepEqual((await q.rows()).map(r=>r.id),['Z','A']);online=true;await q.pump();
+  assert.deepEqual(calls.map(p=>JSON.parse(p.operation_json).fields.serial),['1','2']);
+});
+test('failure to persist a multi-unit transaction sends none of its units',async()=>{
+  let writes=0;const q=create({scope:'atomic-fail',protocol:2,storage:{all:async()=>[],putMany:async()=>{throw new Error('Quota exceeded');}},online:()=>true,lock:fn=>fn(),api:{post:async()=>{writes++;}}});
+  await assert.rejects(q.enqueueMany([{id:'one',params:params('1')},{id:'two',params:params('2')}]),/Quota/);assert.equal(writes,0);
+});
+test('choosing a pending photo waits for its upload and uses the real image ID and latest revision',async()=>{
+  let online=false;const data=new Map(),calls=[];
+  const storage={all:async()=>structuredClone([...data.values()]),put:async r=>data.set(r.id,structuredClone(r))};
+  const api={get:async()=>({asset:{asset_id:'AS-1',updated_at:'latest-revision'}}),post:async(action,p)=>{calls.push({action,p});if(action==='uploadImage')return {image:{image_id:'REAL-IMAGE',image_type:'serial_label',active:true},asset_main_image_id:'OLD-MAIN'};return {result:{asset:{asset_id:'AS-1',main_image_id:JSON.parse(p.operation_json).fields.main_image_id,images:[]}}};}};
+  const q=create({scope:'pending-main',protocol:2,storage,api,online:()=>online,lock:fn=>fn(),prepare:async()=>({base64Data:'fixture'})});
+  const asset={asset_id:'AS-1',main_image_id:'OLD-MAIN',updated_at:'old-revision'};
+  await q.enqueuePhotos({id:'photos',asset,photos:[{file:new Blob(['label']),type:'serial_label'}]});
+  await q.enqueueMain({id:'choose',asset,image:{image_id:'photos-photo-0',_pending:true,_photoOperation:'photos'}});
+  online=true;await q.pump();assert.deepEqual(calls.map(c=>c.action),['uploadImage','saveAssetOperation']);
+  const operation=JSON.parse(calls[1].p.operation_json);assert.equal(operation.kind,'main_photo');assert.equal(operation.fields.main_image_id,'REAL-IMAGE');assert.equal(operation.expected_updated_at,'latest-revision');
+});

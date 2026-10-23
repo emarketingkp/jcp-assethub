@@ -4,8 +4,9 @@ function setupAssetGrouping() {
   const ss=getSpreadsheet_();
   ensureSheet_(ss,SHEETS.ASSETS,SCHEMA.Assets);
   ensureSheet_(ss,SHEETS.ASSET_BATCHES,SCHEMA.AssetBatches);
+  ensureSheet_(ss,SHEETS.ASSET_PRIVATE,SCHEMA.AssetPrivate);
   invalidateDataCache_();
-  return 'Main-asset reference and retry ledger ready. Legacy set data retained. Deploy both Code.gs and AssetGroups.gs.';
+  return 'Unified editor, optional asset names, private values and retry ledger ready. Existing fields and legacy set data retained. Deploy both Code.gs and AssetGroups.gs.';
 }
 
 function groupingFeatures_() {
@@ -13,7 +14,7 @@ function groupingFeatures_() {
     const ss=getSpreadsheet_(),assets=ss.getSheetByName(SHEETS.ASSETS),ledger=ss.getSheetByName(SHEETS.ASSET_BATCHES);
     if(!assets||!ledger)return {asset_groups:0};
     const assetHeaders=new Set(headers_(assets)),ledgerHeaders=new Set(headers_(ledger));
-    const ready=['set_id','set_name'].every(k=>assetHeaders.has(k))&&SCHEMA.AssetBatches.every(k=>ledgerHeaders.has(k));return {asset_groups:ready?1:0,sequential_saves:ready&&assetHeaders.has('parent_asset_id')?1:0,asset_links:ready&&assetHeaders.has('parent_asset_id')?1:0};
+    const ready=['set_id','set_name'].every(k=>assetHeaders.has(k))&&SCHEMA.AssetBatches.every(k=>ledgerHeaders.has(k));return {asset_groups:ready?1:0,sequential_saves:ready&&assetHeaders.has('parent_asset_id')?1:0,asset_links:ready&&assetHeaders.has('parent_asset_id')?1:0,unified_editor:ready&&assetHeaders.has('parent_asset_id')&&assetHeaders.has('asset_name')&&ss.getSheetByName(SHEETS.ASSET_PRIVATE)&&SCHEMA.AssetPrivate.every(k=>headers_(ss.getSheetByName(SHEETS.ASSET_PRIVATE)).includes(k))?1:0};
   } catch(_){return {asset_groups:0};}
 }
 
@@ -225,17 +226,22 @@ function saveAssetBatch_(params,user) {
 function linkedOperation_(json) {
   if(typeof json!=='string'||json.length>48000)throw new Error('Operation exceeds the local-save request limit.');
   let p;try{p=JSON.parse(json);}catch(_){throw new Error('Invalid asset operation.');}
-  if(!p||!['create','update','link','reconcile','retire'].includes(p.kind))throw new Error('Invalid asset operation kind.');
+  if(!p||!['create','update','link','reconcile','retire','main_photo'].includes(p.kind))throw new Error('Invalid asset operation kind.');
   const out={kind:p.kind,asset_id:groupText_(p.asset_id,80,'Asset ID'),expected_updated_at:groupText_(p.expected_updated_at,50,'Review timestamp'),fields:{}};
-  const limits={category:100,category_id:80,brand:120,model:160,serial:80,specifications:4800,site_id:80,area:120,exact_location:160,assigned_to:160,status:30,movement_note:500,parent_asset_id:80};
+  const limits={main_image_id:100,asset_name:160,category:100,category_id:80,brand:120,model:160,serial:80,specifications:4800,site_id:80,area:120,exact_location:160,assigned_to:160,status:30,movement_note:500,parent_asset_id:80};
   Object.keys(limits).forEach(k=>{if(p.fields&&Object.prototype.hasOwnProperty.call(p.fields,k))out.fields[k]=groupText_(p.fields[k],limits[k],k);});
+  if(p.version===2)out.version=2;
+  if(p.private!==undefined){
+    if(p.version!==2||!p.private||typeof p.private!=='object'||Array.isArray(p.private))throw new Error('Invalid private information.');
+    out.private={};['mobile_number','register_owner','account_number','amount_paid'].forEach(k=>{if(Object.prototype.hasOwnProperty.call(p.private,k))out.private[k]=groupText_(p.private[k],160,k);});
+  }
   if(p.custom!==undefined){
     if(!p.custom||typeof p.custom!=='object'||Array.isArray(p.custom))throw new Error('Invalid custom values.');
     const c={custom:Object.create(null)};Object.keys(p.custom).sort().forEach(k=>{if(!/^[A-Za-z0-9_-]{1,80}$/.test(k)||['__proto__','constructor','prototype'].includes(k))throw new Error('Invalid custom field.');c.custom[k]=groupText_(p.custom[k],1000,'Custom value');});
     batchCustom_(c,true);out.custom=c.custom;
   }
   if(p.kind==='reconcile'){
-    out.incoming={};out.choices={};['category','brand','model','serial','specifications'].forEach(k=>{out.incoming[k]=groupText_(p.incoming&&p.incoming[k],limits[k],k);const v=p.choices&&p.choices[k]||'existing';if(!['existing','incoming','combine'].includes(v)||v==='combine'&&k!=='specifications')throw new Error('Invalid reviewed field choice.');out.choices[k]=v;});
+    out.incoming={};out.choices={};(p.version===2?Object.keys(limits).filter(k=>k!=='category_id'&&k!=='movement_note'&&k!=='main_image_id'&&Object.prototype.hasOwnProperty.call(p.incoming||{},k)):['category','brand','model','serial','specifications']).forEach(k=>{out.incoming[k]=groupText_(p.incoming&&p.incoming[k],limits[k],k);const v=p.choices&&p.choices[k]||'existing';if(!['existing','incoming','combine'].includes(v)||v==='combine'&&k!=='specifications')throw new Error('Invalid reviewed field choice.');out.choices[k]=v;});
   }
   if(p.kind!=='create'&&!out.asset_id)throw new Error('Choose an existing asset.');
   return out;
@@ -269,6 +275,7 @@ function planLinkedOperation_(op,user,requestId,rows,ledgerRows) {
   }
   if(op.custom)batchCustom_({custom:op.custom},true);
   const f=op.fields,actor=actorKey_(user),guest=String(user.role).toUpperCase()==='GUEST';
+  if(op.private&&guest)throw new Error('PERMISSION_DENIED: Private information requires Staff access.');
   if(guest&&(op.kind!=='create'||f.parent_asset_id))throw new Error('PERMISSION_DENIED: Sign in to link or change existing assets.');
   if(op.kind==='retire')requireRole_(user,'ADMIN');
   else if(!creating)requireRole_(user,'STAFF');
@@ -281,23 +288,33 @@ function planLinkedOperation_(op,user,requestId,rows,ledgerRows) {
     category=resolveCategory_(f.category_id||(existing&&value('category')===existing.category?existing.category_id:''),value('category'),user);
     site=findByKey_(SHEETS.SITES,'site_id',value('site_id'));if(!site||!truthy_(site.active))throw new Error('Choose an active site.');
     area=resolveArea_('',value('area'),site.site_id,user,false);
-    ['brand','model','serial','specifications','exact_location','assigned_to'].forEach(k=>patch[k]=value(k));
+    ['brand','model','serial','specifications','exact_location','assigned_to'].concat(op.version===2?['asset_name']:[]).forEach(k=>patch[k]=value(k));
     patch.status=value('status')||'Active';if(!['Active','Spare','Faulty','Under Repair','Missing','Retired'].includes(patch.status))throw new Error('Invalid asset status.');
     if(creating&&patch.status==='Retired')throw new Error('Register the asset before retiring it.');
     if(!creating&&patch.status==='Retired'&&existing.status!=='Retired')requireRole_(user,'ADMIN');
     Object.assign(patch,{category:category.name,category_id:category.category_id,site_id:site.site_id,site:site.name,area_id:area&&area.area_id||'',area:area&&area.name||value('area')});
     if(op.custom===undefined&&creating)batchCustom_({custom:{}},true);
   }else if(op.kind==='reconcile'){
-    ['category','brand','model','serial','specifications'].forEach(k=>{const v=op.incoming[k];if(!v)return;if(op.choices[k]==='incoming')patch[k]=v;else if(k==='specifications'&&op.choices[k]==='combine')patch[k]=combineSpecifications_(existing[k],v);});
+    Object.keys(op.incoming).forEach(k=>{const v=op.incoming[k];if(!v&&op.version!==2)return;if(op.choices[k]==='incoming')patch[k]=v;else if(k==='specifications'&&op.choices[k]==='combine')patch[k]=combineSpecifications_(existing[k],v);});
+    if(op.version===2){
+      const value=k=>Object.prototype.hasOwnProperty.call(patch,k)?patch[k]:String(existing[k]||'');
+      if(!value('category')||!value('site_id')||!value('area'))throw new Error('Category, site and area are required.');
+      if(!['Active','Spare','Faulty','Under Repair','Missing','Retired'].includes(value('status')))throw new Error('Invalid asset status.');
+      if(value('status')==='Retired'&&existing.status!=='Retired')requireRole_(user,'ADMIN');
+      if(patch.site_id!==undefined||patch.area!==undefined){site=findByKey_(SHEETS.SITES,'site_id',value('site_id'));if(!site||!truthy_(site.active))throw new Error('Choose an active site.');area=resolveArea_('',value('area'),site.site_id,user,false);Object.assign(patch,{site_id:site.site_id,site:site.name,area_id:area&&area.area_id||'',area:area&&area.name||value('area')});}
+    }
     if(patch.category!==undefined){category=resolveCategory_('',patch.category,user);patch.category=category.name;patch.category_id=category.category_id;}
+  }else if(op.kind==='main_photo'){
+    if(op.version!==2)throw new Error('Update the photo operation client.');
+    const image=findByKey_(SHEETS.ASSET_IMAGES,'image_id',f.main_image_id);if(!image||image.asset_id!==op.asset_id||!truthy_(image.active))throw new Error('Choose an active image belonging to this asset.');patch.main_image_id=image.image_id;
   }else if(op.kind==='retire'){patch.status='Retired';patch.retired_at=stamp;}
   if(Object.prototype.hasOwnProperty.call(patch,'serial'))assertUniqueSerial_(patch.serial,op.asset_id);
   const used=new Set(rows.map(r=>String(r.asset_id)));
   ledgerRows.filter(r=>r.state!=='complete').forEach(r=>{const plan=JSON.parse(r.plan_json);(plan.ids||[]).forEach(id=>used.add(id));});
   let id=op.asset_id;
   if(creating){id=nextAssetId_(category.prefix||'AS');while(used.has(id)){const m=id.match(/^(.*-)(\d+)$/);id=m[1]+String(Number(m[2])+1).padStart(4,'0');}}
-  if(creating||Object.prototype.hasOwnProperty.call(f,'parent_asset_id')){
-    const parent=f.parent_asset_id||'';
+  if(creating||Object.prototype.hasOwnProperty.call(f,'parent_asset_id')||Object.prototype.hasOwnProperty.call(patch,'parent_asset_id')){
+    const parent=Object.prototype.hasOwnProperty.call(patch,'parent_asset_id')?patch.parent_asset_id:f.parent_asset_id||'';
     if(creating||parent!==String(existing.parent_asset_id||''))validateMainAsset_(id,parent,rows);
     patch.parent_asset_id=parent;
   }
@@ -309,6 +326,8 @@ function planLinkedOperation_(op,user,requestId,rows,ledgerRows) {
   const moved=existing&&['site','area','exact_location','assigned_to'].some(k=>patch[k]!==undefined&&String(patch[k])!==String(existing[k]||''));
   const movement=moved?{movement_id:'MOV-Q-'+requestId,asset_id:id,from_site:existing.site,from_area:existing.area,from_location:existing.exact_location,from_assigned:existing.assigned_to,to_site:patch.site,to_area:patch.area,to_location:patch.exact_location,to_assigned:patch.assigned_to,moved_by:actor,moved_at:stamp,note:f.movement_note||''}:null;
   const plan={operation_version:1,kind:op.kind,ids:[id],patch:patch,before:existing,custom:op.custom||null,movement:movement,created_at:stamp};
+  if(op.private){plan.private=op.private;const old=findByKey_(SHEETS.ASSET_PRIVATE,'asset_id',id)||{};plan.private_before=Object.fromEntries(Object.keys(op.private).map(k=>[k,String(old[k]||'')]));}
+  if(op.version===2)plan.remember_choices=!guest;
   if(JSON.stringify(plan).length>45000)throw new Error('This save is too large for the retry ledger. Reduce specifications or custom information.');
   return plan;
 }
@@ -322,12 +341,12 @@ function writeLinkedAssetPatch_(assetId,patch) {
 
 function applyLinkedOperation_(plan,op,user,requestId) {
   const id=plan.ids[0],creating=plan.kind==='create',current=findByKey_(SHEETS.ASSETS,'asset_id',id);
-  const keys=Object.keys(plan.patch).filter(k=>!['updated_at','updated_by','main_image_id','drive_folder_id'].includes(k));
+  const keys=Object.keys(plan.patch).filter(k=>!['updated_at','updated_by','drive_folder_id'].includes(k)&&(k!=='main_image_id'||plan.kind==='main_photo'));
   const applied=current&&keys.every(k=>String(current[k]||'')===String(plan.patch[k]||''));
   if(creating){
     if(current&&current.source_ref!==plan.patch.source_ref)throw new Error('Reserved asset ID belongs to another operation.');
     if(!current){assertUniqueSerial_(plan.patch.serial,id);validateMainAsset_(id,plan.patch.parent_asset_id,listObjects_(SHEETS.ASSETS));appendBatchRows_(SHEETS.ASSETS,[plan.patch]);}
-  }else if(!applied){
+  }else if(!applied||plan.private&&String(current.updated_at||'')<plan.created_at){
     if(!current||keys.some(k=>String(current[k]||'')!==String(plan.before[k]||'')))throw new Error('ITEM_CHANGED: Reconcile the incomplete operation before changing newer data.');
     if(plan.patch.serial!==undefined)assertUniqueSerial_(plan.patch.serial,id);
     if(plan.patch.parent_asset_id!==undefined&&plan.patch.parent_asset_id!==String(current.parent_asset_id||''))validateMainAsset_(id,plan.patch.parent_asset_id,listObjects_(SHEETS.ASSETS));
@@ -338,8 +357,10 @@ function applyLinkedOperation_(plan,op,user,requestId) {
     const values=listObjects_(SHEETS.CUSTOM_VALUES);
     Object.keys(plan.custom).forEach(field=>{const old=values.find(r=>r.asset_id===id&&r.field_id===field);const value={asset_id:id,field_id:field,value:plan.custom[field],updated_at:plan.created_at,updated_by:actorKey_(user)};if(!old)appendBatchRows_(SHEETS.CUSTOM_VALUES,[value]);else if(old.value!==value.value)updateByComposite_(SHEETS.CUSTOM_VALUES,{asset_id:id,field_id:field},value);});
   }
+  if(plan.private)applyAssetPrivate_(id,plan,user);
+  if(plan.remember_choices)rememberAssetChoices_(Object.assign({asset_id:id},plan.patch),user);
   if(plan.movement&&!findByKey_(SHEETS.MOVEMENTS,'movement_id',plan.movement.movement_id))appendBatchRows_(SHEETS.MOVEMENTS,[plan.movement]);
-  const action={create:'CREATE_ASSET',update:'UPDATE_ASSET',link:'LINK_ASSET',reconcile:'RECONCILE_ASSET',retire:'RETIRE_ASSET'}[plan.kind];
+  const action={create:'CREATE_ASSET',update:'UPDATE_ASSET',link:'LINK_ASSET',reconcile:'RECONCILE_ASSET',retire:'RETIRE_ASSET',main_photo:'SET_MAIN_IMAGE'}[plan.kind];
   if(!listObjects_(SHEETS.ACTIVITY).some(r=>r.asset_id===id&&r.action===action&&(()=>{try{return JSON.parse(r.details).request_id===requestId;}catch(_){return false;}})())){
     appendBatchRows_(SHEETS.ACTIVITY,[{timestamp:plan.created_at,user:actorKey_(user),role:user.role,action:action,asset_id:id,before_json:JSON.stringify(plan.before),after_json:JSON.stringify(plan.patch),details:JSON.stringify({summary:plan.kind==='link'?'Main asset reference changed':'Asset '+plan.kind,request_id:requestId})}]);
   }
@@ -354,6 +375,7 @@ function saveAssetOperation_(params,user) {
   if(guest&&(op.kind!=='create'||op.fields.parent_asset_id))throw new Error('PERMISSION_DENIED: Guest access permits only creating an unlinked new asset.');
   if(!guest)requireRole_(user,op.kind==='retire'?'ADMIN':'STAFF');
   if(!groupingFeatures_().asset_links)throw new Error('LINKS_NOT_READY: Run setupAssetGrouping and update both backend files.');
+  if(op.version===2&&!groupingFeatures_().unified_editor)throw new Error('OPERATION_NOT_STARTED: EDITOR_NOT_READY: Run setupAssetGrouping and update both backend files.');
   const lock=LockService.getScriptLock();lock.waitLock(10000);let started=false;
   try{
     clearRequestCache_();const rows=listObjects_(SHEETS.ASSETS),ledgers=listObjects_(SHEETS.ASSET_BATCHES),prior=ledgers.find(r=>r.request_id===requestId);
@@ -375,4 +397,29 @@ function saveAssetOperation_(params,user) {
     return {request_id:requestId,asset:asset};
   }catch(err){throw new Error((started?'':'OPERATION_NOT_STARTED: ')+String(err.message||err));}
   finally{lock.releaseLock();}
+}
+
+// Called under the operation lock. Public activity records never contain these values.
+function applyAssetPrivate_(id,plan,user){
+  requireRole_(user,'STAFF');
+  const old=findByKey_(SHEETS.ASSET_PRIVATE,'asset_id',id)||{},keys=Object.keys(plan.private);
+  if(keys.some(k=>String(old[k]||'')!==String(plan.private[k])&&String(old[k]||'')!==String(plan.private_before[k]||'')))throw new Error('ITEM_CHANGED: Private information changed while this save was pending.');
+  if(keys.every(k=>String(old[k]||'')===String(plan.private[k])))return;
+  const patch=Object.assign({},old,plan.private,{asset_id:id,updated_at:plan.created_at,updated_by:actorKey_(user)});
+  if(!old.asset_id)appendBatchRows_(SHEETS.ASSET_PRIVATE,[patch]);
+  else{
+    const sheet=getSheet_(SHEETS.ASSET_PRIVATE),data=sheet.getDataRange().getValues(),h=data[0].map(String),col=h.indexOf('asset_id'),row=data.findIndex((r,i)=>i>0&&String(r[col])===id);
+    try{sheet.getRange(row+1,1,1,h.length).setNumberFormat('@').setValues([h.map(k=>groupSheetValue_(patch[k]==null?'':patch[k]))]);}finally{clearRequestCache_(SHEETS.ASSET_PRIVATE);}
+  }
+}
+
+function rememberAssetChoices_(patch,user){
+  requireRole_(user,'STAFF');
+  const asset=Object.assign({},findByKey_(SHEETS.ASSETS,'asset_id',patch.asset_id)||{},patch),normalize=v=>String(v||'').trim().toLowerCase().replace(/\s+/g,' '),stamp=new Date().toISOString();
+  if(asset.category&&!listObjects_(SHEETS.CATEGORIES).some(r=>normalize(r.name)===normalize(asset.category))){
+    appendBatchRows_(SHEETS.CATEGORIES,[{category_id:'CAT-'+hash_(normalize(asset.category)).slice(0,16),name:asset.category,prefix:'AS',active:true,created_at:stamp,updated_at:stamp}]);
+  }
+  if(asset.area&&asset.site_id&&!listObjects_(SHEETS.AREAS).some(r=>r.site_id===asset.site_id&&normalize(r.name)===normalize(asset.area))){
+    appendBatchRows_(SHEETS.AREAS,[{area_id:'AREA-'+hash_(asset.site_id+'|'+normalize(asset.area)).slice(0,16),site_id:asset.site_id,name:asset.area,active:true,created_at:stamp,updated_at:stamp}]);
+  }
 }

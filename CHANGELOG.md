@@ -1,10 +1,21 @@
-# 2.8.0 navigation update — Unreleased (2026-10-22)
+# 2.9.0 — preview, not deployed (2026-10-23)
+
+- Preserve all existing fields and add optional unit names across lists, details, search, labels and exports.
+- Share complete registration/Edit/comparison fields, contextual accepted choices, serial popups and compact photo previews.
+- Register generic matching units with individual information; keep the list browse-only and main/linked references independent.
+- Recover scoped unfinished drafts and photos, return from failure review to the interrupted task, and open newly saved details from local data.
+- Retain old retry fingerprints and private permissions; protect main-image choices from delayed uploads/replay.
+- Prepare frontend/backend 2.9.0 with additive setup instructions. No deployment performed.
+
+# 2.8.1 — Hosting deployed (2026-10-22)
 
 - Return locally saved scans to the asset register before offering linked capture; keep background saves running.
 - Preserve unfinished scan reviews across navigation. Start explicit linked/update scans with fresh evidence and the correct target.
 - Open one camera per capture, release obsolete streams, retain choices after native camera cancellation and remove the old drawer before photo-only manual entry.
 - Ignore late detail/cache/image/tag/review responses and local-save acknowledgements after changing screens. Bind detail actions immediately without waiting for images.
-- Refresh the static app cache with build `2.8.0-navigation-1`; retain the 2.8.0 backend contract and durable queue scope. No Apps Script changes or deployment.
+- Refresh the static app cache with build `2.8.1-navigation-1`; retain the 2.8.0 backend contract and durable queue scope. No Apps Script changes required.
+
+- Report frontend 2.8.1 separately from the 2.8.0 API compatibility target so frontend patch releases do not falsely flag an unchanged backend as incompatible.
 
 # 2.8.0 — Hosting deployed (2026-10-22)
 

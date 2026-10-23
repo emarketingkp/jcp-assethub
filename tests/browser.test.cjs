@@ -87,7 +87,114 @@ test('browser regressions on mobile and desktop',async t=>{
     await page.locator('[data-batch-common="site_id"]').selectOption('SITE-TEST');
     if(count!==2){await page.locator('#batchQuantity').fill(String(count));await page.locator('#batchQuantity').press('Tab');}
   }
+  if(process.env.BROWSER_SCENARIO){const run=t.test.bind(t),pattern=new RegExp(process.env.BROWSER_SCENARIO,'i');t.test=(name,...args)=>pattern.test(name)?run(name,...args):Promise.resolve();}
   try{
+    await t.test('Unified: generic named units register together without dropping fields or copying private identity',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,unified:true});
+      try{
+        await page.locator('[data-mobile-route="scanner"]').click();await page.locator('#scannerManualEntry').click();
+        await page.locator('#assetForm [name="asset_name"]').fill('Lobby chair 01');await page.locator('#assetForm [name="category"]').fill('Furniture');
+        await page.locator('#assetSite').selectOption('SITE-TEST');await page.locator('#assetArea').fill('Lobby');
+        await page.locator('#assetForm [name="exact_location"]').fill('Entrance');await page.locator('#assetForm [name="assigned_to"]').fill('Front desk');
+        await page.locator('#assetForm details').filter({hasText:'Staff-only information'}).locator('summary').click();await page.locator('[data-private="account_number"]').fill('000123');
+        await page.locator('#addMatchingUnit').click();await page.locator('[data-unit-name]').fill('Lobby chair 02');await page.locator('#assetForm [type="submit"]').click();
+        await page.waitForFunction(()=>window.__mock.assets.length===2);assert.equal(backend.read('Assets')[0].asset_name,'Lobby chair 01');assert.equal(backend.read('Assets')[1].asset_name,'Lobby chair 02');
+        assert.equal(backend.read('Assets')[0].exact_location,'Entrance');assert.equal(backend.read('Assets')[1].exact_location,'Entrance');assert.equal(backend.read('AssetPrivate').length,1);assert.equal(backend.read('AssetPrivate')[0].account_number,'000123');
+        assert.equal(await page.locator('#modalWrap').isVisible(),false);assert(await page.locator('#assetDrawer').evaluate(el=>el.classList.contains('open')));assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('Unified: scan result exposes the complete editor, a serial reader and immediate named detail',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,unified:true});
+      try{
+        await scan(page);await page.locator('[data-universal-field="asset_name"]').fill('Finance printer');await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Finance');
+        assert.equal(await page.locator('#scanResult [data-entry-field="exact_location"]').count(),1);assert.equal(await page.locator('#scanResult [data-entry-field="assigned_to"]').count(),1);assert.equal(await page.locator('#scanResult .serial-reader-button').count(),1);
+        await page.locator('.v27-photo img').click();await page.locator('.asset-media-dialog').waitFor();assert(await page.locator('#v27Create').isVisible());await page.locator('.asset-media-dialog .iconbtn').click();
+        await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.waitForFunction(()=>window.__mock.assets.length===1);assert.equal(backend.read('Assets')[0].asset_name,'Finance printer');assert.match(await page.locator('#drawerBody .detail-title h2').textContent(),/Finance printer/);assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('Unified: asset list only browses; matching registration in details resets names and serials',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,unified:true,assets:[stock('PC1',{asset_name:'Finance PC 01',serial:'PC-SN-001'}),stock('PC2',{asset_name:'Reception PC 01',serial:'PC-SN-002'})]},{width:1440,height:1100});
+      try{
+        await page.locator('.nav-btn[data-route="assets"]').click();assert(await page.locator('#addAssetBtn').isHidden());await page.locator('.asset-group summary').click();assert.equal(await page.locator('[data-group-add]').count(),0);
+        await page.locator('[data-asset="PC1"]').click();await page.locator('#registerMatchingUnits').click();assert.equal(await page.locator('#assetForm [name="asset_name"]').inputValue(),'');assert.equal(await page.locator('#assetForm [name="serial"]').inputValue(),'');assert.equal(await page.locator('#assetForm [name="model"]').inputValue(),'M-10');assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('Unified: an unfinished form and its photo survive Pending and a reload',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,unified:true});
+      try {
+        await page.locator('[data-mobile-route="scanner"]').click();await page.locator('#scannerManualEntry').click();
+        await page.locator('#assetForm [name=asset_name]').fill('Unfinished pump');await page.locator('#assetForm [name=category]').fill('Pump');
+        await page.locator('#assetPhotoPicker [data-photo-gallery-input]').setInputFiles(image('unfinished.png'));
+        await page.locator('#cancelAssetForm').click();await page.locator('#editorDraftsBtn').waitFor({state:'visible'});
+        await page.reload();await page.locator('#appLoading').waitFor({state:'hidden'});await page.locator('#editorDraftsBtn').click();await page.locator('[data-resume-draft]').click();
+        assert.equal(await page.locator('#assetForm [name=asset_name]').inputValue(),'Unfinished pump');assert.equal(await page.locator('#assetPhotoPicker .photo-picker-preview').count(),1);
+        await page.locator('#assetPhotoPicker img').click();await page.locator('.asset-media-dialog .iconbtn').click();assert.equal(await page.locator('#assetForm [name=category]').inputValue(),'Pump');assert.deepEqual(errors,[]);
+      } finally {await context.close();}
+    });
+    await t.test('Unified: full comparison edits missing fields, preserves omitted fields and explicitly clears reviewed data',async()=>{
+      const a=stock('REVIEW',{serial:'O01I2345',asset_name:'Old name',exact_location:'Old location',assigned_to:'Keep team'});
+      const {page,context,backend,errors}=await start({links:true,queue:true,unified:true,assets:[a],matches:[{asset:a,reasons:['Serial match'],conflicts:[]}]});
+      try {
+        await scan(page);await page.locator('[data-v27-match]').click();await page.locator('#reconcileForm').waitFor();
+        assert.equal(await page.locator('#reconcileForm [data-review-field]').count(),12);assert.equal(await page.locator('#reconcileForm .serial-reader-button').count(),1);
+        await page.locator('[data-review-field=asset_name]').fill('Reviewed name');await page.locator('[data-review-field=exact_location]').fill('');
+        await page.locator('[data-review-field=assigned_to]').fill('');await page.locator('[name=choice_assigned_to][value=existing]').check();
+        await page.locator('#reconcileForm [type=submit]').click();await page.waitForFunction(()=>window.__mock.assets[0].asset_name==='Reviewed name');
+        assert.equal(backend.read('Assets')[0].exact_location,'');assert.equal(backend.read('Assets')[0].assigned_to,'Keep team');assert.equal(backend.read('Assets').length,1);assert.deepEqual(errors,[]);
+      } finally {await context.close();}
+    });
+    await t.test('Unified: failed earlier scan review returns to the exact interrupted named form and photo',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,unified:true,assets:[stock('TAKEN',{serial:'OTHER'})]});
+      try {
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Lobby');backend.context.writeLinkedAssetPatch_('TAKEN',{serial:'O01I2345'});await page.locator('#v27Create').click();await page.locator('#linkedAssetNo').click();await page.locator('#saveFailureNotice').waitFor();await page.locator('#closeDrawerBtn').click();
+        await page.locator('[data-mobile-route=scanner]').click();await page.locator('#scannerManualEntry').click();await page.locator('#assetForm [name=asset_name]').fill('Continue this chair');await page.locator('#assetPhotoPicker [data-photo-gallery-input]').setInputFiles(image('chair.png'));
+        await page.locator('#formPendingSaves').click();await page.locator('[data-review-save]').click();await page.locator('[data-universal-field=serial]').fill('UNIQUE-REVIEW');await page.locator('#v27Create').click();
+        await page.locator('#assetForm').waitFor();assert.equal(await page.locator('#assetForm [name=asset_name]').inputValue(),'Continue this chair');assert.equal(await page.locator('#assetPhotoPicker .photo-picker-preview').count(),1);
+        await page.waitForFunction(()=>window.__mock.assets.length===2);assert.equal(backend.read('Assets').length,2);assert.deepEqual(errors,[]);
+      } finally {await context.close();}
+    });
+    await t.test('Unified: serial popup fills one exact barcode and stops the camera without changing pages',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,unified:true});
+      try {
+        await page.locator('[data-mobile-route=scanner]').click();await page.locator('#scannerManualEntry').click();
+        await page.evaluate(()=>{
+          window.__serialTracks=[];window.BarcodeDetector=class {async detect(){return [{rawValue:'000oO1iI23'}];}};
+          navigator.mediaDevices.getUserMedia=async()=>{const c=document.createElement('canvas');c.width=640;c.height=360;c.getContext('2d').fillRect(0,0,640,360);const stream=c.captureStream(10);window.__serialTracks.push(...stream.getTracks());return stream;};
+        });
+        await page.locator('#assetForm .serial-reader-button').click();await page.waitForFunction(()=>document.querySelector('#assetForm [name=serial]').value==='000oO1iI23').catch(async err=>{throw new Error(err.message+' / '+await page.locator('.asset-media-dialog').textContent()+' / '+errors.join(';'));});
+        assert.equal(await page.locator('.asset-media-dialog').count(),0);assert.equal(await page.evaluate(()=>window.__serialTracks.every(t=>t.readyState==='ended')),true);assert(await page.locator('#assetForm').isVisible());assert.deepEqual(errors,[]);
+      } finally {await context.close();}
+    });
+    await t.test('Unified: linked OCR carries placement and shared custom information without unit identity',async()=>{
+      const main=stock('MAIN',{asset_name:'Finance desk',serial:'MAIN-SN',exact_location:'Desk 2',assigned_to:'Finance',custom_fields:[{field_id:'COST',value:'Operations'},{field_id:'IMEI',value:'UNIQUE-IDENTITY'}]});
+      const customFields=[{field_id:'COST',label:'Cost centre',field_type:'text',required:false,active:true},{field_id:'IMEI',label:'IMEI',field_type:'text',required:false,active:true}];
+      const {page,context,errors}=await start({links:true,queue:true,unified:true,assets:[main],customFields});
+      try {
+        await page.locator('[data-mobile-route=assets]').click();if(await page.locator('.asset-group summary').count())await page.locator('.asset-group summary').click();await page.locator('[data-asset=MAIN]').click();await page.locator('#addLinkedAsset').click();await page.locator('#linkedAssetYes').click();await page.locator('#linkedAssetOcr').click();await page.locator('#scannerFile').setInputFiles(image('peripheral.png'));await page.locator('#v27Create').waitFor();
+        assert.equal(await page.locator('#scanEntrySite').inputValue(),'SITE-TEST');assert.equal(await page.locator('#scanEntryArea').inputValue(),'Test Area');assert.equal(await page.locator('[data-entry-field=exact_location]').inputValue(),'Desk 2');assert.equal(await page.locator('[data-custom=COST]').inputValue(),'Operations');assert.equal(await page.locator('[data-custom=IMEI]').inputValue(),'');assert.equal(await page.locator('[data-universal-field=asset_name]').inputValue(),'');assert.deepEqual(errors,[]);
+      } finally {await context.close();}
+    });
+    await t.test('Unified: matching units have individual placement, custom values, private details and photos',async()=>{
+      const customFields=[{field_id:'COST',label:'Cost centre',field_type:'text',required:false,active:true}];
+      const {page,context,backend,errors}=await start({links:true,queue:true,unified:true,customFields});
+      try {
+        await page.locator('[data-mobile-route=scanner]').click();await page.locator('#scannerManualEntry').click();
+        await page.locator('#assetForm [name=asset_name]').fill('Room lamp 01');await page.locator('#assetForm [name=category]').fill('Lighting');await page.locator('#assetSite').selectOption('SITE-TEST');await page.locator('#assetArea').fill('Meeting room');await page.locator('[data-custom=COST]').fill('Team A');
+        await page.locator('#addMatchingUnit').click();await page.locator('[data-unit-name]').fill('Room lamp 02');
+        const unit=page.locator('[data-extra-unit]');await unit.locator('summary').first().click();await unit.locator('[data-unit-override=area]').fill('Lobby');
+        await unit.locator('details').filter({hasText:'Custom information for this unit'}).last().locator('summary').click();await unit.locator('[data-unit-custom=COST]').fill('Team B');
+        await unit.locator('details').filter({hasText:'Staff-only information for this unit'}).last().locator('summary').click();await unit.locator('[data-unit-private=account_number]').fill('00042');
+        await unit.locator('[data-photo-gallery-input]').setInputFiles(image('lamp-02.png'));await checkNoOverflow(page);await page.locator('#assetForm [type=submit]').click();
+        await page.waitForFunction(()=>window.__mock.assets.length===2);assert.equal(backend.read('Assets')[1].area,'Lobby');assert.deepEqual(backend.read('CustomValues').map(v=>v.value),['Team A','Team B']);assert.equal(backend.read('AssetPrivate').length,1);assert.equal(backend.read('AssetPrivate')[0].asset_id,backend.read('Assets')[1].asset_id);assert.deepEqual(errors,[]);
+      } finally {await context.close();}
+    });
+    await t.test('Unified: browser Back closes previews and editors before returning to the previous page',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,unified:true});
+      try {
+        await page.locator('[data-mobile-route=assets]').click();await page.locator('[data-mobile-route=scanner]').click();await page.locator('#scannerManualEntry').click();await page.locator('#assetForm [name=asset_name]').fill('Keep this draft');await page.locator('#assetPhotoPicker [data-photo-gallery-input]').setInputFiles(image('back.png'));await page.locator('#assetPhotoPicker img').click();
+        await page.goBack();await page.locator('.asset-media-dialog').waitFor({state:'detached'});assert(await page.locator('#assetForm').isVisible());await page.goBack();await page.locator('#modalWrap').waitFor({state:'hidden'});await page.goBack();assert(await page.locator('#page-assets').evaluate(el=>el.classList.contains('active')));await page.locator('#editorDraftsBtn').click();await page.locator('[data-resume-draft]').click();assert.equal(await page.locator('#assetForm [name=asset_name]').inputValue(),'Keep this draft');assert.deepEqual(errors,[]);
+      } finally {await context.close();}
+    });
     await t.test('scan save returns to the register before confirmation and linked OCR starts one fresh camera',async()=>{
       const {page,context,backend,errors}=await start({links:true,queue:true});
       try{
@@ -641,6 +748,8 @@ test('browser regressions on mobile and desktop',async t=>{
       try{
         await page.locator('#systemStatusBtn').click();
         await page.locator('[data-connection="api"][data-state="ok"]').waitFor();await page.locator('[data-connection="storage"][data-state="ok"]').waitFor();
+        assert.deepEqual(await page.evaluate(()=>{const p=window.__mock.calls.find(c=>c.action==='diagnostics'&&c.params.component==='api').params;return [p.frontend_version,p.frontend_release];}),['2.9.0','2.9.0']);
+        assert.match(await page.locator('[data-connection="version"][data-state="ok"]').textContent(),/Frontend 2\.9\.0 requires backend API 2\.9\.0/);
         await page.waitForFunction(()=>window.__mock.diagReleases.sheets&&window.__mock.diagReleases.drive);
         assert.equal(await page.locator('[data-connection="drive"]').getAttribute('data-state'),'checking');
         await page.evaluate(()=>window.__mock.diagReleases.sheets());await page.locator('[data-connection="sheets"][data-state="ok"]').waitFor();
@@ -649,6 +758,13 @@ test('browser regressions on mobile and desktop',async t=>{
         await page.evaluate(()=>window.__mock.diagReleases.drive());await page.locator('[data-connection="drive"][data-state="error"]').waitFor();
         await page.locator('[data-connection="barcode"][data-state="ok"]').waitFor();assert.match(await page.locator('[data-connection="barcode"]').textContent(),/ZXing WASM/);
         await checkNoOverflow(page);await page.screenshot({path:path.resolve('test-results/mobile-connection-checks.png'),fullPage:true});assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('frontend patch compatibility still reports a genuinely different backend API',async()=>{
+      const {page,context,errors}=await start({backendVersion:'2.7.2'});
+      try{
+        await page.locator('#systemStatusBtn').click();await page.locator('[data-connection="version"][data-state="error"]').waitFor();
+        assert.match(await page.locator('[data-connection="version"]').textContent(),/backend 2\.7\.2/);assert.deepEqual(errors,[]);
       }finally{await context.close();}
     });
     await t.test('explicit OCR/AI tests update separately and a successful sync cannot hide AI quota failure',async()=>{
