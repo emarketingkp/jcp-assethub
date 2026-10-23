@@ -9,7 +9,8 @@
     let disposed=false;
     const dispose=()=>{if(disposed)return;disposed=true;onClose();d.remove();};
     d.addEventListener('close',dispose);d.addEventListener('cancel',dispose);
-    document.body.append(d);return {element:d,open:()=>d.showModal(),close:()=>{if(d.open)d.close();else dispose();},alive:()=>!disposed};
+    // Release media synchronously; the native close event is queued by the browser.
+    document.body.append(d);return {element:d,open:()=>d.showModal(),close:()=>{if(d.open)d.close();dispose();},alive:()=>!disposed};
   }
   function serial({onRead,active=()=>true,onOpen=()=>{},onClose=()=>{}}){
     onOpen();let stream,timer,reading=false;const abort=new AbortController();

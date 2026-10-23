@@ -17,7 +17,7 @@
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
   const APP_VERSION = '2.9.0';
-  const BUILD_ID = '2.9.0-unified-assets-1';
+  const BUILD_ID = '2.9.0-unified-assets-2';
   // Full-field writes require the additive 2.9 backend setup; older services keep the legacy editor.
   const BACKEND_API_VERSION = '2.9.0';
   let workflows=null;
