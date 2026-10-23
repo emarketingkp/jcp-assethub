@@ -17,7 +17,7 @@ const SCRIPT_PROPERTIES = PropertiesService.getScriptProperties();
 const SPREADSHEET_ID = String(SCRIPT_PROPERTIES.getProperty('SPREADSHEET_ID') || '').trim();
 const DRIVE_FOLDER_ID = String(SCRIPT_PROPERTIES.getProperty('DRIVE_FOLDER_ID') || '').trim();
 const AUTH_REQUIRED = true;
-const APP_VERSION = '2.8.0';
+const APP_VERSION = '2.9.0';
 const SESSION_HOURS = 12;
 const LEGACY_IMPORT_SOURCE = 'JCP DEVICES LIST - SUMMARRY.csv';
 const LEGACY_IMPORT_TOTAL = 83;
@@ -49,7 +49,7 @@ const SCHEMA = {
   Assets: [
     'asset_id','category_id','category','brand','model','serial','specifications',
     'site_id','site','area_id','area','exact_location','assigned_to','status',
-    'main_image_id','drive_folder_id','created_at','updated_at','created_by','updated_by','retired_at','source_ref','set_id','set_name','parent_asset_id'
+    'main_image_id','drive_folder_id','created_at','updated_at','created_by','updated_by','retired_at','source_ref','set_id','set_name','parent_asset_id','asset_name'
   ],
   AssetImages: [
     'image_id','asset_id','image_type','drive_file_id','thumbnail_file_id','file_name',
@@ -439,7 +439,7 @@ function listAssets_(p) {
     .filter(r => String(r.status) !== 'Merged')
     .filter(r => includeRetired || String(r.status) !== 'Retired')
     .map(r => decorateAsset_(r, catMap, siteMap, areaMap, mainImages))
-    .filter(r => !q || [r.asset_id,r.category_name,r.brand,r.model,r.serial,r.site_name,r.area_name,r.assigned_to,r.status,r.parent_asset_id,(byId[r.parent_asset_id]||{}).brand,(byId[r.parent_asset_id]||{}).model]
+    .filter(r => !q || [r.asset_id,r.asset_name,r.category_name,r.brand,r.model,r.serial,r.site_name,r.area_name,r.assigned_to,r.status,r.parent_asset_id,(byId[r.parent_asset_id]||{}).asset_name,(byId[r.parent_asset_id]||{}).brand,(byId[r.parent_asset_id]||{}).model]
       .join(' ').toLowerCase().includes(q))
     .sort((a,b)=>String(b.updated_at).localeCompare(String(a.updated_at)))
     .slice(0, limit);
@@ -911,7 +911,8 @@ function uploadQueuedImage_(p,user) {
   const operation=groupText_(p.operation_id,100,'Photo operation');
   if(!/^[A-Za-z0-9-]{16,100}$/.test(operation))throw new Error('Invalid photo operation ID.');
   const id='IMG-Q-'+hash_(actorKey_(user)+'|'+operation).slice(0,32);
-  const fingerprint=hash_(JSON.stringify([p.assetId,p.imageType,p.mimeType,p.base64Data,p.thumbnailBase64]));
+  const photoBytes=[p.assetId,p.imageType,p.mimeType,p.base64Data,p.thumbnailBase64];if(p.make_main!==undefined)photoBytes.push(p.make_main==='true');if(p.expected_main_id!==undefined)photoBytes.push(groupText_(p.expected_main_id,100,'Previous main image'));
+  const fingerprint=hash_(JSON.stringify(photoBytes));
   const marker='queue-'+fingerprint,stamp=marker+'-'+id;
   const lock=LockService.getScriptLock();lock.waitLock(10000);
   try {
@@ -923,12 +924,12 @@ function uploadQueuedImage_(p,user) {
       // Only repair an unfinished image touch. A completed replay must not undo later edits/main-photo selection.
       if(asset&&(!asset.updated_at||String(asset.updated_at)<String(previous.uploaded_at))){
         const touch={updated_at:previous.uploaded_at,updated_by:actorKey_(user)};
-        if(previous.image_type==='main')touch.main_image_id=previous.image_id;
+        if(p.make_main==='true'&&(p.expected_main_id===undefined||String(asset.main_image_id||'')===p.expected_main_id)||p.make_main===undefined&&previous.image_type==='main')touch.main_image_id=previous.image_id;
         updateByKey_(SHEETS.ASSETS,'asset_id',p.assetId,touch);invalidateDataCache_();
       }
-      return previous;
+      return p.expected_main_id===undefined?previous:Object.assign({},previous,{asset_main_image_id:findByKey_(SHEETS.ASSETS,'asset_id',p.assetId).main_image_id||''});
     }
-    return uploadImage_(p,user,{stamp:stamp,id:id});
+    const image=uploadImage_(p,user,{stamp:stamp,id:id});return p.expected_main_id===undefined?image:Object.assign({},image,{asset_main_image_id:findByKey_(SHEETS.ASSETS,'asset_id',p.assetId).main_image_id||''});
   } finally {lock.releaseLock();}
 }
 
@@ -959,7 +960,7 @@ function uploadImage_(p, user, queued) {
     thumbId = t.getId();
   }
 
-  const now = new Date().toISOString();
+  const now = new Date(Math.max(Date.now(),Date.parse(findByKey_(SHEETS.ASSETS,'asset_id',p.assetId).updated_at||'')+1||0)).toISOString();
   const image = {
     image_id:p._queueImageId||'IMG-'+shortId_(), asset_id:p.assetId, image_type:imageType,
     drive_file_id:file.getId(), thumbnail_file_id:thumbId, file_name:file.getName(), mime_type:mime,
@@ -967,7 +968,7 @@ function uploadImage_(p, user, queued) {
   };
   appendObject_(SHEETS.ASSET_IMAGES,image);
   const assetTouch = {updated_at:now,updated_by:actorKey_(user)};
-  if (image.image_type === 'main') assetTouch.main_image_id=image.image_id;
+  if(p.make_main==='true'&&(p.expected_main_id===undefined||String(findByKey_(SHEETS.ASSETS,'asset_id',p.assetId).main_image_id||'')===p.expected_main_id)||p.make_main===undefined&&image.image_type==='main')assetTouch.main_image_id=image.image_id;
   updateByKey_(SHEETS.ASSETS,'asset_id',p.assetId,assetTouch);
   log_(user,'UPLOAD_IMAGE',p.assetId,JSON.stringify({image_id:image.image_id,type:image.image_type}),null,image);
   invalidateDataCache_();
@@ -1529,11 +1530,11 @@ function buildReport_(p) {
   const assetMap = objectMap_(assets,'asset_id');
   // Export the complete Assets sheet schema, not just the shortened phone table.
   const assetColumns=SCHEMA.Assets.concat(['main_asset_id','main_asset_name']);
-  assets.forEach(a=>{const main=assetMap[a.parent_asset_id];a.main_asset_id=a.parent_asset_id||'';a.main_asset_name=main?([main.brand,main.model].filter(Boolean).join(' ')||main.category_name||main.asset_id):'';});
+  assets.forEach(a=>{const main=assetMap[a.parent_asset_id];a.main_asset_id=a.parent_asset_id||'';a.main_asset_name=main?(main.asset_name||[main.brand,main.model].filter(Boolean).join(' ')||main.category_name||main.asset_id):'';});
   function attachAssetIdentity_(row) {
     const a=assetMap[row.asset_id]||{};
     return Object.assign({},row,{
-      asset_name:[a.brand,a.model].filter(Boolean).join(' ')||row.asset_id||'',
+      asset_name:a.asset_name||[a.brand,a.model].filter(Boolean).join(' ')||row.asset_id||'',
       category_name:a.category_name||'', brand:a.brand||'',model:a.model||'',
       serial:a.serial||'',site_name:a.site_name||'',area_name:a.area_name||'',
       asset_status:a.status||''
@@ -1965,7 +1966,7 @@ function updateByComposite_(name,keys,patch) {
       const current=rowToObject_(h,data[r]); const next=Object.assign({},current,patch);
       // Image/legacy writers must not restore stale set membership from a full row
       // snapshot. Write contiguous spans, excluding set fields absent from this patch.
-      const protectedCell=i=>name===SHEETS.ASSETS&&['set_id','set_name','parent_asset_id'].includes(h[i])&&!Object.prototype.hasOwnProperty.call(patch,h[i]);
+      const protectedCell=i=>name===SHEETS.ASSETS&&['set_id','set_name','parent_asset_id','asset_name'].includes(h[i])&&!Object.prototype.hasOwnProperty.call(patch,h[i]);
       let start=0;
       for(let end=0;end<=h.length;end++){
         if(end<h.length&&!protectedCell(end))continue;

@@ -1,3 +1,9 @@
+# 2.9.0 — complete asset workflows preview
+
+Build `2.9.0-unified-assets-1` adds a complete shared editor and comparison, optional unit names, reusable accepted choices, scoped draft/photo recovery, a serial barcode popup, compact image previews/main selection and generic matching-unit registration. The asset list is browse-only; edits and related registration stay in details and scan results. Existing fields, records, private permissions and history are retained.
+
+**Not deployed.** Requires both Apps Script files and additive `setupAssetGrouping()`. See [behavior, setup and rollback](docs/UNIFIED_ASSET_WORKFLOWS.md).
+
 # 2.8.1 — navigation fixes deployed
 
 Build `2.8.1-navigation-1` corrects scanner/camera entry, preserves unfinished reviews, returns saved scans to the register and ignores obsolete screen responses. See [navigation fixes](docs/NAVIGATION_FIXES.md). This frontend build remains compatible with the 2.8.0 backend and needs no Apps Script changes.

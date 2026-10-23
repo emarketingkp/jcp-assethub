@@ -7,12 +7,12 @@
   function sharedSpecifications(value){return text(value).split(/\r?\n/).filter(line=>!/^\s*(?:serial(?:\s+(?:number|no\.?))?|s\s*\/\s*n|sn|imei\s*2?|mac(?:\s+address)?|service\s+tag|jcp\s+asset\s+id|asset\s+id|host\s*name|device\s+name|device\s+id|uuid|product\s+id|license\s+key)\s*[:=#]/i.test(line)).join('\n').trim();}
   function modelKey(a){
     if(!known(a.brand)||!known(a.model))return '';
-    const category=a.category_id||a.category_name||a.category;
+    const category=a.category_name||a.category||a.category_id;
     if(!known(category))return '';
     // Exact model punctuation and specification text keep revisions/capacities apart.
     return JSON.stringify([normalized(category),normalized(a.brand),normalized(a.model),normalized(sharedSpecifications(a.specifications))]);
   }
-  function unmarkedKey(a){const category=a.category_id||a.category_name||a.category;return known(category)&&!modelKey(a)?JSON.stringify([normalized(category),known(a.brand)?normalized(a.brand):'',known(a.model)?normalized(a.model):'',normalized(sharedSpecifications(a.specifications))]):'';}
+  function unmarkedKey(a){const category=a.category_name||a.category||a.category_id;return known(category)&&!modelKey(a)?JSON.stringify([normalized(category),known(a.brand)?normalized(a.brand):'',known(a.model)?normalized(a.model):'',normalized(sharedSpecifications(a.specifications))]):'';}
   function uniqueAssets(assets){
     const byId=new Map();
     for(const asset of assets||[]){
@@ -26,7 +26,7 @@
     const all=uniqueAssets(assets),byId=new Map(),searchText=new Map(),keys=new Map(),serials=new Map(),sets=new Map(),models=new Map(),unmarked=new Map(),modelTotals=new Map(),unmarkedTotals=new Map();
     for(const asset of all){
       byId.set(asset.asset_id,asset);
-      searchText.set(asset.asset_id,[asset.asset_id,asset.category_name,asset.brand,asset.model,asset.serial,asset.site_name,asset.area_name,asset.assigned_to,asset.exact_location,asset.set_name,asset.set_id].join(' ').toLowerCase());
+      searchText.set(asset.asset_id,[asset.asset_id,asset.asset_name,asset.category_name,asset.brand,asset.model,asset.serial,asset.site_name,asset.area_name,asset.assigned_to,asset.exact_location,asset.set_name,asset.set_id].join(' ').toLowerCase());
       const serial=serialKey(asset.serial);
       if(serial){if(!serials.has(serial))serials.set(serial,[]);serials.get(serial).push(asset.asset_id);}
       if(asset.set_id){if(!sets.has(asset.set_id))sets.set(asset.set_id,[]);sets.get(asset.set_id).push(asset);}
@@ -34,14 +34,14 @@
       const unknown=key?'':unmarkedKey(asset);if(unknown){if(!unmarked.has(unknown))unmarked.set(unknown,[]);unmarked.get(unknown).push(asset);if(!asset.set_id)unmarkedTotals.set(unknown,(unmarkedTotals.get(unknown)||0)+1);}
       keys.set(asset.asset_id,{model:key,unmarked:unknown});
     }
-    for(const asset of all){if(asset.parent_asset_id){const main=byId.get(asset.parent_asset_id);searchText.set(asset.asset_id,searchText.get(asset.asset_id)+' '+[asset.parent_asset_id,main?.brand,main?.model,main?.category_name].filter(Boolean).join(' ').toLowerCase());}}
+    for(const asset of all){if(asset.parent_asset_id){const main=byId.get(asset.parent_asset_id);searchText.set(asset.asset_id,searchText.get(asset.asset_id)+' '+[asset.parent_asset_id,main?.asset_name,main?.brand,main?.model,main?.category_name].filter(Boolean).join(' ').toLowerCase());}}
     return {all,byId,searchText,keys,serials,sets,models,unmarked,modelTotals,unmarkedTotals};
   }
-  function project(rows,index,{grouped=true}={}){
+  function project(rows,index,{grouped=true,productOnly=false}={}){
     const entries=[],byGroup=new Map();
     for(const asset of uniqueAssets(rows)){
       let kind='asset',key=asset.asset_id;
-      if(grouped&&asset.set_id){kind='set';key=asset.set_id;}
+      if(grouped&&asset.set_id&&!productOnly){kind='set';key=asset.set_id;}
       else if(grouped){const cached=index.byId.get(asset.asset_id)===asset?index.keys.get(asset.asset_id):null,model=cached?cached.model:modelKey(asset),unknown=cached?cached.unmarked:unmarkedKey(asset);if(model){kind='model';key=model;}else if(unknown){kind='unmarked';key=unknown;}}
       const id=kind+':'+key;
       if(!byGroup.has(id)){const entry={key:id,kind,assets:[],total:0};byGroup.set(id,entry);entries.push(entry);}
@@ -50,8 +50,8 @@
     for(const entry of entries){
       const first=entry.assets[0];
       if(entry.kind==='set')entry.total=index.sets.get(first.set_id)?.length||entry.assets.length;
-      else if(entry.kind==='model')entry.total=index.modelTotals.get(entry.key.slice(6))||0;
-      else if(entry.kind==='unmarked')entry.total=index.unmarkedTotals.get(entry.key.slice(9))||0;
+      else if(entry.kind==='model')entry.total=productOnly?(index.models.get(entry.key.slice(6))?.length||0):index.modelTotals.get(entry.key.slice(6))||0;
+      else if(entry.kind==='unmarked')entry.total=productOnly?(index.unmarked.get(entry.key.slice(9))?.length||0):index.unmarkedTotals.get(entry.key.slice(9))||0;
       else entry.total=1;
       if(['model','unmarked'].includes(entry.kind)&&entry.assets.length===1&&entry.total===1)entry.kind='asset';
     }

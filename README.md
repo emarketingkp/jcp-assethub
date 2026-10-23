@@ -1,4 +1,9 @@
 # jcp-assethub
+
+## 2.9.0 — complete asset workflows preview
+
+The approved shared editor, optional asset names, generic matching units and background recovery are prepared on this branch. Existing fields and records are retained. **Not deployed.** Both Apps Script files and additive `setupAssetGrouping()` are required to enable the new editor. See [workflow, preservation and owner setup](docs/UNIFIED_ASSET_WORKFLOWS.md).
+
 JCP AssetHub, a mobile-first asset management application built with Firebase Hosting, Google Apps Script, Google Sheets, Google Drive, OCR.Space and Groq AI.
 
 ## 2.8.1 — navigation fixes deployed
