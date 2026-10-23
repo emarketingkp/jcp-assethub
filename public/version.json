@@ -1,8 +1,8 @@
 {
   "version": "2.9.0",
   "build": "2.9.0-unified-assets-1",
-  "released": null,
-  "status": "preview",
+  "released": "2026-10-23",
+  "status": "released",
   "name": "Complete asset workflows",
-  "notes": "Complete shared editor, optional asset names, contextual reusable choices, scoped drafts, serial popup and compact main-image previews. Generic matching units remain distinct from linked assets. Requires updated Code.gs and AssetGroups.gs plus additive setupAssetGrouping. Not deployed."
+  "notes": "Complete shared editor, optional asset names, reusable contextual choices, scoped draft/photo recovery, serial barcode popup and main-image previews. Generic matching units remain distinct from linked assets. New editor requires both updated Apps Script files and additive setupAssetGrouping; older backends retain the existing editor."
 }
