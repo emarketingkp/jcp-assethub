@@ -1,11 +1,11 @@
-# 2.9.0 — preview, not deployed (2026-10-23)
+# 2.9.0 — Hosting deployed (2026-10-23)
 
 - Preserve all existing fields and add optional unit names across lists, details, search, labels and exports.
 - Share complete registration/Edit/comparison fields, contextual accepted choices, serial popups and compact photo previews.
 - Register generic matching units with individual information; keep the list browse-only and main/linked references independent.
 - Recover scoped unfinished drafts and photos, return from failure review to the interrupted task, and open newly saved details from local data.
 - Retain old retry fingerprints and private permissions; protect main-image choices from delayed uploads/replay.
-- Prepare frontend/backend 2.9.0 with additive setup instructions. No deployment performed.
+- Deploy frontend 2.9.0 build `2.9.0-unified-assets-2`; stop the serial-popup camera synchronously on close. All 35 public files verified; production backend configuration preserved. Apps Script deployment/setup remains owner-managed.
 
 # 2.8.1 — Hosting deployed (2026-10-22)
 

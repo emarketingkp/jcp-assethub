@@ -1,8 +1,8 @@
-# 2.9.0 — complete asset workflows preview
+# 2.9.0 — complete asset workflows deployed
 
-Build `2.9.0-unified-assets-1` adds a complete shared editor and comparison, optional unit names, reusable accepted choices, scoped draft/photo recovery, a serial barcode popup, compact image previews/main selection and generic matching-unit registration. The asset list is browse-only; edits and related registration stay in details and scan results. Existing fields, records, private permissions and history are retained.
+Build `2.9.0-unified-assets-2` adds a complete shared editor and comparison, optional unit names, reusable accepted choices, scoped draft/photo recovery, a serial barcode popup, compact image previews/main selection and generic matching-unit registration. The asset list is browse-only; edits and related registration stay in details and scan results. Existing fields, records, private permissions and history are retained.
 
-**Not deployed.** Requires both Apps Script files and additive `setupAssetGrouping()`. See [behavior, setup and rollback](docs/UNIFIED_ASSET_WORKFLOWS.md).
+**Hosting deployed on 2026-10-23.** All 35 public files verified; live backend configuration preserved. Validation: 139 unit/backend checks and 92 browser TAP tests passed. Apps Script was not deployed or verified here; the new editor requires both Apps Script files and additive `setupAssetGrouping()`. See [behavior, setup and rollback](docs/UNIFIED_ASSET_WORKFLOWS.md).
 
 # 2.8.1 — navigation fixes deployed
 

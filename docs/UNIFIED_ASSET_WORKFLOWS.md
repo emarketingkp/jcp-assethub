@@ -1,6 +1,6 @@
-# Complete asset workflows — 2.9.0 preview
+# Complete asset workflows — 2.9.0
 
-Build `2.9.0-unified-assets-1` implements the approved generic asset design. This change is prepared for review; neither Firebase Hosting nor Apps Script has been deployed.
+Build `2.9.0-unified-assets-2` implements the approved generic asset design. Firebase Hosting was deployed on 2026-10-23 from release commit `513761d`, based on merged main `b6091b4`. All 35 public files match the release bundle, including the unchanged live backend configuration. Hosting version `3956ea2521cf7a0e` replaces `a5b76011d6786eca`, which remains available for rollback. Apps Script deployment/setup was not performed or verified here; the environment gateway blocked requests to its live endpoint.
 
 ## Fields and existing records
 
@@ -46,7 +46,7 @@ Thumbnails open a separate preview with main-image choice, navigation and zoom. 
 3. Run **`setupAssetGrouping()` once**. It only ensures missing columns/sheets, including optional `Assets.asset_name`, AssetPrivate and the existing retry ledger. Do not run a schema reset, delete old columns or clear AssetBatches.
 4. Publish a new version to an isolated test Web App deployment. Verify bootstrap/sync reports backend `2.9.0` and `features.unified_editor: 1` before expecting the new forms. Older/unprepared backends retain the existing editor.
 5. Test registration, full-field comparison, required custom values, links, matching units, serial camera popup, main-image selection, private permissions, interrupted failure review and reload recovery with representative devices.
-6. Production Apps Script and Firebase releases remain separate future actions. This PR does not deploy either service.
+6. Hosting has been released. The owner must update both Apps Script files, run the additive setup and deploy the backend to enable the new editor, if not already done. Verify backend 2.9.0 and `features.unified_editor: 1`; the frontend retains the existing editor until readiness is reported.
 
 Rollback retains all additive columns and retry ledgers. Older frontends cannot interpret the new `editor-v2` queue scope; pending new-format work pauses until the matching frontend/backend returns. Keep the previous Hosting/App Script versions. A Hosting rollback does not undo saved Sheet changes or Apps Script deployment.
 
