@@ -1,3 +1,15 @@
+# 2.10.0 — preview, not deployed (2026-10-30)
+
+- Readability: 12px minimum text, normal font weights, sentence-case labels, one navy main-button colour and yellow only for brand and Scan.
+- On this device: drafts, unsent saves and failed saves can be discarded; failed photos can be skipped; waiting children can save without their link; one entry on the Assets menu and page replaces the app-bar counters.
+- Notifications: stacked bottom toasts that never cover the task, errors stay until dismissed, inline next-step actions instead of the post-save dialog; offline bar above the mobile nav.
+- Asset details: one action bar (Edit, Move / assign, Report issue, ⋯), Retire out of the edit form, Restore for retired assets, Separate again (unmerge), visible and cancellable scan-to-update mode.
+- Maintenance: read-only ticket view, focused status and detail forms, archive/restore, optional Under Repair / back-to-Active status follow-ups.
+- Audit: results view and CSV export, rename and cancel, sticky Complete footer, change or reset a result, Move asset here / Mark Missing follow-ups.
+- System Setup: archived sites, areas, categories and fields stay listed and can be restored; users edited by id with last-admin guards and Disable/Enable.
+- Backend: restoreAsset, unmergeAsset, archive/restoreMaintenance, cancel/renameAudit, resetAuditEntry, adminReferences; maintenance merge-patch fix, legacy status whitelist, image allow-list, guest-safe reports, initial admin from Script Properties; features.record_lifecycle.
+- Deploy: replace Code.gs and AssetGroups.gs, run setupAssetGrouping once, set INITIAL_ADMIN_USERNAME / INITIAL_ADMIN_PASSWORD only for a new database. No deployment performed.
+
 # 2.9.0 — preview, not deployed (2026-10-23)
 
 - Preserve all existing fields and add optional unit names across lists, details, search, labels and exports.

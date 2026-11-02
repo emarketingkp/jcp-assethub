@@ -5,6 +5,7 @@ function setupAssetGrouping() {
   ensureSheet_(ss,SHEETS.ASSETS,SCHEMA.Assets);
   ensureSheet_(ss,SHEETS.ASSET_BATCHES,SCHEMA.AssetBatches);
   ensureSheet_(ss,SHEETS.ASSET_PRIVATE,SCHEMA.AssetPrivate);
+  ensureSheet_(ss,SHEETS.MAINTENANCE,SCHEMA.Maintenance);
   invalidateDataCache_();
   return 'Unified editor, optional asset names, private values and retry ledger ready. Existing fields and legacy set data retained. Deploy both Code.gs and AssetGroups.gs.';
 }
@@ -14,7 +15,7 @@ function groupingFeatures_() {
     const ss=getSpreadsheet_(),assets=ss.getSheetByName(SHEETS.ASSETS),ledger=ss.getSheetByName(SHEETS.ASSET_BATCHES);
     if(!assets||!ledger)return {asset_groups:0};
     const assetHeaders=new Set(headers_(assets)),ledgerHeaders=new Set(headers_(ledger));
-    const ready=['set_id','set_name'].every(k=>assetHeaders.has(k))&&SCHEMA.AssetBatches.every(k=>ledgerHeaders.has(k));return {asset_groups:ready?1:0,sequential_saves:ready&&assetHeaders.has('parent_asset_id')?1:0,asset_links:ready&&assetHeaders.has('parent_asset_id')?1:0,unified_editor:ready&&assetHeaders.has('parent_asset_id')&&assetHeaders.has('asset_name')&&ss.getSheetByName(SHEETS.ASSET_PRIVATE)&&SCHEMA.AssetPrivate.every(k=>headers_(ss.getSheetByName(SHEETS.ASSET_PRIVATE)).includes(k))?1:0};
+    const ready=['set_id','set_name'].every(k=>assetHeaders.has(k))&&SCHEMA.AssetBatches.every(k=>ledgerHeaders.has(k));return {asset_groups:ready?1:0,sequential_saves:ready&&assetHeaders.has('parent_asset_id')?1:0,asset_links:ready&&assetHeaders.has('parent_asset_id')?1:0,unified_editor:ready&&assetHeaders.has('parent_asset_id')&&assetHeaders.has('asset_name')&&ss.getSheetByName(SHEETS.ASSET_PRIVATE)&&SCHEMA.AssetPrivate.every(k=>headers_(ss.getSheetByName(SHEETS.ASSET_PRIVATE)).includes(k))?1:0,record_lifecycle:ss.getSheetByName(SHEETS.MAINTENANCE)&&headers_(ss.getSheetByName(SHEETS.MAINTENANCE)).includes('archived_at')?1:0};
   } catch(_){return {asset_groups:0};}
 }
 

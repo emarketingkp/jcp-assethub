@@ -16,10 +16,10 @@
     maintenanceSort:{key:'reported_at',dir:'desc'},
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
-  const APP_VERSION = '2.9.0';
-  const BUILD_ID = '2.9.0-unified-assets-1';
+  const APP_VERSION = '2.10.0';
+  const BUILD_ID = '2.10.0-usability-1';
   // Full-field writes require the additive 2.9 backend setup; older services keep the legacy editor.
-  const BACKEND_API_VERSION = '2.9.0';
+  const BACKEND_API_VERSION = '2.10.0';
   let workflows=null;
   const ASSET_BASE_URL = 'https://assets.jcpmalaysia.com/';
   const CACHE_BOOT = 'jcp_assethub_cache_boot_v1';
@@ -335,15 +335,27 @@
     return d.toLocaleDateString('en-MY',{day:'2-digit',month:'short',year:'numeric'});
   }
   function money(v){ const n=Number(v); return isFinite(n)&&v!=='' ? 'RM '+n.toFixed(2) : '—'; }
-  function toast(message,type='ok'){
-    const t=$('toast'); if(!t)return;
+  // Stacked, non-blocking notifications at the bottom of the screen. Confirmations fade on
+  // their own; errors stay until dismissed, so a later message never hides a failure.
+  // `actions` adds inline buttons: [{label, onClick}].
+  function toast(message,type='ok',{actions=[]}={}){
+    const stack=$('toast'); if(!stack)return;
     const isError=type==='error';
-    t.innerHTML=`<div class="toast-mark" aria-hidden="true">${isError?'!':'✓'}</div><div class="toast-copy"><b>${isError?'Something needs attention':'Done'}</b><span>${esc(message)}</span></div><button class="toast-close" type="button" aria-label="Close notification">×</button>`;
-    t.className='toast show'+(isError?' error':'');
-    t.setAttribute('role',isError?'alert':'status');
-    const hide=()=>{t.classList.remove('show');};
-    t.querySelector('.toast-close')?.addEventListener('click',hide,{once:true});
-    clearTimeout(toast._t); toast._t=setTimeout(hide,isError?5200:2800);
+    stack.className='toast-stack';stack.removeAttribute('role');
+    const item=document.createElement('div');item.className='toast-item'+(isError?' error':'');item.setAttribute('role',isError?'alert':'status');
+    item.innerHTML=`<div class="toast-mark" aria-hidden="true">${isError?'!':'✓'}</div><div class="toast-copy"><span>${esc(message)}</span>${actions.length?'<div class="toast-actions"></div>':''}</div><button class="toast-close" type="button" aria-label="Close notification">×</button>`;
+    for(const a of actions){const b=document.createElement('button');b.type='button';b.className='link-btn';b.textContent=a.label;b.onclick=()=>{remove();a.onClick();};item.querySelector('.toast-actions').append(b);}
+    const sync=()=>{stack.classList.toggle('show',!!stack.children.length);stack.classList.toggle('error',!!stack.querySelector('.toast-item.error'));};
+    const remove=()=>{clearTimeout(item._t);item.remove();sync();};
+    item.querySelector('.toast-close').onclick=remove;
+    // Repeated identical confirmations replace each other instead of piling up.
+    for(const old of stack.querySelectorAll('.toast-item:not(.error)'))if(old.textContent===item.textContent){clearTimeout(old._t);old.remove();}
+    stack.append(item);
+    const routine=[...stack.querySelectorAll('.toast-item:not(.error)')];while(stack.children.length>3&&routine.length){const old=routine.shift();clearTimeout(old._t);old.remove();}
+    // Only an error with a next step waits for the person; everything else clears itself.
+    if(isError&&actions.length)item.classList.add('sticky');
+    else item._t=setTimeout(remove,isError?8000:actions.length?6500:3000);
+    sync();
   }
   function humanError(err){
     const raw=String(err?.message||err||'Unknown error');
@@ -394,7 +406,9 @@
   }
   async function withBusy(btn,label,fn){
     if(btn?.disabled) return;
-    setButtonBusy(btn,true,label);
+    // The button locks at once; the label only changes if the wait becomes noticeable.
+    if(btn){btn.disabled=true;btn.classList.add('busy');}
+    const labelTimer=setTimeout(()=>setButtonBusy(btn,true,label),700);
     const job=++operationCount;
     operationLabels.set(job,label);updateOperationIndicator(label);
     // A slow Apps Script write may take several seconds. Say so rather than looking frozen.
@@ -408,7 +422,7 @@
     },8000);
     try{return await fn();}
     finally{
-      clearTimeout(slowNotice);if(btn)btn.removeAttribute('aria-label');
+      clearTimeout(slowNotice);clearTimeout(labelTimer);if(btn)btn.removeAttribute('aria-label');
       setButtonBusy(btn,false);operationLabels.delete(job);
       const remaining=Array.from(operationLabels.values());updateOperationIndicator(remaining.length?remaining[remaining.length-1]:'');
     }
@@ -481,11 +495,13 @@
       if(viewer){viewer.close();hold();return;}
       if(!$('modalWrap').classList.contains('hidden')){closeModal();hold();return;}
       if(returnToInterruptedTask()){hold();return;}
-      if(state.openAssetId){closeDrawer();hold();return;}
+      if(state.openAssetId){dismissDrawer();hold();return;}
+      if(state.route==='scanner'&&workflows.leavesToEarlierTask()){workflows.exitScanner();hold();return;}
       if(event.state?.assetHub&&event.state.route){historyNavigation=true;try{setRoute(event.state.route);}finally{historyNavigation=false;}}
     });
   }
   function setRoute(route){
+    $('toast')?.querySelectorAll('.toast-item.error:not(.sticky)').forEach(el=>el.querySelector('.toast-close').click());
     if(workflows?.enabled()){workflows.flush();if(route==='scanner')workflows.noteScannerOrigin();}
     if(route==='admin' && !isAdmin()){
       withAccess('ADMIN',()=>setRoute('admin'));
@@ -517,9 +533,26 @@
   }
 
   // Explicit capture starts a new asset; ordinary navigation resumes the current review.
-  function beginScanner({target=null,context=linkedContext}={}){
+  async function beginScanner({target=null,context=linkedContext,onCancel=null}={}){
+    const from=workflows?.enabled()?{...workflows.origin(),onCancel}:null;
+    // Starting another scan would silently drop a result the person has been working on.
+    const session=state.recognitionSession;
+    if(session?.photos?.length&&!session.locallySaved){
+      const choice=await confirmAction({title:'Finish the current scan first?',body:'You have an unsaved scan with '+session.photos.length+' photo'+(session.photos.length===1?'':'s')+'. It is kept as a draft under Assets › On this device if you continue.',confirmLabel:'Keep as draft and continue',alt:'Discard it',cancelLabel:'Go back to it'});
+      if(choice===false){setRoute('scanner');return;}
+      workflows?.flush();if(choice==='alt'&&session.draftId)await workflows?.forget(session.draftId);
+    }
     closeModal();closeDrawer();stopCamera();resetScannerResult({restartCamera:false});
-    state.scanUpdateTarget=target;setLinkedContext(context);setRoute('scanner');renderLinkContext();
+    state.scanUpdateTarget=target;setLinkedContext(context);setRoute('scanner');renderLinkContext();renderScanTarget();
+    if(from&&from.route!=='scanner')workflows.setScanOrigin(from);
+  }
+  // Update mode must stay visible and cancellable for the whole scan, not just as a passing toast.
+  function renderScanTarget(){
+    let box=$('scanTargetBanner');const target=state.scanUpdateTarget;
+    if(!target){box?.remove();return;}
+    if(!box){box=document.createElement('div');box.id='scanTargetBanner';box.className='scanner-main-context scan-target-banner';document.querySelector('#page-scanner .scanner-layout').before(box);}
+    box.innerHTML=`<div><small>Updating from scan</small><b>${esc([target.brand,target.model].filter(Boolean).join(' ')||target.asset_id)}</b><small>${esc(target.asset_id)} · only fields you approve will change</small></div><button type="button" class="btn light sm" id="cancelScanTarget">Cancel update</button>`;
+    $('cancelScanTarget').onclick=()=>{const id=target.asset_id;state.scanUpdateTarget=null;renderScanTarget();if(state.recognitionSession)showUniversalRecognition();toast('Update mode cancelled. New scans create or match assets as usual.','ok',{actions:[{label:'Back to '+id,onClick:()=>openAsset(id)}]});};
   }
   function currentView(){
     const navigation=state.navigationVersion,modal=state.modalVersion,scanner=state.scannerVersion,credential=AssetAPI.getToken(),scope=detailStoreKey('');
@@ -557,6 +590,8 @@
     $('apiSettingsBtn').classList.toggle('hidden',!isAdmin());
 
     const toggle = $('adminToggle');
+    // Only Admin accounts get the Admin view switch; others never see a control they cannot use.
+    toggle.classList.toggle('hidden',!hasAdminRole());
     toggle.classList.toggle('active',isAdmin());
     toggle.setAttribute('aria-pressed',isAdmin() ? 'true' : 'false');
     toggle.title = isAdmin() ? 'Exit Admin view' : (hasAdminRole() ? 'Enter Admin view' : 'Sign in with an Admin account');
@@ -570,13 +605,13 @@
   }
 
   async function init(){
-    workflows=AssetWorkflows.create({state,esc,icon,isAuthenticated,isAdmin,scope:()=>queueScope,queue:()=>saveQueue,rows:()=>queueRows,toast,stopCamera,resumeScannerCamera,openModal,closeModal,hasModalReturn:()=>modalStack.length>0,returnToInterruptedTask,openAsset,openAssetForm,setRoute,renderDrawer,scanEntry,mainAssetFields,bindMainAssetFields,linkedAssetFields,customFieldsHtml,recognitionEvidence,resetScannerResult,showUniversalRecognition,confirmAddLinkedAsset,contextFromRow,setLinkedContext,openLocalOperation,restoreScanDraft,openPending:openLinkedPendingSaves});
+    workflows=AssetWorkflows.create({state,esc,icon,isAuthenticated,isAdmin,scope:()=>queueScope,queue:()=>saveQueue,rows:()=>queueRows,toast,stopCamera,resumeScannerCamera,openModal,closeModal,hasModalReturn:()=>modalStack.length>0,returnToInterruptedTask,openAsset,openAssetForm,setRoute,renderDrawer,scanEntry,mainAssetFields,bindMainAssetFields,linkedAssetFields,customFieldsHtml,recognitionEvidence,resetScannerResult,showUniversalRecognition,confirmAddLinkedAsset,contextFromRow,setLinkedContext,openLocalOperation,restoreScanDraft,openPending:openLinkedPendingSaves,confirmAction,openNestedAsset,openLinkedCaptureChoices,renderLinkContext,renderScanTarget,setDraftCount:n=>{draftCount=n;paintLocalWorkEntry();}});
     void window.AssetInput?.ready();
     bindStaticEvents();
     applyReportDatePreset(false);
     syncMobileNav(state.route);
     registerServiceWorker();
-    monitorOnline();
+    monitorOnline();installActionMenus();
     const [persistentCache] = await Promise.all([hydratePersistentData()]);
     const hadBootCache=hydrateCachedBoot();
     const hadCache=hadBootCache||persistentCache;
@@ -683,7 +718,7 @@
         else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}
       }
     });
-    $('closeDrawerBtn').addEventListener('click',closeDrawer); $('drawerBackdrop').addEventListener('click',closeDrawer);
+    $('closeDrawerBtn').addEventListener('click',dismissDrawer); $('drawerBackdrop').addEventListener('click',dismissDrawer);
     $('globalSearch').addEventListener('keydown',e=>{ if(e.key==='Enter'){ $('assetSearch').value=e.target.value; setRoute('assets'); renderAssets(); }});
     $('assetSearch').addEventListener('input',renderAssets);
     $('assetDateBtn').addEventListener('click',openAssetDateFilter);
@@ -701,7 +736,7 @@
     $('reportIssueBtn').addEventListener('click',()=>withAccess('STAFF',()=>openIssueForm()));
     $$('[data-action="find"]').forEach(b=>b.addEventListener('click',()=>{setRoute('assets');$('assetSearch').focus();}));
     $$('[data-action="reportIssue"]').forEach(b=>b.addEventListener('click',()=>withAccess('STAFF',()=>openIssueForm())));
-    $$('[data-action="continueAudit"]').forEach(b=>b.addEventListener('click',()=>{setRoute('audit');}));
+    $$('[data-action="continueAudit"]').forEach(b=>b.addEventListener('click',()=>{const open=state.audits.find(a=>a.status==='In Progress');setRoute('audit');if(open)openAuditVerify(open.audit_id);else if(isAuthenticated())openStartAudit();}));
     $('startAuditBtn').addEventListener('click',()=>withAccess('STAFF',openStartAudit));
     $('runReportBtn').addEventListener('click',runReport); $('exportReportBtn').addEventListener('click',exportReport); $('printReportBtn').addEventListener('click',()=>window.print());
     ['reportType','reportSite','reportArea','reportCategory','reportStatus','reportDateField'].forEach(id=>$(id).addEventListener('change',()=>{ if(id==='reportSite') populateReportAreas(); if(id==='reportType'){syncReportControls();if(['asset','incomplete','warranty'].includes($('reportType').value)){$('reportDatePreset').value='all';applyReportDatePreset(true);}} }));
@@ -742,7 +777,7 @@
   function openModal(title,html,onReady,options={}){
     const version=++state.modalVersion;
     stopCamera();
-    if(workflows?.enabled()){workflows.flush();if(options.stack||title==='Pending on this device'||title==='Review pending changes'||title==='Sign in to resume'){const saved=takeModal();if(saved)modalStack.push(saved);}}
+    if(workflows?.enabled()){workflows.flush();if(options.stack||title==='On this device'||title==='Review pending changes'||title==='Sign in to resume'){const saved=takeModal();if(saved)modalStack.push(saved);}}
     state.modalCleanup?.();state.modalCleanup=null;
     const wrap=$('modalWrap'), modal=wrap.querySelector('.modal');
     if(wrap.classList.contains('hidden'))state.modalRestoreFocus=document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -754,6 +789,19 @@
     modal.scrollTop=0;$('modalBody').scrollTop=0;
     if(onReady) onReady();
     requestAnimationFrame(()=>{if(version!==state.modalVersion||wrap.classList.contains('hidden')||wrap.contains(document.activeElement)&&document.activeElement.id!=='modalCloseBtn')return;const target=wrap.querySelector('input:not([type=hidden]),select,textarea,button:not(#modalCloseBtn)');target?.focus?.({preventScroll:true});});
+  }
+  // Promise-based confirmation on the modal stack. Resolves true, 'alt' for the optional
+  // middle choice, or false when cancelled or dismissed. `body` is trusted HTML: escape inputs.
+  function confirmAction({title,body,confirmLabel='Confirm',cancelLabel='Cancel',danger=false,alt=''}){
+    return new Promise(resolve=>{
+      let settled=false;const settle=value=>{if(!settled){settled=true;resolve(value);}};
+      openModal(title,`<p class="confirm-body">${body}</p><div class="modal-actions"><button type="button" id="confirmCancel" class="btn light">${esc(cancelLabel)}</button>${alt?`<button type="button" id="confirmAlt" class="btn light">${esc(alt)}</button>`:''}<button type="button" id="confirmOk" class="btn ${danger?'danger':'blue'}">${esc(confirmLabel)}</button></div>`,()=>{
+        state.modalCleanup=()=>settle(false);
+        $('confirmCancel').onclick=()=>closeModal();
+        if(alt)$('confirmAlt').onclick=()=>{settle('alt');closeModal();};
+        $('confirmOk').onclick=()=>{settle(true);closeModal();};
+      },{size:'sm',stack:true});
+    });
   }
   function closeModal(options={}){
     const wrap=$('modalWrap'); if(wrap.classList.contains('hidden'))return;
@@ -769,7 +817,7 @@
   }
   function suspendTaskForScanReview(operationId){
     if(!workflows?.enabled())return;
-    if($('modalTitle').textContent==='Pending on this device')closeModal();
+    if($('modalTitle').textContent==='On this device')closeModal();
     workflows.flush();const snapshot={operationId,scope:queueScope,route:state.route,assetId:state.openAssetId,session:state.recognitionSession,target:state.scanUpdateTarget,context:linkedContext,scroll:window.scrollY,scannerScroll:$('page-scanner').scrollTop,modal:takeModal(),modalStack:modalStack.splice(0)};
     interruptedTasks.push(snapshot);state.recognitionSession=null;state.scanUpdateTarget=null;$('modalWrap').classList.add('hidden');document.body.classList.remove('modal-open');
   }
@@ -877,7 +925,7 @@
     finally{providerChecksBusy=false;renderConnectionPanel();}
   }
   function openSystemDiagnostics(){
-    openModal('System connection',`<div class="login-card"><div class="login-note">Results appear as each check finishes. Configured keys and loaded libraries alone do not prove a working connection.</div><div class="diag-actions"><button id="diagRunBtn" class="btn blue">Check connections</button><button id="diagProviderBtn" class="btn blue">Test OCR & AI</button><button id="diagSyncBtn" class="btn light">Sync Now</button><button id="diagConnectionBtn" class="btn light">Connection Settings</button></div><p id="diagProviderNote" class="diag-note"></p><div id="diagnosticBody"></div></div>`,()=>{
+    openModal('System connection',`<div class="login-card"><div class="login-note">Results appear as each check finishes. Configured keys and loaded libraries alone do not prove a working connection.</div><div class="diag-actions"><button id="diagRunBtn" class="btn blue">Check connections</button><button id="diagProviderBtn" class="btn blue">Test OCR & AI</button><button id="diagSyncBtn" class="btn light">Sync Now</button><button id="diagConnectionBtn" class="btn light${hasAdminRole()?'':' hidden'}">Connection Settings</button></div><p id="diagProviderNote" class="diag-note"></p><div id="diagnosticBody"></div></div>`,()=>{
       state.modalCleanup=()=>{connectionRun++;connectionPanelBusy=false;connectionHealth.cancel();};
       $('diagRunBtn').addEventListener('click',runDiagnostics);
       $('diagProviderBtn').addEventListener('click',testScanningConnections);
@@ -920,7 +968,7 @@
   function openLogin({requiredRole='STAFF',reason='',after=null}={}){
     const title=requiredRole==='ADMIN'?'Admin sign in':'Sign in to JCP AssetHub';
     const defaultReason=requiredRole==='ADMIN'?'Sign in with an Admin account to enter Admin view.':'Guests can browse and add assets. Sign in for Staff operations.';
-    openModal(title,`<div class="login-card"><div class="login-note">${esc(reason||defaultReason)}</div><form id="loginForm"><div class="field"><label>Username</label><input id="loginUsername" autocomplete="username" placeholder="e.g. printjc" required></div><div class="field login-password"><label>Password</label><input id="loginPassword" type="password" autocomplete="current-password" required></div><div class="modal-actions"><button id="loginSubmit" class="btn blue" type="submit">Sign In</button></div><div id="loginStatus" class="status-message" aria-live="polite"></div></form></div>`,()=>{
+    openModal(title,`<div class="login-card"><div class="login-note">${esc(reason||defaultReason)}</div><form id="loginForm"><div class="field"><label>Username</label><input id="loginUsername" autocomplete="username" placeholder="e.g. printjc" required></div><div class="field login-password"><label>Password</label><input id="loginPassword" type="password" autocomplete="current-password" required></div><div class="modal-actions"><button id="loginSubmit" class="btn blue" type="submit">Sign in</button><button type="button" class="btn light" data-close-modal>Continue as guest</button></div><div id="loginStatus" class="status-message" aria-live="polite"></div></form></div>`,()=>{
       const form=$('loginForm');
       form.addEventListener('submit',async e=>{
         e.preventDefault(); const btn=$('loginSubmit'); const status=$('loginStatus'); status.textContent='';
@@ -961,8 +1009,9 @@
 
   async function logout(){
     $('profileMenu').classList.remove('open');
-    saveQueue=null;queueScope='';queueRows=[];linkedContext=null;queuePaused=false;$('saveFailureNotice')?.remove();paintPendingSaves();
-    try{localStorage.removeItem('jcp_assethub_guest_drafts');}catch{}guestMemoryKey='';
+    saveQueue=null;queueScope='';queueRows=[];linkedContext=null;queuePaused=false;state.adminRefs=null;$('saveFailureNotice')?.remove();paintPendingSaves();
+    // Rotate the Guest key only when nothing unsent belongs to it; otherwise that work would be orphaned.
+    try{const key=localStorage.getItem('jcp_assethub_guest_drafts');if(key&&!(await guestWorkExists(key)))localStorage.removeItem('jcp_assethub_guest_drafts');}catch{}guestMemoryKey='';
     await withPassiveSync(async()=>{try{await AssetAPI.post('logout',{});}catch{}});
     AssetAPI.setToken('');
     activeSet=null;ordinarySave=null;saveQueue=null;queueScope='';queueRows=[];
@@ -1077,8 +1126,9 @@
   }
   function renderAssets(){
     const box=$('assetList'), header=$('assetListHeader');
-    if(simpleLinksEnabled()&&!workflows?.enabled()){state.assetGrouping=false;$('assetGroupToggle').checked=false;}
-    document.querySelector('.asset-group-tools').classList.toggle('hidden',simpleLinksEnabled());
+    // The register always lists assets; identical models are a note on the row and in details.
+    state.assetGrouping=false;$('assetGroupToggle').checked=false;
+    document.querySelector('.asset-group-tools').classList.add('hidden');
     paintPendingRegister();
     if(!state.assets.length){ header.innerHTML='';$('assetScopeCount').textContent='0 loaded physical items'; box.innerHTML='<div class="empty-state">No assets found.</div>'; return; }
     const q=$('assetSearch').value.trim().toLowerCase();
@@ -1095,13 +1145,15 @@
       if(q&&!index.searchText.get(a.asset_id)?.includes(q))return false;
       return true;
     });
-    const entries=AssetGroups.project(rows,index,{grouped:state.assetGrouping,productOnly:!!workflows?.enabled()}),visible=entries.slice(0,state.groupPageLimit);
+    const fold=simpleLinksEnabled()?AssetGroups.foldPeripherals(rows,index):{rows,threads:new Map(),matched:new Map(),attached:0};
+    state.assetThreads=fold;
+    const entries=AssetGroups.project(fold.rows,index,{grouped:false}),visible=entries.slice(0,state.groupPageLimit);
     const listMode=state.assetView!=='grid',hasGroups=entries.some(e=>e.kind!=='asset');
     box.className=(listMode?'asset-list mode-list':'asset-list mode-grid')+(state.assetGrouping?' grouped-register':'');
     header.classList.toggle('hidden',!listMode||hasGroups);
     const heading=listMode&&!hasGroups?assetHeaderHtml():'';
     if(header._markup!==heading){header.innerHTML=heading;header._markup=heading;}
-    $('assetScopeCount').textContent=AssetGroups.uniqueAssets(rows).length+' matching physical items · '+entries.length+' display row'+(entries.length===1?'':'s')+' · '+index.all.length+' loaded items. Counts follow the current filters.';
+    $('assetScopeCount').textContent=entries.length+' asset'+(entries.length===1?'':'s')+(fold.attached?' · '+fold.attached+' attached':'');
     if(!state.assetGrouping&&rows.length){
       const previous=new Map(Array.from(box.children).filter(n=>n.dataset.asset).map(n=>[n.dataset.asset,n]));
       const anchor=Array.from(previous.values()).find(n=>{const r=n.getBoundingClientRect();return r.bottom>0&&r.top<innerHeight;}),top=anchor?.getBoundingClientRect().top;
@@ -1181,11 +1233,20 @@
     return `<div></div><button data-sort="device">Device${sortMark('device')}</button><button data-sort="asset_id">Asset ID${sortMark('asset_id')}</button><button data-sort="site_name">Location${sortMark('site_name')}</button><button data-sort="assigned_to">Assigned${sortMark('assigned_to')}</button><button data-sort="status">Status${sortMark('status')}</button><button data-sort="updated_at">Updated${sortMark('updated_at')}</button><div></div>`;
   }
   function assetMainReference(a){if(!simpleLinksEnabled()||!a.parent_asset_id)return '';const main=assetGroupingIndex().byId.get(a.parent_asset_id);return '<small class="asset-main-reference">↳ '+esc(main?assetDisplayName(main):a.parent_asset_id)+'</small>';}
+  // The ID sits in the subtitle, so titles do not repeat it.
+  function assetTitle(a){return String(a?.asset_name||'').trim()||(workflows?.enabled()?AssetEditor.productName(a):'')||assetDisplayName(a);}
+  function assetThreadHtml(a){
+    const fold=state.assetThreads,kids=fold?.threads.get(a.asset_id)||[];if(!kids.length)return '';
+    const hit=fold.matched.get(a.asset_id)||new Set(),ordered=[...kids.filter(k=>hit.has(k.asset_id)),...kids.filter(k=>!hit.has(k.asset_id))],shown=ordered.slice(0,3);
+    const names=shown.map(k=>hit.has(k.asset_id)&&hit.size<kids.length?`<b>${esc(assetTitle(k))}</b>`:esc(assetTitle(k))).join(' · ');
+    return `<small class="asset-thread" title="${esc(kids.map(assetTitle).join(', '))}">↳ ${names}${kids.length>3?' · +'+(kids.length-3)+' more':''}</small>`;
+  }
+  function assetModelNote(a){const count=AssetGroups.modelSiblings(a,assetGroupingIndex());return count>1?`<small class="asset-model-note">1 of ${count} · same model</small>`:'';}
   function assetListRowHtml(a){
-    return `<button class="asset-row asset-table-row" data-asset="${esc(a.asset_id)}"><div class="asset-thumb" data-thumb="${esc(a.thumbnail_file_id||'')}">${icon(catIcon(a.category_name),'lg')}</div><div class="asset-main"><b>${esc(assetDisplayName(a))}</b><small>${esc(a.asset_id)} · ${esc(a.category_name||'Uncategorised')}</small>${assetMainReference(a)}<span class="mobile-status">${statusBadge(a.status)}</span></div><div class="asset-meta asset-id-col"><b>${esc(a.asset_id)}</b><small>${esc(a.serial||'No serial')}</small></div><div class="asset-meta"><b>${esc(a.site_name||'—')}</b><small>${esc(a.area_name||a.exact_location||'No area')}</small></div><div class="asset-meta"><b>${esc(a.assigned_to||'Unassigned')}</b><small>${esc(a.exact_location||'No exact location')}</small></div><div class="asset-status-col">${statusBadge(a.status)}</div><div class="asset-meta updated-col"><b>${esc(nowText(a.updated_at))}</b><small>${esc(formatDateCompact(a.updated_at))}</small></div><span class="arrow-btn">${icon('arrow','sm')}</span></button>`;
+    return `<button class="asset-row asset-table-row" data-asset="${esc(a.asset_id)}"><div class="asset-thumb" data-thumb="${esc(a.thumbnail_file_id||'')}">${icon(catIcon(a.category_name),'lg')}</div><div class="asset-main"><b>${esc(assetTitle(a))}</b><small>${esc(a.asset_id)} · ${esc(a.category_name||'Uncategorised')}</small>${assetMainReference(a)}${assetThreadHtml(a)}${assetModelNote(a)}<span class="mobile-status">${statusBadge(a.status)}</span></div><div class="asset-meta asset-id-col"><b>${esc(a.asset_id)}</b><small>${esc(a.serial||'No serial')}</small></div><div class="asset-meta"><b>${esc(a.site_name||'—')}</b><small>${esc(a.area_name||a.exact_location||'No area')}</small></div><div class="asset-meta"><b>${esc(a.assigned_to||'Unassigned')}</b><small>${esc(a.exact_location||'No exact location')}</small></div><div class="asset-status-col">${statusBadge(a.status)}</div><div class="asset-meta updated-col"><b>${esc(nowText(a.updated_at))}</b><small>${esc(formatDateCompact(a.updated_at))}</small></div><span class="arrow-btn">${icon('arrow','sm')}</span></button>`;
   }
   function assetGridCardHtml(a){
-    return `<button class="asset-grid-card" data-asset="${esc(a.asset_id)}"><div class="asset-grid-media" data-thumb="${esc(a.thumbnail_file_id||'')}">${icon(catIcon(a.category_name),'xl')}</div><div class="asset-grid-top"><div><b>${esc(assetDisplayName(a))}</b><small>${esc(a.asset_id)} · ${esc(a.category_name||'Uncategorised')}</small>${assetMainReference(a)}</div>${statusBadge(a.status)}</div><div class="asset-grid-facts"><span>${icon('pin','sm')}<b>${esc(a.site_name||'—')}</b> · ${esc(a.area_name||'No area')}</span><span>${icon('user','sm')}${esc(a.assigned_to||'Unassigned')}</span><span>${icon('clock','sm')}Updated ${esc(nowText(a.updated_at))}</span></div></button>`;
+    return `<button class="asset-grid-card" data-asset="${esc(a.asset_id)}"><div class="asset-grid-media" data-thumb="${esc(a.thumbnail_file_id||'')}">${icon(catIcon(a.category_name),'xl')}</div><div class="asset-grid-top"><div><b>${esc(assetTitle(a))}</b><small>${esc(a.asset_id)} · ${esc(a.category_name||'Uncategorised')}</small>${assetMainReference(a)}${assetThreadHtml(a)}${assetModelNote(a)}</div>${statusBadge(a.status)}</div><div class="asset-grid-facts"><span>${icon('pin','sm')}<b>${esc(a.site_name||'—')}</b> · ${esc(a.area_name||'No area')}</span><span>${icon('user','sm')}${esc(a.assigned_to||'Unassigned')}</span><span>${icon('clock','sm')}Updated ${esc(nowText(a.updated_at))}</span></div></button>`;
   }
   function formatDateCompact(value){const d=new Date(value);return isNaN(d)?'':d.toLocaleDateString('en-MY',{day:'2-digit',month:'short',year:'numeric'});}
 
@@ -1203,9 +1264,11 @@
     const fb=$('assetFilterBadge'),db=$('assetDateBadge'); if(fb){fb.textContent=filterCount;fb.classList.toggle('hidden',!filterCount);} if(db){db.textContent=dateCount;db.classList.toggle('hidden',!dateCount);}
     const chips=[];
     const site=state.refs.sites.find(x=>String(x.site_id)===f.site); const area=state.refs.areas.find(x=>String(x.area_id)===f.area); const cat=state.refs.categories.find(x=>String(x.category_id)===f.category);
-    if(site)chips.push(site.name); if(area)chips.push(area.name); if(cat)chips.push(cat.name); if(f.status)chips.push(f.status); if(f.assigned)chips.push('Assigned: '+f.assigned); if(f.location)chips.push('Location: '+f.location);
-    if(f.dateFrom||f.dateTo)chips.push(`${f.dateField==='created_at'?'Created':'Updated'}: ${f.dateFrom||'…'} → ${f.dateTo||'…'}`);
-    const wrap=$('assetFilterChips'); if(wrap)wrap.innerHTML=chips.length?chips.map(x=>`<span>${esc(x)}</span>`).join('')+`<button id="clearAssetFilters" type="button">Clear all</button>`:'';
+    // Each chip names one filter and removes just that filter.
+    if(site)chips.push([site.name,['site','area']]); if(area)chips.push([area.name,['area']]); if(cat)chips.push([cat.name,['category']]); if(f.status)chips.push([f.status,['status']]); if(f.assigned)chips.push(['Assigned: '+f.assigned,['assigned']]); if(f.location)chips.push(['Location: '+f.location,['location']]);
+    if(f.dateFrom||f.dateTo)chips.push([`${f.dateField==='created_at'?'Created':'Updated'}: ${f.dateFrom||'…'} → ${f.dateTo||'…'}`,['dateFrom','dateTo']]);
+    const wrap=$('assetFilterChips'); if(wrap)wrap.innerHTML=chips.length?chips.map(([x,keys])=>`<span>${esc(x)}<button type="button" class="chip-remove" data-clear-filter="${keys.join(',')}" aria-label="Remove filter ${esc(x)}">×</button></span>`).join('')+`<button id="clearAssetFilters" type="button">Clear all</button>`:'';
+    wrap?.querySelectorAll('[data-clear-filter]').forEach(b=>b.onclick=()=>{for(const k of b.dataset.clearFilter.split(','))state.assetFilters[k]='';renderAssets();});
     $('clearAssetFilters')?.addEventListener('click',()=>{state.assetFilters={site:'',area:'',category:'',status:'',assigned:'',location:'',dateField:'updated_at',dateFrom:'',dateTo:''};renderAssets();});
     if($('assetMobileSort'))$('assetMobileSort').value=`${state.assetSort.key}:${state.assetSort.dir}`;
   }
@@ -1270,7 +1333,11 @@
   function renderDashboard(){
     const d=state.boot?.dashboard||{};
     $('statusStrip').innerHTML=`<button class="status-item ${d.open_repairs?'danger':'good'}" data-go2="maintenance"><span class="status-icon">${icon('tools','sm')}</span><span><b>${d.open_repairs||0} open repairs</b><small>${d.open_repairs?'Needs follow-up':'No open repair cases'}</small></span></button><button class="status-item ${d.warranty_attention?'warn':'good'}" data-go2="reports"><span class="status-icon">${icon('clock','sm')}</span><span><b>${d.warranty_attention||0} warranty attention</b><small>Expired or within 90 days</small></span></button><button class="status-item ${d.active_audits?'warn':'good'}" data-go2="audit"><span class="status-icon">${icon('check','sm')}</span><span><b>${d.active_audits||0} active audits</b><small>${d.active_audits?'Continue verification':'No active audit'}</small></span></button>`;
-    $$('[data-go2]').forEach(b=>b.addEventListener('click',()=>setRoute(b.dataset.go2)));
+    // Each tile opens the view that answers it, already filtered.
+    $$('[data-go2]').forEach(b=>b.addEventListener('click',()=>{const go=b.dataset.go2;setRoute(go);
+      if(go==='maintenance'){state.maintenanceFilters={...state.maintenanceFilters,status:'Active'};renderMaintenance();}
+      if(go==='reports'&&$('reportType')){$('reportType').value='warranty';$('reportType').dispatchEvent(new Event('change'));}
+      if(go==='audit'){const open=state.audits.find(a=>a.status==='In Progress');if(open)openAuditVerify(open.audit_id);}}));
     const acts=d.recent_activity||[]; $('activityList').innerHTML=acts.length?acts.slice(0,8).map(r=>`<div class="activity-item"><div class="activity-icon">${icon(activityIcon(r.action),'sm')}</div><div class="activity-copy"><b>${esc(activityLabel(r.action))}</b><span>${esc(r.asset_id||'')} ${activityDetails(r.details)}</span></div><span class="activity-time">${esc(nowText(r.timestamp))}</span></div>`).join(''):'<div class="empty-state compact">No activity yet.</div>';
     const recent=d.recent_assets||[]; $('recentAssets').innerHTML=recent.length?recent.map(a=>`<button class="compact-asset" data-recent="${esc(a.asset_id)}"><div class="compact-thumb" data-thumb="${esc(a.thumbnail_file_id||'')}">${icon(catIcon(a.category_name),'lg')}</div><div><b>${esc(a.brand)} ${esc(a.model)}</b><small>${esc(a.site_name)} · ${esc(a.area_name||'No area')}</small></div><span class="arrow-btn">${icon('arrow','sm')}</span></button>`).join(''):'<div class="empty-state compact">No assets yet.</div>';
     $$('#recentAssets [data-recent]').forEach(b=>b.addEventListener('click',()=>openAsset(b.dataset.recent))); hydrateThumbs($('recentAssets'));
@@ -1357,7 +1424,15 @@
       return cached;
     }
   }
-  function closeDrawer(){ const wasOpen=!!state.openAssetId;state.drawerVersion++;state.openAssetId=''; $('assetDrawer').classList.remove('open'); $('drawerBackdrop').classList.add('hidden'); document.body.classList.remove('drawer-open');if(wasOpen)resumeScannerCamera(); }
+  // Asset details can be reached from another asset or a ticket. Closing steps back one
+  // level along that path; closeDrawer itself always leaves details completely.
+  function openNestedAsset(id){if(state.openAssetId&&state.openAssetId!==id)(state.drawerTrail||=[]).push(state.openAssetId);return openAsset(id);}
+  function dismissDrawer(){
+    const trail=state.drawerTrail||[],step=trail.pop();
+    if(typeof step==='string')return void openAsset(step);
+    closeDrawer();state.drawerTrail=trail;step?.();
+  }
+  function closeDrawer(){ const wasOpen=!!state.openAssetId;state.drawerTrail=[];state.drawerVersion++;state.openAssetId=''; $('assetDrawer').classList.remove('open'); $('drawerBackdrop').classList.add('hidden'); document.body.classList.remove('drawer-open');if(wasOpen)resumeScannerCamera(); }
   async function renderDrawer(a){
     if(!a||String(state.openAssetId)!==String(a.asset_id)||!$('assetDrawer').classList.contains('open'))return;
     const mainImage=a.images?.find(x=>String(x.image_id)===String(a.main_image_id)&&String(x.active)!=='false')||a.images?.find(x=>String(x.image_type)==='main'&&String(x.active)!=='false')||null;
@@ -1365,7 +1440,11 @@
     const custom=(a.custom_fields||[]).filter(f=>f.value).map(f=>`<div class="detail-field"><label>${esc(f.label)}</label><div>${esc(f.value)}</div></div>`).join('');
     const pd=a.private_details||null;
     const privateSection=pd&&Object.values(pd).some(Boolean)?`<div class="detail-section staff-private-section"><div class="staff-private-head"><div><h3>Staff-only information</h3><small>Visible only to signed-in Staff and Admin.</small></div><span class="private-badge">STAFF / ADMIN</span></div><div class="detail-grid"><div class="detail-field"><label>Mobile number</label><div>${esc(pd.mobile_number||'—')}</div></div><div class="detail-field"><label>Registered owner</label><div>${esc(pd.register_owner||'—')}</div></div><div class="detail-field"><label>Account number</label><div>${esc(pd.account_number||'—')}</div></div><div class="detail-field"><label>Amount paid</label><div>${esc(pd.amount_paid||'—')}</div></div></div></div>`:'';
-    $('drawerBody').innerHTML=`<div class="detail-hero"><div id="drawerMainPhoto" class="detail-photo">${icon(catIcon(a.category_name),'xl')}</div><div class="detail-title"><h2>${esc(assetDisplayName(a))}</h2><p>${esc(a.asset_id)} · ${esc(a.category_name)}</p>${statusBadge(a.status)}<div class="actions asset-primary-actions" style="margin-top:10px"><button id="editAssetDrawer" class="btn blue sm">${icon('edit','sm')}Edit Asset</button><button id="reportAssetIssue" class="btn light sm">${icon('tools','sm')}Report Issue</button></div><details class="asset-drawer-more"><summary>More actions</summary><div class="actions"><button id="moveAssetDrawer" class="btn light sm">${icon('pin','sm')}Move / Assign</button><button id="assetQrBtn" class="btn light sm">${icon('scan','sm')}QR Label</button>${isAuthenticated()?`<button id="scanUpdateDrawer" class="btn light sm">${icon('scan','sm')}Scan to Update</button>`:''}${isAuthenticated()?`<button id="mergeAssetDrawer" class="btn light sm">${icon('refresh','sm')}Merge / Reconcile</button>`:''}</div></details></div></div><div class="detail-section"><h3>Placement & assignment</h3><div class="detail-grid"><div class="detail-field"><label>Site</label><div>${esc(a.site_name||'—')}</div></div><div class="detail-field"><label>Area</label><div>${esc(a.area_name||'—')}</div></div><div class="detail-field"><label>Exact location</label><div>${esc(a.exact_location||'—')}</div></div><div class="detail-field"><label>Assigned to</label><div>${esc(a.assigned_to||'—')}</div></div></div></div><div class="detail-section"><h3>Device information</h3><div class="detail-grid"><div class="detail-field"><label>Serial</label><div>${esc(a.serial||'—')}</div></div><div class="detail-field"><label>Specifications</label><div>${esc(a.specifications||'—')}</div></div>${custom}</div></div>${privateSection}<div class="detail-section"><div class="panel-head"><div><h3>Images</h3><small>Main, label, condition, damage and repair photos.</small></div><div class="photo-picker-actions"><button id="addAssetImage" class="btn light sm">${icon('camera','sm')}Take photo</button><button id="addAssetGallery" class="btn light sm">${icon('image','sm')}Choose from gallery</button></div></div><div id="drawerGallery" class="gallery"></div></div><div class="detail-section"><h3>Maintenance</h3><div>${(a.maintenance||[]).slice(0,5).map(m=>`<div class="ref-row"><div><b>${esc(m.issue)}</b><small>${esc(m.status)} · ${esc(nowText(m.reported_at))}</small></div>${isAuthenticated()?`<button class="btn light sm" data-drawer-maint="${esc(m.maintenance_id)}">${icon('edit','sm')}Edit</button>`:''}</div>`).join('')||'<div class="empty-state compact">No maintenance history.</div>'}</div></div><div class="detail-section"><h3>Movement history</h3><div>${(a.movements||[]).slice(0,5).map(m=>`<div class="ref-row"><div><b>${esc(m.from_site||'—')} → ${esc(m.to_site||'—')}</b><small>${esc(m.from_area||'')} → ${esc(m.to_area||'')} · ${esc(nowText(m.moved_at))}</small></div></div>`).join('')||'<div class="empty-state compact">No movement history.</div>'}</div></div><div class="detail-section"><h3>Activity log</h3><div>${(a.activity||[]).slice(0,8).map(x=>`<div class="ref-row"><div><b>${esc(activityLabel(x.action))}</b><small>${esc(x.user||'Guest')} · ${esc(nowText(x.timestamp))}</small></div></div>`).join('')||'<div class="empty-state compact">No activity yet.</div>'}</div></div>`;
+    $('drawerBody').innerHTML=`<div class="detail-hero"><div id="drawerMainPhoto" class="detail-photo">${icon(catIcon(a.category_name),'xl')}</div><div class="detail-title"><h2>${esc(assetTitle(a))}</h2><p>${esc(a.asset_id)} · ${esc(a.category_name)}</p>${statusBadge(a.status)}${drawerActionsHtml(a)}</div></div><div class="detail-section"><h3>Placement & assignment</h3><div class="detail-grid"><div class="detail-field"><label>Site</label><div>${esc(a.site_name||'—')}</div></div><div class="detail-field"><label>Area</label><div>${esc(a.area_name||'—')}</div></div><div class="detail-field"><label>Exact location</label><div>${esc(a.exact_location||'—')}</div></div><div class="detail-field"><label>Assigned to</label><div>${esc(a.assigned_to||'—')}</div></div></div></div><div class="detail-section"><h3>Device information</h3><div class="detail-grid"><div class="detail-field"><label>Serial</label><div>${esc(a.serial||'—')}</div></div><div class="detail-field"><label>Specifications</label><div>${esc(a.specifications||'—')}</div></div>${custom}</div></div>${privateSection}<div class="detail-section"><div class="panel-head"><div><h3>Images</h3><small>Main, label, condition, damage and repair photos.</small></div><div class="photo-picker-actions"><button id="addAssetImage" class="btn light sm">${icon('camera','sm')}Take photo</button><button id="addAssetGallery" class="btn light sm">${icon('image','sm')}Choose from gallery</button></div></div><div id="drawerGallery" class="gallery"></div></div><div class="detail-section"><h3>Maintenance</h3><div>${(a.maintenance||[]).slice(0,5).map(m=>`<div class="ref-row"><div><b>${esc(m.issue)}</b><small>${esc(m.status)} · ${esc(nowText(m.reported_at))}</small></div>${isAuthenticated()?`<button class="btn light sm" data-drawer-maint="${esc(m.maintenance_id)}">${icon('edit','sm')}Edit</button>`:''}</div>`).join('')||'<div class="empty-state compact">No maintenance history.</div>'}</div></div><div class="detail-section"><h3>Movement history</h3><div>${(a.movements||[]).slice(0,5).map(m=>`<div class="ref-row"><div><b>${esc(m.from_site||'—')} → ${esc(m.to_site||'—')}</b><small>${esc(m.from_area||'')} → ${esc(m.to_area||'')} · ${esc(nowText(m.moved_at))}</small></div></div>`).join('')||'<div class="empty-state compact">No movement history.</div>'}</div></div><div class="detail-section"><h3>Activity log</h3><div>${(a.activity||[]).slice(0,8).map(x=>`<div class="ref-row"><div><b>${esc(activityLabel(x.action))}</b><small>${esc(x.user||'Guest')} · ${esc(nowText(x.timestamp))}</small></div></div>`).join('')||'<div class="empty-state compact">No activity yet.</div>'}</div></div>`;
+    // On phones the actions live in a bar at the bottom of the drawer, within thumb reach.
+    const drawerFooter=$('drawerFooter'),actionBar=$('drawerBody').querySelector('.detail-title .action-bar');drawerFooter.replaceChildren();
+    if(actionBar&&window.matchMedia('(max-width:760px)').matches)drawerFooter.append(actionBar);
+    drawerFooter.hidden=!drawerFooter.childElementCount;
     if(!simpleLinksEnabled()){
     const groupInfo=document.createElement('div');groupInfo.className='group-detail';
     groupInfo.innerHTML=`${a.set_id?`<b>Equipment set: ${esc(a.set_name||a.set_id)}</b><small>This item's serial, placement and history belong to this unit.</small><button id="viewAssetSet" class="btn light sm">Show set in asset list</button>`:'<small>This item is not assigned to an equipment set.</small>'}${isAuthenticated()?'<button id="linkDrawerSet" class="btn light sm">'+(a.set_id?'Remove from set':'Add to equipment set')+'</button>':''}`;
@@ -1375,7 +1454,7 @@
     $('linkDrawerSet')?.addEventListener('click',()=>openGroupEntry({mode:a.set_id?'detach':'attach',set:a.set_id?{id:a.set_id,name:a.set_name}:undefined,units:[{existing_asset_id:a.asset_id,source:'existing'}]}));
     if(isAuthenticated()){
       const another=document.createElement('button');another.id='addAnotherDrawer';another.className='btn light sm';another.textContent='Add same model';another.addEventListener('click',()=>openGroupEntry({mode:'same',template:AssetGroups.template(a)}));
-      $('drawerBody').querySelector('.asset-drawer-more .actions').append(another);
+      document.querySelector('#assetDrawer .asset-drawer-more .actions')?.append(another);
     }
     }
     // Keep the essential placement visible; collapse supporting detail only on phones.
@@ -1392,12 +1471,13 @@
     $('editAssetDrawer')?.addEventListener('click',()=>withAccess('STAFF',()=>openAssetForm(a)));
     $('moveAssetDrawer')?.addEventListener('click',()=>withAccess('STAFF',()=>openMoveAssign(a)));
     $('assetQrBtn')?.addEventListener('click',()=>showAssetQr(a));
-    $('reportAssetIssue').addEventListener('click',()=>withAccess('STAFF',()=>openIssueForm(a.asset_id)));
-    $('scanUpdateDrawer')?.addEventListener('click',()=>withAccess('STAFF',()=>{beginScanner({target:{asset_id:a.asset_id,brand:a.brand,model:a.model},context:null});toast('Scan to update '+a.asset_id+'.');}));
+    $('reportAssetIssue')?.addEventListener('click',()=>withAccess('STAFF',()=>openIssueForm(a.asset_id)));
+    $('scanUpdateDrawer')?.addEventListener('click',()=>withAccess('STAFF',()=>beginScanner({target:{asset_id:a.asset_id,brand:a.brand,model:a.model},context:null})));
     $('mergeAssetDrawer')?.addEventListener('click',()=>withAccess('STAFF',()=>openManualMerge(a)));
     $$('[data-drawer-maint]').forEach(b=>b.addEventListener('click',()=>openMaintenanceManage((a.maintenance||[]).find(m=>String(m.maintenance_id)===String(b.dataset.drawerMaint)))));
-    $('addAssetImage').addEventListener('click',()=>withAccess('STAFF',()=>openImageUpload(a.asset_id,'camera')));
-    $('addAssetGallery').addEventListener('click',()=>withAccess('STAFF',()=>openImageUpload(a.asset_id,'gallery')));
+    bindDrawerLifecycle(a);
+    $('addAssetImage')?.addEventListener('click',()=>withAccess('STAFF',()=>openImageUpload(a.asset_id,'camera')));
+    $('addAssetGallery')?.addEventListener('click',()=>withAccess('STAFF',()=>openImageUpload(a.asset_id,'gallery')));
     workflows?.enabled()&&workflows.decorateDetail(a);
     // Image delivery may finish after another linked record has replaced this drawer.
     const version=state.drawerVersion,hero=$('drawerBody').firstElementChild,scope=detailStoreKey('');
@@ -1550,35 +1630,19 @@
       const inputs=Array.from(scope.querySelectorAll('input')).filter(el=>['category','brand','model'].includes(fieldOf(el)));
       for(const input of inputs){
         if(input.dataset.assistBound)return;input.dataset.assistBound='1';
-        const choices=document.createElement('div');choices.className='input-suggestions';choices.setAttribute('aria-live','polite');
-        (input.closest('.field,.v27-edit-field')||input.parentElement).append(choices);
-        const render=()=>{
-          choices.replaceChildren();if(input.disabled)return;
+        // Spelling and dictionary matches join the shared list under the input.
+        AssetSuggest.attach(input,()=>{
           const section=input.closest('[data-unit-card],.group-common')||scope;
           const brand=inputs.find(el=>fieldOf(el)==='brand'&&section.contains(el))?.value||'';
-          const field=fieldOf(input);
-          const suggestions=engine.suggest(field,input.value,{categories:state.refs.categories,brand,assets:state.assets});
-          for(const suggestion of suggestions){
-            if(suggestion.value===input.value)continue;
-            const button=document.createElement('button');button.type='button';button.className='btn light sm';
-            button.textContent=suggestion.value;button.title=suggestion.reason;
-            button.addEventListener('click',()=>{
-              if(input.disabled)return;
-              input.value=suggestion.value;input.dispatchEvent(new Event('input',{bubbles:true}));render();
-            });choices.append(button);
-          }
-        };
-        input.addEventListener('input',render);
-        const section=input.closest('[data-unit-card],.group-common')||scope;
-        if(fieldOf(input)==='model')inputs.find(el=>fieldOf(el)==='brand'&&section.contains(el))?.addEventListener('input',render);
-        render();
+          return engine.suggest(fieldOf(input),input.value,{categories:state.refs.categories,brand,assets:state.assets}).map(x=>({value:x.value,hint:x.reason}));
+        },{priority:1,filter:false,key:'assist'});
       }
     };
     attach(window.AssetInput?.current);
     if(!window.AssetInput?.current)window.AssetInput?.ready().then(attach);
   }
   // The current scanner remains authoritative; this layer only adds entry context and durable saves.
-  let linkedContext=null,queueProtocol='',queuePaused=false,queueCredential='',guestMemoryKey='',linkContextEpoch=0,queueStorageError='';
+  let linkedContext=null,queueProtocol='',queuePaused=false,queueCredential='',guestMemoryKey='',linkContextEpoch=0,queueStorageError='',draftCount=0;
   const notifiedSaves=new Map();
   const simpleLinksEnabled=()=>!!state.boot?.features?.asset_links;
   const localPhotoUrls=new Map();
@@ -1645,6 +1709,12 @@
     state.recognitionSession={photos:e.photos.map((p,i)=>({...p,file:row.photos[i].file,main:row.photos[i].main,url:URL.createObjectURL(row.photos[i].file),processing:false,codeBusy:false})),overrides:e.overrides||{},touched:e.touched||{},resolutions:e.resolutions||{},entry:e.entry,matches:e.matches||[],matchVersion:0,draftId:row.id};
     showUniversalRecognition();setRoute('scanner');
   }
+  async function guestWorkExists(key){
+    const read=(name,store)=>new Promise(resolve=>{try{const r=indexedDB.open(name);r.onupgradeneeded=()=>{r.transaction.abort();resolve([]);};r.onerror=()=>resolve([]);r.onsuccess=()=>{const db=r.result;if(!db.objectStoreNames.contains(store)){db.close();return resolve([]);}const q=db.transaction(store,'readonly').objectStore(store).getAll();q.onsuccess=()=>{db.close();resolve(q.result||[]);};q.onerror=()=>{db.close();resolve([]);};};}catch{resolve([]);}});
+    const mine=r=>String(r.scope||'').includes('guest:'+key);
+    const [ops,drafts]=await Promise.all([read('jcp-assethub-operations','operations'),read('jcp-assethub-editor-drafts','drafts')]);
+    return ops.some(r=>mine(r)&&r.state!=='Saved')||drafts.some(mine);
+  }
   function guestQueueKey(){try{let key=localStorage.getItem('jcp_assethub_guest_drafts');if(!key){key=crypto.randomUUID();localStorage.setItem('jcp_assethub_guest_drafts',key);}return key;}catch{return guestMemoryKey||(guestMemoryKey=crypto.randomUUID());}}
   function setLinkedContext(context){
     linkedContext=context;linkContextEpoch++;
@@ -1652,7 +1722,6 @@
   }
   function configureSaveQueue(){
     if(!simpleLinksEnabled()){queueProtocol='legacy';return configureLegacySaveQueue();}
-    if(workflows?.enabled()&&localStorage.getItem('jcp_assethub_asset_grouping')===null){state.assetGrouping=true;$('assetGroupToggle').checked=true;}
     const detailScope=detailStoreKey('');
     if(detailScope!==activeDetailScope){activeDetailScope=detailScope;clearSensitiveDetailCache();state.detailRequests.clear();closeDrawer();}
     const endpoint=AssetAPI.getUrl(),credential=AssetAPI.getToken(),guest=isGuest();
@@ -1692,22 +1761,36 @@
     window.AssetStore?.get?.('entry-main:'+encodeURIComponent(scope)).then(context=>{if(saveQueue===current&&contextEpoch===linkContextEpoch&&context){linkedContext=context;renderLinkContext();}});
     current.rows().then(rows=>{if(saveQueue!==current||queueScope!==scope)return;queueRows=rows;paintLinkedPendingSaves();if(isAuthenticated())for(const row of rows){if(row.state==='Retry'&&/AUTH_REQUIRED|SESSION_EXPIRED|USER_DISABLED/.test(row.error))void current.retry(row.id);}void current.pump();}).catch(err=>toast('Pending items could not be read. '+humanError(err),'error'));
     paintLinkedPendingSaves();
-    if(workflows?.enabled()){for(const id of ['addAssetBtn','addAssetGroupBtn'])$(id)?.classList.add('hidden');let manual=$('scannerManualEntry');if(!manual){manual=document.createElement('button');manual.id='scannerManualEntry';manual.type='button';manual.className='btn light scanner-manual-entry';manual.textContent='Photo / manual entry';document.querySelector('#page-scanner .scanner-card').append(manual);}manual.onclick=()=>{stopCamera();openAssetForm({...linkedContext?.placement,custom_fields:Object.entries(linkedContext?.custom||{}).map(([field_id,value])=>({field_id,value})),_mainContext:linkedContext||undefined,_photoOnly:true});};}
+    if(workflows?.enabled()){$('addAssetGroupBtn')?.classList.add('hidden');$('addAssetBtn')?.classList.remove('hidden');let manual=$('scannerManualEntry');if(!manual){manual=document.createElement('button');manual.id='scannerManualEntry';manual.type='button';manual.className='btn light scanner-manual-entry';manual.textContent='Photo / manual entry';document.querySelector('#page-scanner .scanner-card').append(manual);}manual.onclick=()=>{stopCamera();openAssetForm({...linkedContext?.placement,custom_fields:Object.entries(linkedContext?.custom||{}).map(([field_id,value])=>({field_id,value})),_mainContext:linkedContext||undefined,_photoOnly:true});};}
   }
   function paintPendingSaves(){return simpleLinksEnabled()?paintLinkedPendingSaves():paintLegacyPendingSaves();}
+  // Everything kept on this device (drafts, unsent saves, failures) is reached from one place:
+  // a count on the Assets navigation item and a summary bar at the top of the Assets page.
+  function paintLocalWorkEntry(){
+    const pending=queueRows.filter(r=>r.state!=='Saved'),attention=pending.filter(r=>r.state==='Retry').length,total=pending.length+draftCount;
+    for(const nav of document.querySelectorAll('[data-route="assets"],[data-mobile-route="assets"]')){
+      let badge=nav.querySelector('.nav-count');if(!badge){badge=document.createElement('span');badge.className='nav-count';nav.append(badge);}
+      badge.textContent=total>99?'99+':String(total);badge.hidden=!total;badge.classList.toggle('attention',!!attention||queuePaused&&!!pending.length);
+      badge.setAttribute('aria-label',total+' items on this device'+(attention?', '+attention+' need attention':''));
+    }
+    let bar=$('localWorkBar');
+    if(!bar){bar=document.createElement('div');bar.id='localWorkBar';bar.className='local-work-bar';bar.innerHTML='<div><b data-local-title></b><small data-local-detail></small></div><button type="button" id="pendingSavesBtn" class="btn light sm">Review</button>';document.querySelector('#page-assets .asset-toolbar').before(bar);bar.querySelector('button').onclick=openLinkedPendingSaves;}
+    bar.hidden=!total;bar.classList.toggle('attention',!!attention||queuePaused&&!!pending.length);
+    const parts=[];if(attention)parts.push(attention+' need'+(attention===1?'s':'')+' attention');if(pending.length-attention)parts.push(pending.length-attention+' waiting to sync');if(draftCount)parts.push(draftCount+' draft'+(draftCount===1?'':'s'));
+    bar.querySelector('[data-local-title]').textContent=queuePaused&&pending.length?'Syncing paused: sign in to continue':'On this device';
+    bar.querySelector('[data-local-detail]').textContent=parts.join(' · ');
+  }
   function paintLinkedPendingSaves(){
-    let button=$('pendingSavesBtn');
-    if(!button){button=document.createElement('button');button.id='pendingSavesBtn';button.type='button';button.className='btn light sm pending-saves-button';document.querySelector('.topbar .top-spacer').before(button);}
-    workflows?.onQueueChange();const pending=queueRows.filter(r=>r.state!=='Saved');button.onclick=openLinkedPendingSaves;button.textContent=pending.length+' pending';button.classList.toggle('hidden',!pending.length);
-    let scanButton=$('scannerPendingBtn');if(!scanButton){scanButton=document.createElement('button');scanButton.id='scannerPendingBtn';scanButton.className='btn light sm scanner-pending-button';scanButton.type='button';$('scannerConnectionBtn').after(scanButton);}
-    scanButton.onclick=openLinkedPendingSaves;scanButton.textContent=button.textContent;scanButton.classList.toggle('hidden',!pending.length);
+    workflows?.onQueueChange();const pending=queueRows.filter(r=>r.state!=='Saved');
+    paintLocalWorkEntry();
     if($('linkedPendingItems'))paintLinkedPendingItems();
     paintPendingRegister();renderLinkedDetailSection();
-    if(queuePaused){showAuthPauseNotice();return;}
+    if(queuePaused){if(pending.length)showAuthPauseNotice();else $('saveFailureNotice')?.remove();return;}
+    // One short notice per new failure; the item itself stays listed under On this device.
     for(const row of pending){
       if(!row.error){notifiedSaves.delete(row.id);continue;}
       if(notifiedSaves.get(row.id)===row.error)continue;notifiedSaves.set(row.id,row.error);
-      showSaveFailure(row);
+      toast(assetDisplayName(row.params)+' could not sync. Review it under Assets › On this device.','error');
     }
   }
   function showQueueStorageFailure(){
@@ -1717,27 +1800,51 @@
   }
   function showAuthPauseNotice(){
     let notice=$('saveFailureNotice');if(notice?.dataset.authPause==='true')return;if(!notice){notice=document.createElement('aside');notice.id='saveFailureNotice';notice.className='save-failure-notice';notice.setAttribute('role','alert');document.body.append(notice);}notice.dataset.authPause='true';
-    notice.innerHTML='<div><b>Pending saves are paused</b><small>Sign in to the same account to resume.</small></div><button id="signInPendingNotice" class="btn light sm">Sign in</button><button id="dismissPendingNotice" class="iconbtn" aria-label="Dismiss notification">×</button>';
+    notice.innerHTML=`<div><b>Syncing is paused</b><small>Sign in as ${esc(state.user?.username||state.user?.email||'the same account')} to continue. Items stay on this device until then.</small></div><button id="signInPendingNotice" class="btn light sm">Sign in</button><button id="dismissPendingNotice" class="iconbtn" aria-label="Dismiss notification">×</button>`;
     $('signInPendingNotice').onclick=()=>openLogin();$('dismissPendingNotice').onclick=()=>notice.remove();
   }
   function openLinkedPendingSaves(){
-    if(queuePaused){
-      openModal('Sign in to resume',`<p>Your pending items are paused. Sign in to the same account to view and resume them.</p><div class="modal-actions"><button id="resumePendingSignIn" class="btn blue">Sign in</button></div>`,()=>{$('resumePendingSignIn').onclick=()=>openLogin();},{size:'sm'});return;
+    openModal('On this device',`${queuePaused?`<div class="login-note">Syncing is paused. <button id="resumePendingSignIn" class="link-btn" type="button">Sign in</button> to continue. You can still discard items.</div>`:''}<div id="linkedPendingItems"></div><section class="local-drafts"><div class="panel-head"><h3>Drafts</h3><button type="button" id="discardAllDrafts" class="btn light sm danger-text" hidden>Discard all</button></div><div id="localDraftItems"></div></section><p class="pending-footnote">You can close this and keep working. Uploads may pause when the app is closed or your phone suspends it.</p>`,()=>{if($('resumePendingSignIn'))$('resumePendingSignIn').onclick=()=>openLogin();paintLinkedPendingItems();void workflows?.paintDrafts?.($('localDraftItems'));});
+  }
+  // What a person can do with one queued item depends on whether the server may already have it.
+  function pendingItemActions(r,waiting,main){
+    const out=[],notStarted=/(?:BATCH|OPERATION)_NOT_STARTED:/.test(r.error||'');
+    const button=(data,label,kind='light')=>`<button type="button" class="btn ${kind} sm" data-${data}="${esc(r.id)}">${label}</button>`;
+    if(r.state==='Retry'&&!queuePaused){
+      if(r.asset){out.push(button('retry-save','Retry photos'));out.push(button('finish-photos','Finish without these photos'));}
+      else if(notStarted)out.push(button('review-save','Edit and resend','blue'));
+      else{out.push(button('retry-save','Retry','blue'));out.push(button('reopen-save','Edit and resend'));}
     }
-    openModal('Pending on this device','<div id="linkedPendingItems"></div><p class="pending-footnote">You can close this and keep working. Uploads may pause when the app is closed or your phone suspends it.</p>',paintLinkedPendingItems);
+    if(waiting&&main?.state==='Retry')out.push(button('review-main','Review main asset'));
+    if(waiting)out.push(button('unlink-save','Save without link'));
+    if(r.asset)out.push(`<button type="button" class="btn light sm" data-open-saved="${esc(r.asset.asset_id)}">View asset</button>`);
+    else out.push(button('discard-save','Discard','light danger-text'));
+    return out.join('');
+  }
+  function pendingItemHtml(r){
+    const main=r.parent&&queueRows.find(p=>p.id===r.parent),waiting=!!r.parent&&!main?.asset;
+    const photos=r.photos||[],sent=photos.filter(p=>p.uploaded).length;
+    const reason=waiting?'Waiting for its main asset to save first.':r.state==='Retry'?humanError(r.error):!navigator.onLine?'Offline. It will sync when you reconnect.':r.state==='Uploading photos'?'Uploading photos.':r.state==='Waiting for photo'?'Waiting for its photo to upload.':'Sending details.';
+    return `<article class="pending-save-item${r.state==='Retry'?' attention':''}"><div class="panel-head"><div><b>${esc(assetDisplayName(r.params))}</b><small>${esc(r.params.serial||'No serial recorded')}${r.asset?' · '+esc(r.asset.asset_id):''}</small></div><span class="pending-status">${esc(r.state==='Retry'?'Needs attention':waiting?'Waiting':r.state)}</span></div><div class="pending-save-progress"><span>Details</span><b>${r.asset?'Saved':'Not saved yet'}</b><span>Photos</span><b>${photos.length?sent+' of '+photos.length+' uploaded':'None'}</b></div><p class="${r.state==='Retry'?'pending-save-error':'input-hint'}">${esc(reason)}</p><div class="actions">${pendingItemActions(r,waiting,main)}</div></article>`;
   }
   function paintLinkedPendingItems(){
     const list=$('linkedPendingItems');if(!list)return;
-    if(queuePaused){list.innerHTML='<p>Sign in to the same account to view pending items.</p>';return;}
-    const rows=queueRows.filter(r=>r.state!=='Saved');
-    list.innerHTML=rows.map(r=>{
-      const main=r.parent&&queueRows.find(p=>p.id===r.parent),waiting=!!r.parent&&!main?.asset;
-      const photos=r.photos||[],sent=photos.filter(p=>p.uploaded).length;
-      return `<article class="pending-save-item"><div class="panel-head"><div><b>${esc(assetDisplayName(r.params))}</b><small>${esc(r.params.serial||'No serial recorded')}${r.asset?' · '+esc(r.asset.asset_id):''}</small></div><span class="pending-status">${esc(waiting?'Waiting for main asset':r.state)}</span></div><div class="pending-save-progress"><span>Details</span><b>${r.asset?'Saved':waiting?'Waiting for main asset':r.state==='Retry'?'Needs review':'Pending'}</b><span>Photos</span><b>${photos.length?sent+' of '+photos.length+' uploaded':'None'}</b></div>${waiting?'<p>The main asset must be confirmed before this item can link to it.</p>':''}${r.error?`<p class="pending-save-error">${esc(humanError(r.error))}</p><div class="actions"><button class="btn light sm" data-retry-save="${esc(r.id)}">${r.asset?'Retry remaining photos':'Retry / reconcile'}</button>${!r.asset&&/(?:BATCH|OPERATION)_NOT_STARTED:/.test(r.error)?`<button class="btn blue sm" data-review-save="${esc(r.id)}">Review draft</button>`:''}</div>`:''}${r.asset?`<button class="btn light sm" data-open-saved="${esc(r.asset.asset_id)}">View asset</button>`:''}${waiting&&main?.state==='Retry'?`<button class="btn light sm" data-review-main="${esc(main.id)}">Review main asset</button>`:''}</article>`;
-    }).join('')||'<p>No pending items.</p>';
+    const rows=queueRows.filter(r=>r.state!=='Saved'),attention=rows.filter(r=>r.state==='Retry'),syncing=rows.filter(r=>r.state!=='Retry');
+    list.innerHTML=(attention.length?`<section><h3>Needs attention</h3>${attention.map(pendingItemHtml).join('')}</section>`:'')+(syncing.length?`<section><h3>Waiting to sync</h3>${syncing.map(pendingItemHtml).join('')}</section>`:'')+(!rows.length?'<p class="input-hint">Nothing is waiting to sync.</p>':'');
     list.querySelectorAll('[data-retry-save]').forEach(b=>b.onclick=()=>{notifiedSaves.delete(b.dataset.retrySave);$('saveFailureNotice')?.remove();void saveQueue.retry(b.dataset.retrySave);});
+    list.querySelectorAll('[data-reopen-save]').forEach(b=>b.onclick=async()=>{try{const row=await saveQueue.reopen(b.dataset.reopenSave);notifiedSaves.delete(row.id);reviewQueuedSave(row);}catch(err){toast(humanError(err),'error');}});
+    list.querySelectorAll('[data-discard-save]').forEach(b=>b.onclick=()=>void discardQueuedSave(b.dataset.discardSave));
+    list.querySelectorAll('[data-finish-photos]').forEach(b=>b.onclick=async()=>{const r=queueRows.find(x=>x.id===b.dataset.finishPhotos),left=(r?.photos||[]).filter(p=>!p.uploaded).length;if(await confirmAction({title:'Finish without these photos?',body:'The asset is already saved. '+left+' photo'+(left===1?'':'s')+' that did not upload will be removed from this device.',confirmLabel:'Finish',danger:true})!==true)return;try{await saveQueue.finishWithoutPhotos(r.id);notifiedSaves.delete(r.id);toast('Saved without the remaining photos.');}catch(err){toast(humanError(err),'error');}});
+    list.querySelectorAll('[data-unlink-save]').forEach(b=>b.onclick=async()=>{try{await saveQueue.unlink(b.dataset.unlinkSave);toast('This item will save on its own. You can link it later.');}catch(err){toast(humanError(err),'error');}});
     list.querySelectorAll('[data-review-save],[data-review-main]').forEach(b=>b.onclick=()=>reviewQueuedSave(queueRows.find(r=>r.id===(b.dataset.reviewSave||b.dataset.reviewMain))));
     list.querySelectorAll('[data-open-saved]').forEach(b=>b.onclick=async()=>{if(workflows?.enabled()&&modalStack.length){const expected=queueScope,asset=await fetchAssetDetail(b.dataset.openSaved);if(expected!==queueScope||!b.isConnected)return;openModal(assetDisplayName(asset),workflows.referenceHtml(asset,{full:true})+'<div class="detail-grid">'+AssetEditor.fields.filter(f=>f.key!=='movement_note').map(f=>'<div class="detail-field"><label>'+esc(f.label)+'</label><div>'+esc(AssetEditor.values(asset)[f.key]||'—')+'</div></div>').join('')+'</div>',null,{stack:true});return;}closeModal();openAsset(b.dataset.openSaved);});
+  }
+  async function discardQueuedSave(id){
+    const row=queueRows.find(r=>r.id===id);if(!row)return;
+    const children=queueRows.filter(r=>r.parent===id&&r.state!=='Saved').length,risky=saveQueue.sentUnconfirmed(row);
+    const body=(risky?'<b>This change was sent, but the server never confirmed it.</b> It may already be saved. Check the asset register for '+esc(assetDisplayName(row.params))+' before discarding. ':esc(assetDisplayName(row.params))+' and its photos will be removed from this device. ')+(children?children+' linked item'+(children===1?'':'s')+' waiting on it will be discarded too. ':'')+'This cannot be undone.';
+    if(await confirmAction({title:'Discard this change?',body,confirmLabel:'Discard',danger:true})!==true)return;
+    try{await saveQueue.remove(id,{force:risky});notifiedSaves.delete(id);toast('Discarded from this device.');}catch(err){toast(humanError(err),'error');}
   }
   function showSaveFailure(row){
     let notice=$('saveFailureNotice');if(!notice){notice=document.createElement('aside');notice.id='saveFailureNotice';notice.className='save-failure-notice';notice.setAttribute('role','alert');document.body.append(notice);}
@@ -1766,25 +1873,28 @@
   function contextFromAsset(asset){return {custom:workflows?.enabled()?AssetEditor.sharedCustom(asset.custom_fields,state.refs.custom_fields):{},assetId:asset.asset_id,asset:publicAssetSummary(asset),name:assetDisplayName(asset),placement:{site_id:asset.site_id,area:asset.area_name||asset.area||'',exact_location:asset.exact_location||'',assigned_to:asset.assigned_to||''}};}
   function renderLinkContext(){
     if(!simpleLinksEnabled())return;
-    const layout=document.querySelector('#page-scanner .scanner-layout');let box=$('scannerMainContext');
-    if(!linkedContext){box?.remove();return;}
-    if(!box){box=document.createElement('div');box.id='scannerMainContext';box.className='scanner-main-context';layout.before(box);}
-    const main=mainDescriptor(linkedContext);box.innerHTML=`<div><small>Adding linked assets to</small><b>${esc(main.name)}</b><small>${esc(main.pending?'Details pending':main.assetId)}</small></div><button class="btn light sm" id="stopLinking">Stop linking</button>`;
-    $('stopLinking').onclick=()=>{setLinkedContext(null);if(state.recognitionSession?.entry){state.recognitionSession.entry.main={mode:'none'};showUniversalRecognition();}renderLinkContext();};
+    // Linking mode changes every new entry, so it is visible wherever entries start.
+    const places=[['scannerMainContext',document.querySelector('#page-scanner .scanner-layout')],['assetsMainContext',document.querySelector('#page-assets .asset-toolbar')]];
+    if(!linkedContext){for(const [id] of places)$(id)?.remove();return;}
+    const main=mainDescriptor(linkedContext);
+    for(const [id,anchor] of places){
+      let box=$(id);if(!box){box=document.createElement('div');box.id=id;box.className='scanner-main-context';anchor.before(box);}
+      box.innerHTML=`<div><small>Adding linked assets to</small><b>${esc(main.name)}</b><small>${esc(main.pending?'Details pending':main.assetId)}</small></div><button class="btn light sm" data-stop-linking ${id==='scannerMainContext'?'id="stopLinking"':''}>Stop linking</button>`;
+      box.querySelector('[data-stop-linking]').onclick=()=>{setLinkedContext(null);if(state.recognitionSession?.entry){state.recognitionSession.entry.main={mode:'none'};showUniversalRecognition();}renderLinkContext();};
+    }
   }
+  // After a save, offer the next step inline instead of interrupting with a dialog.
   function confirmAddLinkedAsset(context){
     if(!simpleLinksEnabled()||!isAuthenticated())return;
     const main=mainDescriptor(context);
-    openModal('Add a linked asset?',`<div class="linked-confirm"><p>Would you like to add an asset linked to <b>${esc(main.name)}</b>?</p>${main.pending?'<p class="pending-footnote">Saving and uploads continue in the background.</p>':''}<div class="modal-actions"><button type="button" id="linkedAssetNo" class="btn light">Not now</button><button type="button" id="linkedAssetYes" class="btn blue">Yes, add linked asset</button></div></div>`,()=>{
-      $('linkedAssetNo').onclick=()=>{setLinkedContext(null);closeModal();renderLinkContext();};$('linkedAssetYes').onclick=()=>openLinkedCaptureChoices(context);
-    },{size:'sm'});
+    toast(main.name+(main.pending?' is saved on this device and will sync in the background.':' is saved.'),'ok',{actions:[{label:'Add linked asset',onClick:()=>openLinkedCaptureChoices(context)},{label:'Scan next',onClick:()=>beginScanner()}]});
   }
   function openLinkedCaptureChoices(context){
     const main=mainDescriptor(context);
     openModal('Add linked asset',`<div class="linked-capture-choices"><p>Link the next asset to <b>${esc(main.name)}</b>.</p><button type="button" id="linkedAssetOcr" class="btn blue"><span>Scan label with OCR<small>Read the device label, then review the result.</small></span></button><button type="button" id="linkedAssetPhoto" class="btn light"><span>Take asset photo<small>No label needed. Continue to manual entry.</small></span></button><input type="file" id="linkedAssetPhotoFile" accept="image/*" capture="environment" hidden></div>`,()=>{
       $('linkedAssetOcr').onclick=()=>beginScanner({context});
       $('linkedAssetPhoto').onclick=()=>$('linkedAssetPhotoFile').click();
-      $('linkedAssetPhotoFile').onchange=e=>{const file=e.target.files?.[0];if(!file)return;closeDrawer();openAssetForm({...context.placement,custom_fields:Object.entries(context.custom||{}).map(([field_id,value])=>({field_id,value})),_mainContext:context,_photoOnly:true,_assetPhotos:[{file,type:'main'}]});};
+      $('linkedAssetPhotoFile').onchange=e=>{const file=e.target.files?.[0];if(!file)return;closeModal();openAssetForm({...context.placement,custom_fields:Object.entries(context.custom||{}).map(([field_id,value])=>({field_id,value})),_mainContext:context,_photoOnly:true,_assetPhotos:[{file,type:'main'}]});};
     },{size:'sm'});
   }
   function initialMainChoice(asset={}){
@@ -1908,6 +2018,67 @@
       },{size:'lg'});
     }catch(err){toast('Could not open the pending draft. '+humanError(err),'error');}
   }
+  // One action pattern for detail views: a primary action, up to two frequent ones,
+  // and a ⋯ menu for the rest with destructive actions last.
+  // Menus open beside their button. Only a menu whose button sits in the bottom action bar
+  // (`sheet`) becomes a bottom sheet on phones, so it rises from where it was opened.
+  function actionMenuHtml(items,label='More actions',{sheet=''}={}){
+    const list=items.filter(Boolean);if(!list.length)return '';
+    return `<div class="action-more asset-drawer-more"><button type="button" class="btn light sm action-more-btn" data-action-more aria-haspopup="menu" aria-expanded="false" aria-label="${esc(label)}">${icon('more','sm')}<span>More</span></button><div class="action-menu actions" role="menu" ${sheet?'data-sheet':''} hidden>${sheet?`<p class="action-sheet-title">${esc(sheet)}</p>`:''}${list.join('')}${sheet?'<button type="button" class="btn light action-sheet-cancel">Cancel</button>':''}</div></div>`;
+  }
+  function lifecycleEnabled(){return !!state.boot?.features?.record_lifecycle;}
+  function drawerActionsHtml(a){
+    const staff=isAuthenticated(),lifecycle=lifecycleEnabled(),merged=a.status==='Merged',retired=a.status==='Retired';
+    if(!staff)return `<div class="action-bar"><button id="assetQrBtn" class="btn light sm">${icon('scan','sm')}Print QR label</button><button type="button" class="link-btn" data-sign-in-edit>Sign in to edit</button></div>`;
+    if(merged){const target=String(a.source_ref||'').replace('MERGED_INTO:','');return `<div class="action-bar merged-note"><span>Merged into <b>${esc(target||'another asset')}</b>.</span>${target?`<button type="button" class="btn light sm" data-open-merge-target="${esc(target)}">Open ${esc(target)}</button>`:''}${lifecycle?`<button type="button" id="unmergeAssetDrawer" class="btn blue sm">Separate again</button>`:''}</div>`;}
+    const mergedSources=(a.activity||[]).filter(r=>r.action==='MERGE_ASSET').map(r=>{try{return JSON.parse(r.before_json||'{}').asset_id;}catch{return '';}}).filter(Boolean);
+    const sources=[...new Set(mergedSources)].filter(id=>state.assets.find(x=>x.asset_id===id)?.status==='Merged'||!state.assets.find(x=>x.asset_id===id));
+    const more=[
+      `<button id="scanUpdateDrawer" class="btn light sm" role="menuitem">${icon('scan','sm')}Update from scan</button>`,
+      `<button id="assetQrBtn" class="btn light sm" role="menuitem">${icon('printer','sm')}Print QR label</button>`,
+      `<button id="mergeAssetDrawer" class="btn light sm" role="menuitem">${icon('refresh','sm')}Merge duplicate</button>`,
+      ...(lifecycle?sources.map(id=>`<button class="btn light sm" role="menuitem" data-unmerge="${esc(id)}">${icon('refresh','sm')}Separate ${esc(id)} again</button>`):[]),
+      isAdmin()&&lifecycle&&retired?`<button id="restoreAssetDrawer" class="btn light sm" role="menuitem">${icon('refresh','sm')}Restore asset</button>`:'',
+      isAdmin()&&!retired?`<button id="retireAssetDrawer" class="btn light sm danger-text" role="menuitem">${icon('trash','sm')}Retire asset</button>`:'',
+      hasAdminRole()&&!isAdmin()?'<p class="action-menu-hint">Retire, restore and photo deletion appear in Admin view.</p>':''
+    ];
+    return `<div class="action-bar"><button id="editAssetDrawer" class="btn blue sm">${icon('edit','sm')}Edit</button><button id="moveAssetDrawer" class="btn light sm">${icon('pin','sm')}Move / assign</button><button id="reportAssetIssue" class="btn light sm">${icon('tools','sm')}Report issue</button>${actionMenuHtml(more,'More actions',{sheet:'More for '+a.asset_id})}</div>`;
+  }
+  function bindDrawerLifecycle(a){
+    document.querySelector('[data-sign-in-edit]')?.addEventListener('click',()=>withAccess('STAFF',()=>openAsset(a.asset_id,{force:true})));
+    document.querySelector('[data-open-merge-target]')?.addEventListener('click',e=>openNestedAsset(e.currentTarget.dataset.openMergeTarget));
+    $('retireAssetDrawer')?.addEventListener('click',()=>withAccess('ADMIN',()=>confirmRetireAsset(a)));
+    $('restoreAssetDrawer')?.addEventListener('click',()=>withAccess('ADMIN',async()=>{
+      if(await confirmAction({title:'Restore this asset?',body:esc(assetDisplayName(a))+' ('+esc(a.asset_id)+') returns to the register as Active. You can change its status afterwards.',confirmLabel:'Restore'})!==true)return;
+      try{const r=await AssetAPI.post('restoreAsset',{asset_id:a.asset_id,status:'Active'});cacheAssetDetail(r.asset);optimisticAsset(r.asset);toast('Asset restored.');scheduleSync('restore');openAsset(a.asset_id,{force:true});}catch(err){toast(humanError(err),'error');}
+    }));
+    const unmerge=async sourceId=>{
+      if(await confirmAction({title:'Separate these records?',body:esc(sourceId)+' becomes its own asset again. Its photos, maintenance and history move back, and fields copied by the merge are reverted unless edited since.',confirmLabel:'Separate'})!==true)return;
+      try{const r=await AssetAPI.post('unmergeAsset',{source_asset_id:sourceId});for(const x of [r.result.source,r.result.target]){cacheAssetDetail(x);optimisticAsset(x);}toast(sourceId+' is a separate asset again.');scheduleSync('unmerge');openAsset(sourceId,{force:true});}catch(err){toast(humanError(err),'error');}
+    };
+    $('unmergeAssetDrawer')?.addEventListener('click',()=>withAccess('STAFF',()=>unmerge(a.asset_id)));
+    document.querySelectorAll('#assetDrawer [data-unmerge]').forEach(b=>b.addEventListener('click',()=>withAccess('STAFF',()=>unmerge(b.dataset.unmerge))));
+    if(!isAuthenticated())for(const id of ['addAssetImage','addAssetGallery'])$(id)?.remove();
+  }
+  // ⋯ menus: one open at a time, closed by an outside click, Escape or choosing an item.
+  function installActionMenus(){
+    document.addEventListener('click',e=>{if(e.target.closest('[data-close-modal]'))closeModal();});
+    const phone=()=>window.matchMedia('(max-width:760px)').matches;
+    const backdrop=document.createElement('div');backdrop.className='action-sheet-backdrop';backdrop.hidden=true;document.body.append(backdrop);
+    const closeAll=except=>{document.querySelectorAll('.action-menu:not([hidden])').forEach(m=>{if(m!==except){m.hidden=true;m.style.cssText='';m.previousElementSibling?.setAttribute('aria-expanded','false');}});if(!except)backdrop.hidden=true;};
+    // Fixed coordinates keep the menu visible inside scrolling drawers and dialogs.
+    const place=(menu,toggle)=>{
+      if(menu.hasAttribute('data-sheet')&&phone()){menu.before(backdrop);backdrop.hidden=false;return;}
+      const box=toggle.getBoundingClientRect(),width=menu.offsetWidth,height=menu.offsetHeight,gap=6;
+      const below=box.bottom+gap+height<=innerHeight-8;
+      menu.style.position='fixed';menu.style.right='auto';menu.style.bottom='auto';
+      menu.style.left=Math.max(8,Math.min(box.right-width,innerWidth-width-8))+'px';
+      menu.style.top=Math.max(8,below?box.bottom+gap:box.top-height-gap)+'px';
+    };
+    document.addEventListener('click',e=>{const toggle=e.target.closest('[data-action-more]');if(!toggle){closeAll();return;}const menu=toggle.nextElementSibling;const open=menu.hidden;closeAll(open?menu:undefined);menu.hidden=!open;toggle.setAttribute('aria-expanded',String(open));if(open){place(menu,toggle);menu.querySelector('button')?.focus();}else{menu.style.cssText='';backdrop.hidden=true;}});
+    document.addEventListener('scroll',e=>{if(!e.target.closest?.('.action-menu'))document.querySelectorAll('.action-menu:not([hidden]):not([data-sheet])').forEach(()=>closeAll());},true);
+    document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.querySelector('.action-menu:not([hidden])')){e.stopPropagation();closeAll();}},true);
+  }
   function confirmRetireAsset(asset,queued=null){
     const count=state.assets.filter(a=>a.parent_asset_id===asset.asset_id&&a.status!=='Merged').length;
     openModal('Retire asset',`<p>Retire <b>${esc(assetDisplayName(asset))}</b> (${esc(asset.asset_id)})?</p><p>${count?count+' linked assets keep their current status and main asset reference.':'Links and history are retained.'}</p><div class="modal-actions"><button type="button" class="btn light" id="cancelRetirement">Cancel</button><button type="button" class="btn danger" id="confirmRetirement">Retire asset</button></div>`,()=>{
@@ -1925,8 +2096,8 @@
     const queued=queuePaused?[]:queueRows.filter(r=>!r.asset&&r.kind==='create'&&(r.anchor?.asset_id===asset.asset_id||r.params.parent_asset_id===asset.asset_id||r.parent&&queueRows.find(p=>p.id===r.parent)?.asset?.asset_id===asset.asset_id));
     const markup=`${asset.parent_asset_id?`<h3 class="detail-icon-heading">${detailLinkIcon()}<span>Main asset</span></h3>${main?row(main):`<button class="linked-detail-row" data-linked-member="${esc(asset.parent_asset_id)}"><div><b>${esc(asset.parent_asset_id)}</b><small>Open main asset</small></div>${icon('arrow','sm')}</button>`}`:''}<div class="panel-head"><h3 class="detail-icon-heading">${detailLinkIcon()}<span>Linked assets</span><span class="linked-count">${members.length}</span></h3>${isAuthenticated()&&!['Retired','Merged'].includes(asset.status)?`<button type="button" id="addLinkedAsset" class="btn light sm">${icon('plus','sm')}Add linked asset</button>`:''}</div>${members.map(row).join('')}${queued.map(r=>`<button class="linked-detail-row pending" data-pending-link="${esc(r.id)}"><div><b>${esc(assetDisplayName(r.params))}</b><small>${esc(r.params.serial||'No serial')} · ${esc(r.state)}</small></div><span class="pending-status">Pending</span></button>`).join('')}${!members.length&&!queued.length?'<small class="linked-empty">No linked assets.</small>':''}${asset.set_id?'<details class="legacy-membership-note"><summary>Earlier set reference</summary><p>'+esc(asset.set_name||asset.set_id)+'. Existing data is retained. Main asset links are shown separately.</p></details>':''}`;
     if(section._markup===markup)return;section._markup=markup;section.innerHTML=markup;
-    section.querySelectorAll('[data-linked-member]').forEach(b=>b.onclick=()=>openAsset(b.dataset.linkedMember));section.querySelectorAll('[data-pending-link]').forEach(b=>b.onclick=openLinkedPendingSaves);
-    $('addLinkedAsset')?.addEventListener('click',()=>confirmAddLinkedAsset(asset._localOperation?contextFromRow(queueRows.find(r=>r.id===asset._localOperation)):contextFromAsset(asset)));
+    section.querySelectorAll('[data-linked-member]').forEach(b=>b.onclick=()=>openNestedAsset(b.dataset.linkedMember));section.querySelectorAll('[data-pending-link]').forEach(b=>b.onclick=openLinkedPendingSaves);
+    $('addLinkedAsset')?.addEventListener('click',()=>openLinkedCaptureChoices(asset._localOperation?contextFromRow(queueRows.find(r=>r.id===asset._localOperation)):contextFromAsset(asset)));
   }
   function decorateDetailHeadings(){
     if(!simpleLinksEnabled())return;
@@ -2040,7 +2211,9 @@
   function openAssetForm(asset={}){
     if(workflows?.enabled()&&!asset._origin)asset={...asset,_origin:workflows.origin()};
     if(!simpleLinksEnabled()&&!asset.asset_id&&activeSet)asset={...activeSet.placement,...asset,_setContext:activeSet};
-    if(simpleLinksEnabled()&&asset.asset_id&&!asset._queueRow&&queueRows.some(r=>r.params.asset_id===asset.asset_id&&r.state!=='Saved'))return openLinkedPendingSaves();
+    const waitingChange=simpleLinksEnabled()&&asset.asset_id&&!asset._queueRow&&queueRows.find(r=>r.params.asset_id===asset.asset_id&&r.state!=='Saved');
+    // An unsent change would conflict with a new edit, so let the person resolve it here instead of a dead end.
+    if(waitingChange)return void confirmAction({title:'A change is waiting on this device',body:'An earlier change to '+esc(asset.asset_id)+' has not synced yet'+(waitingChange.state==='Retry'?' and needs attention':'')+'. Review it, or discard it and edit again.',confirmLabel:'Review change',alt:'Discard and edit',cancelLabel:'Close'}).then(async choice=>{if(choice===true)openLinkedPendingSaves();else if(choice==='alt'){await discardQueuedSave(waitingChange.id);if(!queueRows.some(r=>r.id===waitingChange.id))openAssetForm(asset);}});
     if(asset.asset_id && !isAuthenticated()) return withAccess('STAFF',()=>openAssetForm(asset));
     const initialScanFiles = asset._assetPhotos|| (Array.isArray(asset._scanFiles)?asset._scanFiles:(asset._scanFile?[asset._scanFile]:[]));
     const fromScan=initialScanFiles.length>0;
@@ -2051,8 +2224,7 @@
       if(!workflows?.enabled()){siteSel.addEventListener('change',updateAreas);updateAreas();}
       $('scanUpdateAsset')?.addEventListener('click',()=>{
         const values=workflows?.enabled()?Object.fromEntries(new FormData(form)):null;const custom=workflows?.enabled()?Object.fromEntries([...form.querySelectorAll('[data-custom]')].map(el=>[el.dataset.custom,el.value])):{};const privateValues=workflows?.enabled()?Object.fromEntries([...form.querySelectorAll('[data-private][data-dirty]')].map(el=>[el.dataset.private,el.value])):{};
-        beginScanner({target:{asset_id:asset.asset_id,brand:asset.brand,model:asset.model,...(values?{_editorValues:values,_editorCustom:custom,_editorPrivate:privateValues}:{})},context:null});
-        toast('Scan a label to compare against '+asset.asset_id+'.');
+        beginScanner({target:{asset_id:asset.asset_id,brand:asset.brand,model:asset.model,...(values?{_editorValues:values,_editorCustom:custom,_editorPrivate:privateValues}:{})},context:null,onCancel:()=>openAssetForm({...asset,...(values||{}),custom_fields:Object.entries(custom).map(([field_id,value])=>({field_id,value}))})});
       });
       if(asset._photoOnly||simpleLinksEnabled()&&asset.asset_id&&(!asset.brand||!asset.model)){for(const name of ['brand','model','serial']){const input=form.querySelector('[name="'+name+'"]');input.required=false;const label=input.closest('.field').querySelector('label');if(label)label.textContent+=' (optional)';}form.insertAdjacentHTML('afterbegin','<p class="field full photo-only-note">'+(asset._photoOnly?'Photo attached. ':'')+'Choose a category and enter what you know. Brand, model and serial are optional.</p>');}
       if(simpleLinksEnabled()&&!workflows?.enabled()&&!asset.asset_id){
@@ -2143,7 +2315,7 @@
     },{size:'lg'});
   }
 
-  function openMoveAssign(a){
+  function openMoveAssign(a,modalOptions={}){
     const currentSite=a.site_id||'';
     openModal('Move / Assign Asset',`<form id="moveAssignForm" class="form-grid"><div class="field"><label>Asset</label><input value="${esc(a.asset_id)} — ${esc((a.brand||'')+' '+(a.model||''))}" disabled></div><div class="field"><label>Site</label><select name="site_id" id="moveSite" required>${state.refs.sites.map(s=>`<option value="${esc(s.site_id)}" ${String(s.site_id)===String(currentSite)?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div><div class="field"><label>Area / Department</label><input name="area" id="moveArea" list="moveAreaOptions" value="${esc(a.area_name||a.area||'')}" required><datalist id="moveAreaOptions"></datalist></div><div class="field"><label>Exact location <span style="font-weight:500">(optional)</span></label><input name="exact_location" value="${esc(a.exact_location||'')}" list="locationOptionsMove"><datalist id="locationOptionsMove">${state.refs.locations.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field"><label>Assigned person / team <span style="font-weight:500">(optional)</span></label><input name="assigned_to" value="${esc(a.assigned_to||'')}" list="assigneeOptionsMove"><datalist id="assigneeOptionsMove">${state.refs.assignees.map(x=>`<option value="${esc(x)}">`).join('')}</datalist></div><div class="field full"><label>Movement note</label><input name="movement_note" placeholder="Reason / note (optional)"></div><div class="field full"><div class="modal-actions"><button type="button" id="cancelMoveAssign" class="btn light">Cancel</button><button class="btn blue" type="submit">Save Move / Assignment</button></div></div></form>`,()=>{
       const form=$('moveAssignForm'), site=$('moveSite'), area=$('moveArea');
@@ -2153,7 +2325,7 @@
       site.addEventListener('change',()=>{area.value='';updateAreas();}); updateAreas();
       $('cancelMoveAssign').addEventListener('click',closeModal);
       form.addEventListener('submit',async e=>{e.preventDefault();const p=Object.fromEntries(new FormData(form).entries());Object.assign(p,{asset_id:a.asset_id,category_id:a.category_id||'',category:a.category_name||a.category||'',brand:a.brand||'',model:a.model||'',serial:a.serial||'',specifications:a.specifications||'',status:a.status||'Active',custom_json:JSON.stringify(Object.fromEntries((a.custom_fields||[]).map(x=>[x.field_id,x.value||''])))});const btn=form.querySelector('[type="submit"]');if(simpleLinksEnabled()){await withBusy(btn,'Saving on device…',async()=>{try{await saveQueue.enqueue({id:crypto.randomUUID(),kind:'update',params:{...p,expected_updated_at:a.updated_at}});if(!btn.isConnected)return;closeModal();closeDrawer();}catch(err){toast('Changes were not saved. Keep this form open. '+humanError(err),'error');}});return;}await withBusy(btn,'Saving...',async()=>{try{const r=await AssetAPI.post('updateAsset',p);cacheAssetDetail(r.asset);toast('Placement / assignment updated.');closeModal();closeDrawer();scheduleSync('asset-moved');openAsset(a.asset_id);}catch(err){toast(humanError(err),'error');}});});
-    });
+    },modalOptions);
   }
 
   function openImageUpload(assetId,source=''){
@@ -2209,7 +2381,7 @@
     const indicatorId=!had?beginIndicator('Loading maintenance…'):null;
     if(had)beginPassiveSync();
     try{
-      const r=await AssetAPI.get('listMaintenance');
+      const r=await AssetAPI.get('listMaintenance',state.maintenanceShowArchived?{include_archived:'true'}:{});
       state.maintenance=(r.rows||[]).map(decorateMaintenanceLocal);
       await window.AssetStore?.set?.(STORE_KEYS.maintenance,state.maintenance);
       renderMaintenance();
@@ -2263,11 +2435,13 @@
   function renderMaintenanceFilters(){
     const f=state.maintenanceFilters;
     const chips=[];
-    if(f.status)chips.push(`Status: ${f.status}`);
-    if(f.type)chips.push(`Type: ${f.type}`);
-    if(f.assigned)chips.push(`Assigned: ${f.assigned}`);
-    if(f.dateFrom||f.dateTo)chips.push(`${f.dateField==='completed_at'?'Completed':'Reported'}: ${f.dateFrom||'…'} → ${f.dateTo||'…'}`);
-    $('maintenanceFilterChips').innerHTML=chips.map(x=>`<span class="filter-chip">${esc(x)}</span>`).join('');
+    if(f.status)chips.push([`Status: ${f.status}`,['status']]);
+    if(f.type)chips.push([`Type: ${f.type}`,['type']]);
+    if(f.assigned)chips.push([`Assigned: ${f.assigned}`,['assigned']]);
+    if(f.dateFrom||f.dateTo)chips.push([`${f.dateField==='completed_at'?'Completed':'Reported'}: ${f.dateFrom||'…'} → ${f.dateTo||'…'}`,['dateFrom','dateTo']]);
+    $('maintenanceFilterChips').innerHTML=chips.map(([x,keys])=>`<span class="filter-chip">${esc(x)}<button type="button" class="chip-remove" data-clear-filter="${keys.join(',')}" aria-label="Remove filter ${esc(x)}">×</button></span>`).join('')+(chips.length>1?'<button id="clearMaintenanceChips" type="button">Clear all</button>':'');
+    $('maintenanceFilterChips').querySelectorAll('[data-clear-filter]').forEach(b=>b.onclick=()=>{for(const k of b.dataset.clearFilter.split(','))state.maintenanceFilters[k]='';renderMaintenance();});
+    $('clearMaintenanceChips')?.addEventListener('click',()=>{for(const k of ['status','type','assigned','dateFrom','dateTo'])state.maintenanceFilters[k]='';renderMaintenance();});
     $('maintenanceFilterBadge')?.classList.toggle('hidden',!(f.status||f.type||f.assigned));
     if($('maintenanceFilterBadge'))$('maintenanceFilterBadge').textContent=[f.status,f.type,f.assigned].filter(Boolean).length;
     $('maintenanceDateBadge')?.classList.toggle('hidden',!(f.dateFrom||f.dateTo));
@@ -2316,17 +2490,19 @@
       const issue=String(m.issue||'No issue summary entered');
       const type=String(m.maintenance_type||'Repair');
       const date=m.reported_at?new Date(m.reported_at).toLocaleDateString('en-MY',{day:'numeric',month:'short',year:'numeric'}):'No date';
-      return `<article class="maintenance-ticket">
+      return `<article class="maintenance-ticket${m.archived_at?' archived':''}" data-maint-open="${esc(m.maintenance_id)}" tabindex="0" role="button" aria-label="Open ticket: ${esc(issue)}">
         <div class="maintenance-ticket-header">
           <button type="button" class="maintenance-ticket-icon" data-maint-asset="${esc(m.asset_id)}" aria-label="Open ${esc(name)}">${icon(catIcon(a.category_name||''),'lg')}</button>
           <div class="maintenance-ticket-device"><b>${esc(name)}</b><small>${esc(m.asset_id)} · ${esc(a.category_name||'Asset')}</small></div>
           <span class="maintenance-ticket-status ${maintenanceStatusTone(status)}">${esc(status)}</span>
         </div>
         <div class="maintenance-ticket-problem"><span class="maintenance-ticket-label">ISSUE</span><strong>${esc(issue)}</strong><div class="maintenance-ticket-tags"><span>${esc(type)}</span>${m.assigned_to?`<span>Assigned: ${esc(m.assigned_to)}</span>`:'<span>Unassigned</span>'}</div></div>
-        <div class="maintenance-ticket-footer"><span>Reported ${esc(date)} <span class="maintenance-ticket-age">· ${esc(nowText(m.reported_at))} ago</span></span><div class="maintenance-ticket-buttons"><button type="button" class="btn light sm" data-maint-asset="${esc(m.asset_id)}">View asset</button>${isAuthenticated()?`<button type="button" class="btn blue sm" data-maint="${esc(m.maintenance_id)}">Edit issue</button>`:''}</div></div>
+        <div class="maintenance-ticket-footer"><span>Reported ${esc(date)} <span class="maintenance-ticket-age">· ${esc(nowText(m.reported_at))} ago</span></span><div class="maintenance-ticket-buttons"><button type="button" class="btn light sm" data-maint-asset="${esc(m.asset_id)}">View asset</button></div></div>
       </article>`;
     }).join(''):'<div class="empty-state maintenance-empty">No maintenance records match. Try a different status, search, date or filter.</div>';
-    $$('#maintenanceList [data-maint]').forEach(el=>el.addEventListener('click',()=>openMaintenanceManage(state.maintenance.find(x=>String(x.maintenance_id)===el.dataset.maint))));
+    if(isAuthenticated()&&lifecycleEnabled())$('maintenanceList').insertAdjacentHTML('beforeend',`<button type="button" id="toggleArchivedMaint" class="link-btn list-footer-link">${state.maintenanceShowArchived?'Hide archived tickets':'Show archived tickets'}</button>`);
+    $('toggleArchivedMaint')?.addEventListener('click',()=>{state.maintenanceShowArchived=!state.maintenanceShowArchived;void loadMaintenance();});
+    $$('#maintenanceList [data-maint-open]').forEach(el=>{const open=()=>openMaintenanceDetail(maintenanceById(el.dataset.maintOpen));el.addEventListener('click',e=>{if(!e.target.closest('button'))open();});el.addEventListener('keydown',e=>{if((e.key==='Enter'||e.key===' ')&&e.target===el){e.preventDefault();open();}});});
     $$('#maintenanceList [data-maint-asset]').forEach(el=>el.addEventListener('click',()=>openAsset(el.dataset.maintAsset)));
   }
 
@@ -2367,13 +2543,16 @@
     const openPicker=async()=>{
       if(!state.assets.length)await loadAssets(true);
       const initial=state.assets.find(a=>String(a.asset_id)===String(assetId))||null;
-      openModal('Report Maintenance Issue',`<form id="issueForm"><input type="hidden" name="asset_id" id="issueAssetId" value="${esc(initial?.asset_id||'')}"><div class="field"><label>Asset</label><div class="issue-asset-picker"><div class="asset-search-inline"><svg class="ico sm"><use href="#i-search"/></svg><input id="issueAssetSearch" placeholder="Search asset ID, brand, model, serial or location" autocomplete="off"></div><div id="issueAssetSelected" class="issue-asset-selected"></div><div id="issueAssetResults" class="issue-asset-results"></div></div></div><div class="form-grid issue-fields"><div class="field"><label>Type</label><select name="maintenance_type"><option>Repair</option><option>Inspection</option><option>Upgrade</option><option>Service</option></select></div><div class="field full"><label>Issue / problem</label><textarea name="issue" rows="4" required placeholder="What is wrong or what needs attention?"></textarea></div></div><div class="modal-actions"><button type="submit" class="btn blue">Submit Issue</button></div></form>`,()=>{
+      openModal('Report Maintenance Issue',`<form id="issueForm"><input type="hidden" name="asset_id" id="issueAssetId" value="${esc(initial?.asset_id||'')}"><div class="field"><label>Asset</label><div class="issue-asset-picker"><div class="asset-search-inline"><svg class="ico sm"><use href="#i-search"/></svg><input id="issueAssetSearch" placeholder="Search asset ID, brand, model, serial or location" autocomplete="off"></div><div id="issueAssetSelected" class="issue-asset-selected"></div><div id="issueAssetResults" class="issue-asset-results"></div></div></div><div class="form-grid issue-fields"><div class="field"><label>Type</label><select name="maintenance_type"><option>Repair</option><option>Inspection</option><option>Upgrade</option><option>Service</option></select></div><div class="field full"><label>Issue / problem</label><textarea name="issue" rows="4" required placeholder="What is wrong or what needs attention?"></textarea></div></div><label class="check-row field full"><input type="checkbox" name="set_asset_repair" value="1"> Also set the asset status to Under Repair</label><div class="modal-actions"><button type="button" class="btn light" data-close-modal>Cancel</button><button type="submit" class="btn blue">Report issue</button></div></form>`,()=>{
         const search=$('issueAssetSearch'),results=$('issueAssetResults'),selected=$('issueAssetSelected'),hidden=$('issueAssetId');
         const paint=()=>{
-          const rows=issueAssetSearchMatches(search.value);
-          results.innerHTML=rows.length?rows.map(a=>issueAssetPickerRow(a,String(a.asset_id)===String(hidden.value))).join(''):'<div class="empty-state compact">No assets found.</div>';
-          const a=state.assets.find(x=>String(x.asset_id)===String(hidden.value));
-          selected.innerHTML=a?`<div class="issue-selected-card"><span>Selected asset</span><b>${esc(a.brand)} ${esc(a.model)}</b><small>${esc(a.asset_id)} · ${esc(a.site_name||'No site')}${a.area_name?' · '+esc(a.area_name):''}</small></div>`:'<div class="issue-selected-empty">Choose an asset below.</div>';
+          // Once an asset is chosen, only it is shown; the list appears only while searching.
+          const a=state.assets.find(x=>String(x.asset_id)===String(hidden.value)),typed=search.value.trim();
+          search.closest('.asset-search-inline').hidden=!!a;
+          const rows=!a&&typed?issueAssetSearchMatches(search.value):[];
+          results.innerHTML=rows.length?rows.map(x=>issueAssetPickerRow(x,false)).join(''):!a&&typed?'<div class="empty-state compact">No assets found.</div>':'';
+          selected.innerHTML=a?`<div class="issue-selected-card"><div><b>${esc(assetTitle(a))}</b><small>${esc(a.asset_id)} · ${esc(a.site_name||'No site')}${a.area_name?' · '+esc(a.area_name):''}</small></div><button type="button" class="link-btn" id="issueAssetChange">Change</button></div>`:'';
+          $('issueAssetChange')?.addEventListener('click',()=>{hidden.value='';search.value='';paint();search.focus();});
           results.querySelectorAll('[data-issue-asset]').forEach(btn=>btn.addEventListener('click',()=>{hidden.value=btn.dataset.issueAsset;search.value='';paint();}));
         };
         search.addEventListener('input',paint);paint();
@@ -2382,7 +2561,7 @@
           if(!hidden.value)return toast('Choose an asset first.','error');
           const btn=e.target.querySelector('[type="submit"]');
           await withBusy(btn,'Submitting...',async()=>{
-            try{const r=await AssetAPI.post('createMaintenance',Object.fromEntries(new FormData(e.target).entries()));optimisticMaintenance(r.row);toast('Issue reported.');closeModal();scheduleSync('maintenance-created');}
+            try{const params=Object.fromEntries(new FormData(e.target).entries()),repair=!!params.set_asset_repair;delete params.set_asset_repair;const r=await AssetAPI.post('createMaintenance',params);optimisticMaintenance(r.row);closeModal();if(repair)await setAssetStatus(params.asset_id,'Under Repair');toast('Issue reported'+(repair?' and asset set to Under Repair.':'.'),'ok',{actions:[{label:'View ticket',onClick:()=>openMaintenanceDetail(state.maintenance.find(x=>x.maintenance_id===r.row.maintenance_id)||r.row)}]});scheduleSync('maintenance-created');}
             catch(err){toast(humanError(err),'error');}
           });
         });
@@ -2391,15 +2570,64 @@
     openPicker();
   }
 
-  function openMaintenanceManage(m){
+  // Asset status follows a repair only when the person asks; it goes through the same durable queue as edits.
+  async function setAssetStatus(assetId,status){
+    const a=state.assets.find(x=>x.asset_id===assetId);if(!a||!saveQueue||a.status===status)return;
+    try{await saveQueue.enqueue({id:crypto.randomUUID(),kind:'update',params:{asset_id:assetId,expected_updated_at:a.updated_at||'',status}});optimisticAsset({...a,status});}catch(err){toast('Asset status was not changed. '+humanError(err),'error');}
+  }
+  // The ticket updates on screen immediately; a failed save restores it and offers a retry.
+  async function saveMaintenance(m,params,retry,done){
+    const previous=maintenanceById(m.maintenance_id)||m;
+    optimisticMaintenance({...previous,...params,updated_at:new Date().toISOString()});renderMaintenance();
+    closeModal({all:true});openMaintenanceDetail(maintenanceById(m.maintenance_id));
+    const refreshOpen=()=>{if($('modalTitle').textContent==='Maintenance ticket'&&!$('modalWrap').classList.contains('hidden'))openMaintenanceDetail(maintenanceById(m.maintenance_id));};
+    try{const r=await AssetAPI.post('updateMaintenance',params);optimisticMaintenance(r.row);renderMaintenance();refreshOpen();scheduleSync('maintenance-updated');done();}
+    catch(err){optimisticMaintenance(previous);renderMaintenance();refreshOpen();toast('Not saved. '+humanError(err),'error',{actions:[{label:'Try again',onClick:retry}]});}
+  }
+  function maintenanceById(id){return state.maintenance.find(x=>String(x.maintenance_id)===String(id));}
+  function openMaintenanceDetail(m){
     if(!m)return toast('Maintenance record not found.','error');
-    if(!isAuthenticated())return withAccess('STAFF',()=>openMaintenanceManage(m));
-    openModal('Edit Maintenance',`<form id="maintForm"><div class="maintenance-edit-asset"><b>${esc(m.asset?.brand||'')} ${esc(m.asset?.model||m.asset_id)}</b><small>${esc(m.asset_id)} · ${esc(m.issue)}</small></div><div class="form-grid"><div class="field"><label>Status</label><select name="status">${['Open','In Progress','Waiting Parts','Completed','Cancelled'].map(x=>`<option ${m.status===x?'selected':''}>${x}</option>`).join('')}</select></div><div class="field"><label>Assigned to</label><input name="assigned_to" value="${esc(m.assigned_to||'')}"></div><div class="field"><label>Type</label><input name="maintenance_type" value="${esc(m.maintenance_type||'')}"></div><div class="field"><label>Cost</label><input name="cost" type="number" step="0.01" value="${esc(m.cost||'')}"></div><div class="field full"><label>Resolution / notes</label><textarea name="resolution" rows="4">${esc(m.resolution||'')}</textarea></div></div><div class="modal-actions"><button class="btn blue" type="submit">Save Changes</button></div></form>`,()=>{
+    const a=m.asset||state.assets.find(x=>x.asset_id===m.asset_id)||{},staff=isAuthenticated(),archived=!!m.archived_at,lifecycle=lifecycleEnabled();
+    const when=v=>v?new Date(v).toLocaleString('en-MY',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—';
+    const field=(label,value)=>`<div class="detail-field"><label>${esc(label)}</label><div>${esc(value||'—')}</div></div>`;
+    const more=[`<button type="button" class="btn light sm" role="menuitem" data-maint-view-asset>${icon('box','sm')}View asset</button>`,staff&&lifecycle?(archived?`<button type="button" class="btn light sm" role="menuitem" data-maint-restore>${icon('refresh','sm')}Restore ticket</button>`:`<button type="button" class="btn light sm danger-text" role="menuitem" data-maint-archive>${icon('trash','sm')}Archive ticket</button>`):''];
+    const actions=staff&&!archived?`<div class="action-bar"><button type="button" class="btn blue sm" data-maint-status>Update status</button><button type="button" class="btn light sm" data-maint-edit>${icon('edit','sm')}Edit details</button>${actionMenuHtml(more)}</div>`:`<div class="action-bar">${archived?'<span class="badge retired">Archived</span>':''}${staff?actionMenuHtml(more):`<button type="button" class="btn light sm" data-maint-view-asset>View asset</button><button type="button" class="link-btn" data-sign-in-edit>Sign in to update</button>`}</div>`;
+    openModal('Maintenance ticket',`<div class="maintenance-detail"><div class="maintenance-detail-head"><div><b>${esc([a.brand,a.model].filter(Boolean).join(' ')||m.asset_id)}</b><small>${esc(m.asset_id)} · ${esc(m.maintenance_type||'Repair')}</small></div><span class="maintenance-ticket-status ${maintenanceStatusTone(m.status)}">${esc(m.status||'Open')}</span></div><p class="maintenance-detail-issue">${esc(m.issue||'No issue summary entered')}</p>${actions}<div class="detail-grid">${field('Assigned to',m.assigned_to||'Unassigned')}${field('Reported',when(m.reported_at)+(m.reported_by?' by '+m.reported_by:''))}${field('Last updated',when(m.updated_at))}${field('Completed',when(m.completed_at))}${staff?field('Cost',m.cost?'RM '+m.cost:''):''}${staff?`<div class="detail-field full"><label>Resolution / notes</label><div>${esc(m.resolution||'—')}</div></div>`:''}</div></div>`,()=>{
+      const body=$('modalBody');
+      body.querySelectorAll('[data-maint-view-asset]').forEach(b=>b.onclick=()=>{const under=state.openAssetId===m.asset_id;closeModal();if(under)return;state.drawerTrail=[()=>openMaintenanceDetail(maintenanceById(m.maintenance_id)||m)];openAsset(m.asset_id);});
+      body.querySelector('[data-sign-in-edit]')?.addEventListener('click',()=>withAccess('STAFF',()=>openMaintenanceDetail(maintenanceById(m.maintenance_id)||m)));
+      body.querySelector('[data-maint-status]')?.addEventListener('click',()=>openMaintenanceStatus(m));
+      body.querySelector('[data-maint-edit]')?.addEventListener('click',()=>openMaintenanceEdit(m));
+      const archive=async on=>{if(on&&await confirmAction({title:'Archive this ticket?',body:'It leaves the maintenance list and open-repair counts. You can restore it from Show archived.',confirmLabel:'Archive',danger:true})!==true)return;try{const r=await AssetAPI.post(on?'archiveMaintenance':'restoreMaintenance',{maintenance_id:m.maintenance_id});optimisticMaintenance(r.row);if(on&&!state.maintenanceShowArchived)state.maintenance=state.maintenance.filter(x=>x.maintenance_id!==m.maintenance_id);renderMaintenance();closeModal();toast(on?'Ticket archived.':'Ticket restored.','ok',on?{actions:[{label:'Undo',onClick:()=>void AssetAPI.post('restoreMaintenance',{maintenance_id:m.maintenance_id}).then(x=>{optimisticMaintenance(x.row);renderMaintenance();})}]}:{});scheduleSync('maintenance-archive');}catch(err){toast(humanError(err),'error');}};
+      body.querySelector('[data-maint-archive]')?.addEventListener('click',()=>archive(true));
+      body.querySelector('[data-maint-restore]')?.addEventListener('click',()=>archive(false));
+    },{size:'md'});
+  }
+  // Kept for older callers: editing starts from the read view.
+  function openMaintenanceManage(m){openMaintenanceDetail(m);}
+  function openMaintenanceStatus(m){
+    if(!isAuthenticated())return withAccess('STAFF',()=>openMaintenanceStatus(m));
+    openModal('Update status',`<form id="maintForm"><div class="maintenance-edit-asset"><b>${esc(m.asset?.brand||'')} ${esc(m.asset?.model||m.asset_id)}</b><small>${esc(m.asset_id)} · ${esc(m.issue)}</small></div><div class="form-grid"><div class="field"><label>Status</label><select name="status">${['Open','In Progress','Waiting Parts','Completed','Cancelled'].map(x=>`<option ${m.status===x?'selected':''}>${x}</option>`).join('')}</select></div><div class="field"><label>Assigned to</label><input name="assigned_to" value="${esc(m.assigned_to||'')}"></div><div class="field"><label>Cost (RM) <small>(optional)</small></label><input name="cost" type="number" step="0.01" min="0" value="${esc(m.cost||'')}"></div><div class="field full"><label>Resolution / notes</label><textarea name="resolution" rows="4">${esc(m.resolution||'')}</textarea></div></div><div class="modal-actions"><button type="button" class="btn light" data-close-modal>Cancel</button><button type="submit" class="btn blue">Save status</button></div></form>`,()=>{
       $('maintForm').addEventListener('submit',async e=>{
-        e.preventDefault();const btn=e.target.querySelector('[type="submit"]');const params=Object.fromEntries(new FormData(e.target).entries());params.maintenance_id=m.maintenance_id;
-        await withBusy(btn,'Saving...',async()=>{try{const r=await AssetAPI.post('updateMaintenance',params);optimisticMaintenance(r.row);toast('Maintenance updated.');closeModal();scheduleSync('maintenance-updated');}catch(err){toast(humanError(err),'error');}});
+        e.preventDefault();const params=Object.fromEntries(new FormData(e.target).entries());params.maintenance_id=m.maintenance_id;
+        void saveMaintenance(m,params,()=>openMaintenanceStatus(m),()=>{
+          const a=state.assets.find(x=>x.asset_id===m.asset_id);
+          // Closing a repair offers to put the asset back into service.
+          if(params.status==='Completed'&&a&&['Under Repair','Faulty'].includes(a.status))toast('Ticket completed.','ok',{actions:[{label:'Set asset back to Active',onClick:()=>void setAssetStatus(a.asset_id,'Active').then(()=>toast('Asset set to Active.'))}]});
+          else toast('Status updated.');
+        });
       });
-    });
+    },{size:'md',stack:true});
+  }
+  function openMaintenanceEdit(m){
+    if(!isAuthenticated())return withAccess('STAFF',()=>openMaintenanceEdit(m));
+    const open=String(m.status||'Open')==='Open';
+    openModal('Edit maintenance',`<form id="maintEditForm"><div class="form-grid"><div class="field"><label>Type</label><select name="maintenance_type">${['Repair','Inspection','Upgrade','Service'].map(x=>`<option ${String(m.maintenance_type||'Repair')===x?'selected':''}>${x}</option>`).join('')}</select></div><div class="field full"><label>Issue / problem</label><textarea name="issue" rows="4" ${open?'required':'readonly'}>${esc(m.issue||'')}</textarea>${open?'':'<small>The issue can only be changed while the ticket is Open.</small>'}</div></div><div class="modal-actions"><button type="button" class="btn light" data-close-modal>Cancel</button><button type="submit" class="btn blue">Save changes</button></div></form>`,()=>{
+      $('maintEditForm').addEventListener('submit',async e=>{
+        e.preventDefault();const btn=e.target.querySelector('[type="submit"]');const params=Object.fromEntries(new FormData(e.target).entries());params.maintenance_id=m.maintenance_id;params.status=m.status||'Open';if(!open)delete params.issue;
+        void saveMaintenance(m,params,()=>openMaintenanceEdit(m),()=>toast('Maintenance updated.'));
+      });
+    },{size:'md',stack:true});
   }
 
   async function loadAudits(){
@@ -2414,8 +2642,12 @@
   }
   function renderAudits(){
     const rows=state.audits;
-    $('auditList').innerHTML=rows.length?rows.map(a=>`<div class="audit-row"><div class="audit-icon">${icon('check','lg')}</div><div><b>${esc(a.name)} · ${esc(a.site_name)}${a.area_name?' · '+esc(a.area_name):''}</b><small>${esc(a.checked_count)} / ${esc(a.expected_count)} checked · ${esc(a.pending_count??Math.max(0,a.expected_count-a.checked_count))} pending · ${esc(a.mismatch_count)} mismatches · ${esc(a.status)}</small><div class="audit-progress"><i style="width:${Math.max(0,Math.min(100,Number(a.progress)||0))}%"></i></div></div><div class="actions">${a.status==='In Progress'?`<button class="btn blue sm" data-audit-open="${esc(a.audit_id)}">Continue audit</button>`:statusBadge(a.status)}</div></div>`).join(''):'<div class="empty-state">No audits yet.</div>';
+    $('auditList').innerHTML=rows.length?rows.map(a=>`<div class="audit-row"><div class="audit-icon">${icon('check','lg')}</div><div><b>${esc(a.name)} · ${esc(a.site_name)}${a.area_name?' · '+esc(a.area_name):''}</b><small>${esc(a.checked_count)} / ${esc(a.expected_count)} checked · ${esc(a.pending_count??Math.max(0,a.expected_count-a.checked_count))} pending · ${esc(a.mismatch_count)} mismatches · ${esc(a.status)}</small><div class="audit-progress"><i style="width:${Math.max(0,Math.min(100,Number(a.progress)||0))}%"></i></div></div><div class="actions">${a.status==='In Progress'?`<button class="btn blue sm" data-audit-open="${esc(a.audit_id)}">Continue</button>${isAuthenticated()?actionMenuHtml([`<button type="button" class="btn light sm" role="menuitem" data-audit-rename="${esc(a.audit_id)}">${icon('edit','sm')}Rename</button>`,`<button type="button" class="btn light sm" role="menuitem" data-audit-export="${esc(a.audit_id)}">${icon('download','sm')}Export results</button>`,lifecycleEnabled()?`<button type="button" class="btn light sm danger-text" role="menuitem" data-audit-cancel="${esc(a.audit_id)}">${icon('trash','sm')}Cancel audit</button>`:'']):''}`:`${statusBadge(a.status)}<button class="btn light sm" data-audit-results="${esc(a.audit_id)}">View results</button>`}</div></div>`).join(''):'<div class="empty-state">No audits yet. Start one to check what is physically at a site.</div>';
     $$('#auditList [data-audit-open]').forEach(b=>b.addEventListener('click',()=>openAuditVerify(b.dataset.auditOpen)));
+    $$('#auditList [data-audit-results]').forEach(b=>b.addEventListener('click',()=>openAuditResults(b.dataset.auditResults)));
+    $$('#auditList [data-audit-export]').forEach(b=>b.addEventListener('click',()=>void exportAuditResults(b.dataset.auditExport)));
+    $$('#auditList [data-audit-rename]').forEach(b=>b.addEventListener('click',()=>renameAudit(b.dataset.auditRename)));
+    $$('#auditList [data-audit-cancel]').forEach(b=>b.addEventListener('click',()=>void cancelAudit(b.dataset.auditCancel)));
   }
   function openStartAudit(){
     if(!isAuthenticated())return withAccess('STAFF',openStartAudit);
@@ -2434,6 +2666,7 @@
     const a=state.audits.find(x=>x.audit_id===auditId);
     if(a&&$('auditProgressPanel'))$('auditProgressPanel').innerHTML=auditReviewHtml(a);
     if(a&&$('auditCompleteBtn'))$('auditCompleteBtn').disabled=Number(a.pending_count??Math.max(0,a.expected_count-a.checked_count))>0;
+    if(a&&$('auditCompleteReview'))$('auditCompleteReview').querySelector('b').textContent=`${a.checked_count||0} / ${a.expected_count||0} checked`;
     return a;
   }
   function auditRosterRowsHtml(rows, auditId){
@@ -2450,7 +2683,7 @@
     return visible.length ? visible.map(r=>{
       const status=r.result||'Pending',name=[r.brand,r.model].filter(Boolean).join(' ')||'Unnamed asset';
       const badgeClass=status==='Verified'?'good':status==='Mismatch'?'danger':status==='Pending'?'warn':'';
-      return `<article class="audit-asset-card ${status==='Pending'?'awaiting':''}"><div class="audit-asset-main"><div class="audit-asset-id">${esc(r.asset_id)} <span class="recognition-badge ${badgeClass}">${esc(status)}</span></div><b>${esc(name)}</b><div class="audit-asset-context">${esc(r.category_name||'Unspecified type')} · ${esc(r.site_name||'No site')}${r.area_name?' / '+esc(r.area_name):''}</div>${r.serial?`<div class="audit-asset-context">Serial: ${esc(r.serial)}</div>`:''}${r.notes?`<div class="audit-asset-context">Note: ${esc(r.notes)}</div>`:''}</div><div class="audit-card-actions"><button class="btn light sm" data-audit-pick="${esc(r.asset_id)}" type="button">Select</button>${status==='Pending'?`<button class="btn blue sm" data-audit-confirm="${esc(r.asset_id)}" type="button">Verify</button>`:''}</div></article>`;
+      return `<article class="audit-asset-card ${status==='Pending'?'awaiting':''}"><div class="audit-asset-main"><div class="audit-asset-id">${esc(r.asset_id)} <span class="recognition-badge ${badgeClass}">${esc(status)}</span></div><b>${esc(name)}</b><div class="audit-asset-context">${esc(r.category_name||'Unspecified type')} · ${esc(r.site_name||'No site')}${r.area_name?' / '+esc(r.area_name):''}</div>${r.serial?`<div class="audit-asset-context">Serial: ${esc(r.serial)}</div>`:''}${r.notes?`<div class="audit-asset-context">Note: ${esc(r.notes)}</div>`:''}</div><div class="audit-card-actions"><button class="btn light sm" data-audit-pick="${esc(r.asset_id)}" type="button">Select</button>${status==='Pending'?`<button class="btn blue sm" data-audit-confirm="${esc(r.asset_id)}" type="button">Verify</button>`:actionMenuHtml([status==='Mismatch'?`<button type="button" class="btn light sm" role="menuitem" data-audit-move="${esc(r.asset_id)}">${icon('pin','sm')}Move asset here</button>`:'',status==='Not Found'?`<button type="button" class="btn light sm" role="menuitem" data-audit-missing="${esc(r.asset_id)}">${icon('tools','sm')}Mark asset Missing</button>`:'',r.expected&&status!=='Not Found'?`<button type="button" class="btn light sm" role="menuitem" data-audit-notfound="${esc(r.asset_id)}">Change to Not Found</button>`:'',lifecycleEnabled()?`<button type="button" class="btn light sm" role="menuitem" data-audit-reset="${esc(r.asset_id)}">${icon('refresh','sm')}Reset to pending</button>`:''],'Change result')}</div></article>`;
     }).join(''):'<div class="empty-state compact">No assets match this filter. Choose All or change your search.</div>';
   }
 
@@ -2477,11 +2710,19 @@
         }));
         $$('#auditRosterList [data-audit-confirm]').forEach(b=>b.addEventListener('click',async()=>{
           const input=$('auditAssetInput'); if(input){input.value=b.dataset.auditConfirm;input.dispatchEvent(new Event('input'));}
-          if($('auditScanFeedback')?.classList.contains('conflict')&&!confirm('Location conflict: record a mismatch without moving the asset?'))return;
+          if($('auditScanFeedback')?.classList.contains('conflict')&&await confirmAction({title:'Record a mismatch?',body:'This asset is registered somewhere else. Recording it here does not move it; you can move it afterwards.',confirmLabel:'Record mismatch'})!==true)return;
           await withBusy(b,'Verifying…',async()=>verifyAudit(auditId,b.dataset.auditConfirm,$('auditNote')?.value||'',{keepOpen:true}));
         }));
       };
-      state.paintAuditRoster=paint;paint();
+      state.paintAuditRoster=paint;
+      const bindFollowUps=()=>{
+        const audit=state.audits.find(x=>x.audit_id===auditId)||{};
+        $$('#auditRosterList [data-audit-reset]').forEach(b=>b.addEventListener('click',async()=>{try{await AssetAPI.post('resetAuditEntry',{audit_id:auditId,asset_id:b.dataset.auditReset});toast(b.dataset.auditReset+' is pending again.');await refreshAuditRoster(auditId);}catch(err){toast(humanError(err),'error');}}));
+        $$('#auditRosterList [data-audit-notfound]').forEach(b=>b.addEventListener('click',()=>void verifyAudit(auditId,b.dataset.auditNotfound,'',{keepOpen:true,result:'Not Found'})));
+        $$('#auditRosterList [data-audit-missing]').forEach(b=>b.addEventListener('click',async()=>{await setAssetStatus(b.dataset.auditMissing,'Missing');toast(b.dataset.auditMissing+' marked Missing.');}));
+        $$('#auditRosterList [data-audit-move]').forEach(b=>b.addEventListener('click',()=>{const a=state.assets.find(x=>x.asset_id===b.dataset.auditMove);if(a)openMoveAssign({...a,site_id:audit.site_id,area_id:audit.area_id||a.area_id,area:audit.area_name||a.area},{stack:true});}));
+      };
+      const paintAll=()=>{paint();bindFollowUps();};state.paintAuditRoster=paintAll;paintAll();
       const picker=$('auditAssetOptions');
       if(picker)picker.innerHTML=state.auditRoster.map(x=>`<option value="${esc(x.asset_id)}">${esc([x.brand,x.model,x.serial].filter(Boolean).join(' · '))}</option>`).join('');
       return roster;
@@ -2491,10 +2732,38 @@
     }
   }
 
+  function auditCsv(audit,rows){
+    const cols=[['asset_id','Asset ID'],['brand','Brand'],['model','Model'],['serial','Serial'],['site_name','Registered site'],['area_name','Registered area'],['result','Result'],['checked_by','Checked by'],['checked_at','Checked at'],['notes','Notes']];
+    const cell=v=>{const t=String(v??'');return /[",\n]/.test(t)?'"'+t.replaceAll('"','""')+'"':t;};
+    return [cols.map(c=>c[1]).join(','),...rows.map(r=>cols.map(([k])=>cell(k==='result'?(r.result||'Pending'):r[k])).join(','))].join('\n');
+  }
+  async function exportAuditResults(auditId){
+    const audit=state.audits.find(a=>a.audit_id===auditId);if(!audit)return;
+    try{const r=await AssetAPI.get('getAuditRoster',{audit_id:auditId});const blob=new Blob([auditCsv(audit,r.roster?.rows||[])],{type:'text/csv'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`${(audit.name||'audit').replace(/[^\w-]+/g,'_')}_${audit.audit_id}.csv`;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),2000);}catch(err){toast(humanError(err),'error');}
+  }
+  async function openAuditResults(auditId){
+    if(!isAuthenticated())return withAccess('STAFF',()=>openAuditResults(auditId));
+    const audit=state.audits.find(a=>a.audit_id===auditId);if(!audit)return toast('Audit not found.','error');
+    openModal('Audit results',`<div class="audit-workspace"><div class="audit-scope"><b>${esc(audit.name)}</b><span>${esc(audit.site_name||'')}${audit.area_name?' · '+esc(audit.area_name):''} · ${esc(audit.status)}${audit.completed_at?' '+esc(new Date(audit.completed_at).toLocaleDateString('en-MY')):''}</span></div>${auditReviewHtml(audit)}<div class="action-bar"><button type="button" class="btn light sm" id="auditResultsExport">${icon('download','sm')}Export results</button></div><section class="audit-roster-panel"><div class="audit-roster-filters"><input id="auditRosterSearch" type="search" placeholder="Search results"><select id="auditRosterFilter"><option value="all">All results</option><option>Verified</option><option>Mismatch</option><option>Not Found</option><option>Unexpected</option><option value="pending">Pending</option></select></div><div id="auditRosterList" class="audit-results-readonly"><div class="loading-inline"><span class="btn-spinner"></span>Loading results…</div></div></section></div>`,async()=>{
+      $('auditResultsExport').onclick=()=>void exportAuditResults(auditId);
+      try{const r=await AssetAPI.get('getAuditRoster',{audit_id:auditId});const rows=r.roster?.rows||[];const paint=()=>{if($('auditRosterList'))$('auditRosterList').innerHTML=auditRosterRowsHtml(rows,auditId);};$('auditRosterSearch').oninput=paint;$('auditRosterFilter').onchange=paint;paint();}catch(err){$('auditRosterList').innerHTML=`<div class="audit-roster-error">${esc(humanError(err))}</div>`;}
+    },{size:'lg'});
+  }
+  function renameAudit(auditId){
+    const audit=state.audits.find(a=>a.audit_id===auditId);if(!audit)return;
+    openModal('Rename audit',`<form id="auditRenameForm"><div class="field"><label>Audit name</label><input name="name" required maxlength="120" value="${esc(audit.name||'')}"></div><div class="modal-actions"><button type="button" class="btn light" data-close-modal>Cancel</button><button type="submit" class="btn blue">Save name</button></div></form>`,()=>{
+      $('auditRenameForm').addEventListener('submit',async e=>{e.preventDefault();const name=new FormData(e.target).get('name');await withBusy(e.target.querySelector('[type=submit]'),'Saving…',async()=>{try{const r=await AssetAPI.post('renameAudit',{audit_id:auditId,name});optimisticAudit({...audit,...r.row});closeModal();toast('Audit renamed.');}catch(err){toast(humanError(err),'error');}});});
+    },{size:'sm'});
+  }
+  async function cancelAudit(auditId){
+    const audit=state.audits.find(a=>a.audit_id===auditId);if(!audit)return;
+    if(await confirmAction({title:'Cancel this audit?',body:esc(audit.name)+' stops here. Results recorded so far are kept for reference, and the audit can no longer be completed.',confirmLabel:'Cancel audit',cancelLabel:'Keep auditing',danger:true})!==true)return;
+    try{const r=await AssetAPI.post('cancelAudit',{audit_id:auditId});optimisticAudit({...audit,...r.row});closeModal({all:true});toast('Audit cancelled.');void loadAudits(true);}catch(err){toast(humanError(err),'error');}
+  }
   async function openAuditVerify(auditId){
     if(!isAuthenticated())return withAccess('STAFF',()=>openAuditVerify(auditId));
     const audit=state.audits.find(a=>a.audit_id===auditId);if(!audit)return toast('Audit not found.','error');
-    openModal('Physical Audit',`<div class="audit-workspace"><div class="audit-scope"><b>${esc(audit.name)}</b><span>${esc(audit.site_name||'')}${audit.area_name?' · '+esc(audit.area_name):''}</span></div><div id="auditProgressPanel">${auditReviewHtml(audit)}</div><section class="audit-roster-panel"><div class="audit-roster-title"><h3>Expected assets</h3><small id="auditRosterCount">Loading expected assets…</small></div><div class="audit-roster-filters"><input id="auditRosterSearch" type="search" placeholder="Search name, type, brand, ID or serial"><select id="auditRosterFilter" aria-label="Filter audit assets"><option value="pending">Pending</option><option value="all">All</option><option value="Verified">Verified</option><option value="Mismatch">Mismatch</option><option value="Not Found">Not Found</option><option value="Unexpected">Unexpected</option></select></div><div id="auditRosterList" class="audit-roster-list"><div class="empty-state compact">Loading assets…</div></div></section><section id="auditSelectionArea" class="audit-verify-panel"><h3>Verify a device</h3><div class="field"><label>Selected asset ID or serial</label><input id="auditAssetInput" list="auditAssetOptions" placeholder="Select from list or type an asset ID" autocomplete="off"><datalist id="auditAssetOptions"></datalist></div><div class="audit-capture-actions"><label class="btn primary file-btn">${icon('camera','sm')} Capture label<input id="auditCameraFile" type="file" accept="image/*" capture="environment"></label><label class="btn light file-btn">${icon('image','sm')} Gallery<input id="auditGalleryFile" type="file" accept="image/*"></label></div><div id="auditScanFeedback" class="audit-feedback" aria-live="polite">Select an expected asset above, or capture its label and confirm the match.</div><div class="field"><label>Notes</label><input id="auditNote" placeholder="Optional observations"></div><div class="audit-capture-actions"><button id="auditVerifyBtn" class="btn blue" type="button">Verify selected</button><button id="auditNotFoundBtn" class="btn light" type="button">Mark Not Found</button></div></section><details class="audit-completion"><summary>Review & complete audit</summary><div id="auditCompleteReview" class="login-note">All expected devices must be reviewed before completion.</div><button id="auditCompleteBtn" class="btn primary" type="button" ${Number(audit.pending_count??Math.max(0,audit.expected_count-audit.checked_count))>0?'disabled':''}>Complete audit</button></details></div>`,()=>{
+    openModal('Physical Audit',`<div class="audit-workspace"><div class="audit-scope"><b>${esc(audit.name)}</b><span>${esc(audit.site_name||'')}${audit.area_name?' · '+esc(audit.area_name):''}</span></div><div id="auditProgressPanel">${auditReviewHtml(audit)}</div><section class="audit-roster-panel"><div class="audit-roster-title"><h3>Expected assets</h3><small id="auditRosterCount">Loading expected assets…</small></div><div class="audit-roster-filters"><input id="auditRosterSearch" type="search" placeholder="Search name, type, brand, ID or serial"><select id="auditRosterFilter" aria-label="Filter audit assets"><option value="pending">Pending</option><option value="all">All</option><option value="Verified">Verified</option><option value="Mismatch">Mismatch</option><option value="Not Found">Not Found</option><option value="Unexpected">Unexpected</option></select></div><div id="auditRosterList" class="audit-roster-list"><div class="empty-state compact">Loading assets…</div></div></section><section id="auditSelectionArea" class="audit-verify-panel"><h3>Verify a device</h3><div class="field"><label>Selected asset ID or serial</label><input id="auditAssetInput" list="auditAssetOptions" placeholder="Select from list or type an asset ID" autocomplete="off"><datalist id="auditAssetOptions"></datalist></div><div class="audit-capture-actions"><label class="btn primary file-btn">${icon('camera','sm')} Capture label<input id="auditCameraFile" type="file" accept="image/*" capture="environment"></label><label class="btn light file-btn">${icon('image','sm')} Gallery<input id="auditGalleryFile" type="file" accept="image/*"></label></div><div id="auditScanFeedback" class="audit-feedback" aria-live="polite">Select an expected asset above, or capture its label and confirm the match.</div><div class="field"><label>Notes</label><input id="auditNote" placeholder="Optional observations"></div><div class="audit-capture-actions"><button id="auditVerifyBtn" class="btn blue" type="button">Verify selected</button><button id="auditNotFoundBtn" class="btn light" type="button">Mark Not Found</button></div></section><div class="audit-completion audit-sticky-footer"><div id="auditCompleteReview"><b>${esc(audit.checked_count||0)} / ${esc(audit.expected_count||0)} checked</b><small>Every expected asset needs a result before you can complete.</small></div><button id="auditCompleteBtn" class="btn blue" type="button" ${Number(audit.pending_count??Math.max(0,audit.expected_count-audit.checked_count))>0?'disabled':''}>Complete audit</button></div></div>`,()=>{
       const input=$('auditAssetInput'),feedback=$('auditScanFeedback');
       const findSelected=v=>(state.auditRoster||[]).find(x=>String(x.asset_id).toLowerCase()===String(v).toLowerCase());
       input.addEventListener('change',()=>{const val=input.value.trim().toLowerCase();const match=(state.auditRoster||[]).find(x=>x.serial&&String(x.serial).toLowerCase()===val);if(match)input.value=match.asset_id;input.dispatchEvent(new Event('input'));});
@@ -2521,15 +2790,32 @@
         });
       };
       ['auditCameraFile','auditGalleryFile'].forEach(id=>$(id).addEventListener('change',async e=>{const f=e.target.files?.[0];e.target.value='';await scan(f);}));
-      $('auditVerifyBtn').addEventListener('click',async()=>{if(feedback.classList.contains('conflict')&&!confirm('Location conflict: this asset may not be expected here. Record a mismatch without moving it?'))return;await withBusy($('auditVerifyBtn'),'Verifying…',async()=>verifyAudit(auditId,input.value,$('auditNote').value,{keepOpen:true}));});
-      $('auditNotFoundBtn').addEventListener('click',async()=>{const selected=findSelected(input.value.trim());if(!selected?.expected)return toast('Select an expected asset to mark Not Found.','error');if(!confirm('Mark the selected expected asset as Not Found?'))return;await withBusy($('auditNotFoundBtn'),'Recording…',async()=>verifyAudit(auditId,input.value,$('auditNote').value,{keepOpen:true,result:'Not Found'}));});
+      $('auditVerifyBtn').addEventListener('click',async()=>{if(feedback.classList.contains('conflict')&&await confirmAction({title:'Record a mismatch?',body:'This asset may not be expected here. Recording it does not move it; you can move it afterwards.',confirmLabel:'Record mismatch'})!==true)return;await withBusy($('auditVerifyBtn'),'Verifying…',async()=>verifyAudit(auditId,input.value,$('auditNote').value,{keepOpen:true}));});
+      $('auditNotFoundBtn').addEventListener('click',async()=>{const selected=findSelected(input.value.trim());if(!selected?.expected)return toast('Select an expected asset to mark Not Found.','error');if(await confirmAction({title:'Mark as Not Found?',body:'The selected asset will be recorded as not found in this audit. You can change the result later.',confirmLabel:'Mark Not Found'})!==true)return;await withBusy($('auditNotFoundBtn'),'Recording…',async()=>verifyAudit(auditId,input.value,$('auditNote').value,{keepOpen:true,result:'Not Found'}));});
       $('auditCompleteBtn').addEventListener('click',async()=>{await completeAudit(auditId,$('auditCompleteBtn'));});
       refreshAuditRoster(auditId);
     },{size:'lg'});
   }
+  let auditVerifyChain=Promise.resolve(),auditVerifyPending=0;
+  // Staff verify asset after asset in the field, so the result shows at once and saves in
+  // order behind the scenes. A failure restores the card and offers a retry.
   async function verifyAudit(auditId,assetId,notes='',opts={}){
     if(!isAuthenticated())return withAccess('STAFF',()=>verifyAudit(auditId,assetId,notes,opts));
     if(!assetId)return toast('Enter an asset ID.','error');
+    const row=opts.keepOpen?(state.auditRoster||[]).find(x=>String(x.asset_id).toLowerCase()===String(assetId).toLowerCase()):null;
+    if(row){
+      const previous={result:row.result,notes:row.notes};
+      row.result=opts.result||(row.expected?'Verified':'Mismatch');row.notes=notes;state.paintAuditRoster?.();
+      if($('auditScanFeedback'))$('auditScanFeedback').textContent=`${assetId}: ${row.result}. Select another asset.`;if($('auditAssetInput'))$('auditAssetInput').value='';if($('auditNote'))$('auditNote').value='';
+      auditVerifyPending++;
+      auditVerifyChain=auditVerifyChain.then(async()=>{
+        try{const r=await AssetAPI.post('verifyAuditAsset',{audit_id:auditId,asset_id:row.asset_id,notes,result:opts.result||''});row.result=r.row.result;state.paintAuditRoster?.();}
+        catch(err){Object.assign(row,previous);state.paintAuditRoster?.();toast(row.asset_id+' was not saved. '+humanError(err),'error',{actions:[{label:'Try again',onClick:()=>void verifyAudit(auditId,row.asset_id,notes,opts)}]});}
+        // Refresh the totals once the queue drains, not after every asset.
+        if(--auditVerifyPending===0)await refreshAuditSummary(auditId);
+      });
+      return;
+    }
     try{const r=await AssetAPI.post('verifyAuditAsset',{audit_id:auditId,asset_id:assetId,notes,result:opts.result||''});toast(`Audit: ${r.row.result}`);if($('auditRosterList'))await refreshAuditRoster(auditId);else await refreshAuditSummary(auditId);
       if(opts.keepOpen){if($('auditScanFeedback'))$('auditScanFeedback').textContent=`${assetId}: ${r.row.result} recorded. Select another asset.`;if($('auditAssetInput'))$('auditAssetInput').value='';if($('auditNote'))$('auditNote').value='';}else closeModal();
     }catch(err){toast(humanError(err),'error');}
@@ -2639,23 +2925,69 @@
 
 
 
-  function renderAdmin(){ if(!isAdmin())return; const p=$('adminPanel'); const tab=state.adminTab; if(tab==='sites')p.innerHTML=adminSitesHtml(); if(tab==='categories')p.innerHTML=adminCategoriesHtml(); if(tab==='fields')p.innerHTML=adminFieldsHtml(); if(tab==='users')p.innerHTML=adminUsersHtml(); if(tab==='system')p.innerHTML=adminSystemHtml(); bindAdminPanel(); }
-  function adminSitesHtml(){return `<div class="admin-toolbar"><div><h3>Sites & Areas</h3><small>Physical site is separate from department/area.</small></div><button class="btn primary sm" data-admin-add="site">${icon('plus','sm')}Add Site</button></div><div class="ref-list">${state.refs.sites.map(s=>`<div class="ref-row"><div><b>${esc(s.name)}</b><small>${esc(s.site_id)}</small></div><button class="btn light sm" data-admin-edit="site" data-id="${esc(s.site_id)}">Edit</button></div>`).join('')}</div><div class="admin-toolbar" style="margin-top:20px"><div><h3>Areas / Departments</h3></div><button class="btn primary sm" data-admin-add="area">${icon('plus','sm')}Add Area</button></div><div class="ref-list">${state.refs.areas.map(a=>`<div class="ref-row"><div><b>${esc(a.name)}</b><small>${esc(state.refs.sites.find(s=>s.site_id===a.site_id)?.name||a.site_id)}</small></div><button class="btn light sm" data-admin-edit="area" data-id="${esc(a.area_id)}">Edit</button></div>`).join('')}</div>`;}
-  function adminCategoriesHtml(){return `<div class="admin-toolbar"><div><h3>Dynamic Categories</h3><small>Admin manages the master category list and asset-ID prefixes. New free-text categories can still be used during asset creation.</small></div><button class="btn primary sm" data-admin-add="category">${icon('plus','sm')}Add Category</button></div><div class="ref-list">${state.refs.categories.map(c=>`<div class="ref-row"><div><b>${esc(c.name)}</b><small>Prefix ${esc(c.prefix||'AS')} · ${esc(c.category_id)}</small></div><button class="btn light sm" data-admin-edit="category" data-id="${esc(c.category_id)}">Edit</button></div>`).join('')}</div>`;}
-  function adminFieldsHtml(){return `<div class="admin-toolbar"><div><h3>Custom Asset Information</h3><small>Add Warranty, Vendor, IP Address, Purchase Cost or future fields without changing the Assets sheet.</small></div><button class="btn primary sm" data-admin-add="customField">${icon('plus','sm')}Add Field</button></div><div class="ref-list">${state.refs.custom_fields.map(f=>`<div class="ref-row"><div><b>${esc(f.label)}</b><small>${esc(f.field_type)}${String(f.required)==='true'||f.required===true?' · required':''}</small></div><button class="btn light sm" data-admin-edit="customField" data-id="${esc(f.field_id)}">Edit</button></div>`).join('')}</div>`;}
-  function adminUsersHtml(){const users=state.refs.users||[];return `<div class="admin-toolbar"><div><h3>Users & Access</h3><small>Guest can read + add assets. Staff handles operations. Admin controls configuration and destructive actions.</small></div><button class="btn primary sm" data-admin-add="user">${icon('plus','sm')}Add User</button></div><div id="adminUsersList" class="ref-list">${users.length?users.map(u=>`<div class="ref-row"><div><b>${esc(u.name||u.username||u.email)}</b><small>@${esc(u.username||'—')}${u.email?' · '+esc(u.email):''} · ${esc(u.role)} · ${u.active?'active':'disabled'}</small></div><button class="btn light sm" data-user-edit="${esc(u.username||u.email)}">Edit</button></div>`).join(''):'<div class="empty-state compact">No users configured yet. Use Add User.</div>'}</div>`;}
+  function renderAdmin({fetch=true}={}){ if(!isAdmin())return; const p=$('adminPanel'); const tab=state.adminTab; if(tab==='sites')p.innerHTML=adminSitesHtml(); if(tab==='categories')p.innerHTML=adminCategoriesHtml(); if(tab==='fields')p.innerHTML=adminFieldsHtml(); if(tab==='users')p.innerHTML=adminUsersHtml(); if(tab==='system')p.innerHTML=adminSystemHtml(); bindAdminPanel(); if(fetch&&!state.adminRefs)void loadAdminRefs(); }
+  // System Setup lists every row, archived ones greyed out, so nothing disappears for good.
+  const ADMIN_KINDS={site:{list:'sites',key:'site_id',label:'site',tab:'sites'},area:{list:'areas',key:'area_id',label:'area',tab:'sites'},category:{list:'categories',key:'category_id',label:'category',tab:'categories'},customField:{list:'custom_fields',key:'field_id',label:'custom field',tab:'fields'}};
+  const isActiveRow=r=>!(r.active===false||String(r.active)==='false');
+  function adminRows(kind){const list=ADMIN_KINDS[kind].list;return (state.adminRefs?.[list]||state.refs[list]||[]);}
+  async function loadAdminRefs(){
+    if(!lifecycleEnabled()||!isAdmin())return;
+    try{const r=await AssetAPI.get('adminReferences');state.adminRefs=r.references;if(state.route==='admin')renderAdmin({fetch:false});}catch(err){console.warn('Admin references',err);}
+  }
+  function adminRowHtml(kind,r,title,detail){
+    const cfg=ADMIN_KINDS[kind],id=r[cfg.key],active=isActiveRow(r);
+    const menu=lifecycleEnabled()?actionMenuHtml([active?`<button type="button" class="btn light sm danger-text" role="menuitem" data-admin-archive="${kind}" data-id="${esc(id)}">${icon('trash','sm')}Archive ${cfg.label}</button>`:`<button type="button" class="btn light sm" role="menuitem" data-admin-restore="${kind}" data-id="${esc(id)}">${icon('refresh','sm')}Restore ${cfg.label}</button>`]):'';
+    return `<div class="ref-row${active?'':' archived'}"><div><b>${esc(title)}</b>${active?'':' <span class="badge retired">Archived</span>'}<small>${esc(detail)}</small></div><div class="ref-actions"><button class="btn light sm" data-admin-edit="${kind}" data-id="${esc(id)}">Edit</button>${menu}</div></div>`;
+  }
+  const byActive=rows=>rows.slice().sort((a,b)=>Number(!isActiveRow(a))-Number(!isActiveRow(b)));
+  function adminSitesHtml(){const sites=adminRows('site');return `<div class="admin-toolbar"><div><h3>Sites</h3><small>Physical locations. Areas belong to a site.</small></div><button class="btn blue sm" data-admin-add="site">${icon('plus','sm')}Add site</button></div><div class="ref-list">${byActive(sites).map(s=>adminRowHtml('site',s,s.name,state.assets.filter(a=>a.site_id===s.site_id&&!['Retired','Merged'].includes(a.status)).length+' assets')).join('')||'<div class="empty-state compact">No sites yet.</div>'}</div><div class="admin-toolbar" style="margin-top:20px"><div><h3>Areas / Departments</h3></div><button class="btn blue sm" data-admin-add="area">${icon('plus','sm')}Add area</button></div><div class="ref-list">${byActive(adminRows('area')).map(a=>adminRowHtml('area',a,a.name,sites.find(s=>s.site_id===a.site_id)?.name||a.site_id)).join('')||'<div class="empty-state compact">No areas yet.</div>'}</div>`;}
+  function adminCategoriesHtml(){return `<div class="admin-toolbar"><div><h3>Categories</h3><small>The master category list and asset-ID prefixes. New free-text categories can still be used when adding assets.</small></div><button class="btn blue sm" data-admin-add="category">${icon('plus','sm')}Add category</button></div><div class="ref-list">${byActive(adminRows('category')).map(c=>adminRowHtml('category',c,c.name,'Prefix '+(c.prefix||'AS'))).join('')}</div>`;}
+  function adminFieldsHtml(){return `<div class="admin-toolbar"><div><h3>Custom asset information</h3><small>Warranty, vendor, IP address, purchase cost or other fields, without changing the Assets sheet.</small></div><button class="btn blue sm" data-admin-add="customField">${icon('plus','sm')}Add field</button></div><div class="ref-list">${byActive(adminRows('customField')).map(f=>adminRowHtml('customField',f,f.label,f.field_type+(String(f.required)==='true'||f.required===true?' · required':''))).join('')}</div>`;}
+  function adminUsersHtml(){const users=(state.adminRefs?.users||state.refs.users||[]).slice().sort((a,b)=>Number(!a.active)-Number(!b.active));const me=String(state.user?.username||'').toLowerCase();return `<div class="admin-toolbar"><div><h3>Users & Access</h3><small>Guest can read and add assets. Staff handles operations. Admin controls configuration and destructive actions.</small></div><button class="btn blue sm" data-admin-add="user">${icon('plus','sm')}Add user</button></div><div id="adminUsersList" class="ref-list">${users.length?users.map(u=>{const self=String(u.username||'').toLowerCase()===me;return `<div class="ref-row${u.active?'':' archived'}"><div><b>${esc(u.name||u.username||u.email)}</b>${u.active?'':' <span class="badge retired">Disabled</span>'}${self?' <span class="badge spare">You</span>':''}<small>@${esc(u.username||'—')}${u.email?' · '+esc(u.email):''} · ${u.role==='ADMIN'?'Admin':'Staff'}</small></div><div class="ref-actions"><button class="btn light sm" data-user-edit="${esc(u.user_id||u.username||u.email)}">Edit</button>${self?'':actionMenuHtml([u.active?`<button type="button" class="btn light sm danger-text" role="menuitem" data-user-toggle="${esc(u.user_id||u.username)}">Disable sign-in</button>`:`<button type="button" class="btn light sm" role="menuitem" data-user-toggle="${esc(u.user_id||u.username)}">Enable sign-in</button>`])}</div></div>`;}).join(''):'<div class="empty-state compact">No users configured yet. Use Add user.</div>'}</div>`;}
   function adminSystemHtml(){
     const imp=state.boot?.legacy_import||{total:83,imported:0,pending:83,source:'JCP DEVICES LIST - SUMMARRY.csv'};
     const done=Number(imp.pending||0)===0;
     const timing=AssetAPI.getLastTiming?.();
     const lastSync=state.sync.lastCompleted?new Date(state.sync.lastCompleted).toLocaleString('en-MY'):'Not synced yet';
-    return `<h3>System</h3><div class="detail-grid" style="margin-top:12px"><div class="detail-field"><label>Frontend version</label><div>${APP_VERSION}</div></div><div class="detail-field"><label>Backend version</label><div>${esc(state.boot?.version||'—')}</div></div><div class="detail-field"><label>Authentication</label><div>${state.boot?.write_auth_required?'Guest: Read + Add · Staff: Operate · Admin: Configure':'Setup mode'}</div></div><div class="detail-field"><label>Last API request</label><div>${timing?esc(timing.ms)+' ms':'—'}</div></div><div class="detail-field"><label>Browser cache</label><div>IndexedDB + memory</div></div><div class="detail-field"><label>Last background sync</label><div>${esc(lastSync)}</div></div></div><div class="system-import-card"><div><span class="recognition-badge ${done?'good':'warn'}">${done?'Imported':'Ready to import'}</span><h4>Original JCP device list</h4><p>${esc(imp.source||'JCP DEVICES LIST - SUMMARRY.csv')}</p><b>${esc(imp.imported||0)} / ${esc(imp.total||83)} linked to AssetHub</b><small>${done?'All source records are linked. The importer is safe to run again.':esc(imp.pending||83)+' source records are still pending.'}</small><small>Phone numbers, account/telco details and billing information are stored separately and are only returned to signed-in Staff/Admin.</small></div><button id="importLegacyBtn" class="btn ${done?'light':'primary'}" ${done?'':'data-import-ready="1"'}>${done?'Check Import Again':'Import Original Data'}</button></div><div class="login-note" style="margin-top:14px">Firebase handles frontend releases and rollback. AssetHub checks version.json without cache; Apps Script configuration now reads IDs from Script Properties.</div>`;
+    return `<h3>System</h3><div class="detail-grid" style="margin-top:12px"><div class="detail-field"><label>Frontend version</label><div>${APP_VERSION}</div></div><div class="detail-field"><label>Backend version</label><div>${esc(state.boot?.version||'—')}</div></div><div class="detail-field"><label>Authentication</label><div>${state.boot?.write_auth_required?'Guest: Read + Add · Staff: Operate · Admin: Configure':'Setup mode'}</div></div><div class="detail-field"><label>Last API request</label><div>${timing?esc(timing.action)+': '+esc(timing.ms)+' ms'+(timing.serverMs!=null?' ('+esc(timing.serverMs)+' ms on server)':''):'—'}</div></div><div class="detail-field"><label>Browser cache</label><div>IndexedDB + memory</div></div><div class="detail-field"><label>Last background sync</label><div>${esc(lastSync)}</div></div></div><div class="system-import-card"><div><span class="recognition-badge ${done?'good':'warn'}">${done?'Imported':'Ready to import'}</span><h4>Original JCP device list</h4><p>${esc(imp.source||'JCP DEVICES LIST - SUMMARRY.csv')}</p><b>${esc(imp.imported||0)} / ${esc(imp.total||83)} linked to AssetHub</b><small>${done?'All source records are linked. The importer is safe to run again.':esc(imp.pending||83)+' source records are still pending.'}</small><small>Phone numbers, account/telco details and billing information are stored separately and are only returned to signed-in Staff/Admin.</small></div><button id="importLegacyBtn" class="btn ${done?'light':'primary'}" ${done?'':'data-import-ready="1"'}>${done?'Check Import Again':'Import Original Data'}</button></div><div class="login-note" style="margin-top:14px">Firebase handles frontend releases and rollback. AssetHub checks version.json without cache; Apps Script configuration now reads IDs from Script Properties.</div>`;
   }
+  function adminUserById(id){return (state.adminRefs?.users||state.refs.users||[]).find(u=>(u.user_id||u.username||u.email)===id);}
   function bindAdminPanel(){
     $$('[data-admin-add]').forEach(b=>b.addEventListener('click',()=>openAdminEditor(b.dataset.adminAdd)));
     $$('[data-admin-edit]').forEach(b=>b.addEventListener('click',()=>openAdminEditor(b.dataset.adminEdit,b.dataset.id)));
-    $$('[data-user-edit]').forEach(b=>b.addEventListener('click',()=>openUserEditor((state.refs.users||[]).find(u=>(u.username||u.email)===b.dataset.userEdit)||{})));
+    $$('[data-user-edit]').forEach(b=>b.addEventListener('click',()=>openUserEditor(adminUserById(b.dataset.userEdit)||{})));
+    $$('[data-admin-archive]').forEach(b=>b.addEventListener('click',()=>void setAdminRowActive(b.dataset.adminArchive,b.dataset.id,false)));
+    $$('[data-admin-restore]').forEach(b=>b.addEventListener('click',()=>void setAdminRowActive(b.dataset.adminRestore,b.dataset.id,true)));
+    $$('[data-user-toggle]').forEach(b=>b.addEventListener('click',()=>void toggleUser(adminUserById(b.dataset.userToggle))));
     $('importLegacyBtn')?.addEventListener('click',importLegacyInventory);
+  }
+  // Archive/restore resends the row as it is, changing only `active`.
+  function adminSavePayload(kind,row,active){
+    const base={kind,id:row[ADMIN_KINDS[kind].key],active:String(active)};
+    if(kind==='site')return {...base,name:row.name};
+    if(kind==='area')return {...base,name:row.name,site_id:row.site_id};
+    if(kind==='category')return {...base,name:row.name,prefix:row.prefix};
+    return {...base,label:row.label,field_type:row.field_type,required:String(row.required===true||String(row.required)==='true'),options_json:row.options_json||'',sort_order:row.sort_order};
+  }
+  function applyAdminChange(kind,row){
+    const cfg=ADMIN_KINDS[kind];
+    if(state.adminRefs)state.adminRefs[cfg.list]=upsertByKey(state.adminRefs[cfg.list]||[],row,cfg.key);
+    if(isActiveRow(row))applyAdminRow(kind,row);
+    else{state.refs[cfg.list]=(state.refs[cfg.list]||[]).filter(x=>x[cfg.key]!==row[cfg.key]);applyAdminRow(kind,null);populateFilters();}
+  }
+  async function setAdminRowActive(kind,id,active){
+    const cfg=ADMIN_KINDS[kind],row=adminRows(kind).find(x=>x[cfg.key]===id);if(!row)return;
+    if(!active){
+      const using=kind==='site'?state.assets.filter(a=>a.site_id===id&&!['Retired','Merged'].includes(a.status)).length:kind==='area'?state.assets.filter(a=>a.area_id===id&&!['Retired','Merged'].includes(a.status)).length:kind==='category'?state.assets.filter(a=>a.category_id===id&&!['Retired','Merged'].includes(a.status)).length:0;
+      const body=`${esc(row.name||row.label)} will no longer be offered when adding or editing assets.${using?` <b>${using} active asset${using===1?' still uses':'s still use'} it</b>; they keep their current value.`:''} You can restore it at any time.`;
+      if(await confirmAction({title:`Archive this ${cfg.label}?`,body,confirmLabel:'Archive',danger:true})!==true)return;
+    }
+    try{const r=await AssetAPI.post('adminSave',adminSavePayload(kind,row,active));applyAdminChange(kind,r.row);renderAdmin({fetch:false});toast(`${cfg.label[0].toUpperCase()+cfg.label.slice(1)} ${active?'restored':'archived'}.`);scheduleSync('admin-config',40);}catch(err){toast(humanError(err),'error');}
+  }
+  async function toggleUser(u){
+    if(!u)return;const enable=!u.active;
+    if(!enable&&await confirmAction({title:'Disable this user?',body:esc(u.name||u.username)+' will be signed out and can no longer sign in. Their history is kept. You can enable them again later.',confirmLabel:'Disable',danger:true})!==true)return;
+    try{const r=await AssetAPI.post('saveUser',{user_id:u.user_id,active:String(enable)});const row={...u,...r.row};state.refs.users=upsertByKey(state.refs.users||[],row,'user_id');if(state.adminRefs)state.adminRefs.users=upsertByKey(state.adminRefs.users||[],row,'user_id');renderAdmin({fetch:false});toast(enable?'User enabled.':'User disabled.');}catch(err){toast(humanError(err),'error');}
   }
   async function importLegacyInventory(){
     const btn=$('importLegacyBtn');
@@ -2688,14 +3020,24 @@
 
   function openAdminEditor(kind,id=''){
     if(kind==='user')return openUserEditor();
-    let row={}; if(id){const arr=kind==='site'?state.refs.sites:kind==='area'?state.refs.areas:kind==='category'?state.refs.categories:state.refs.custom_fields; const key=kind==='site'?'site_id':kind==='area'?'area_id':kind==='category'?'category_id':'field_id';row=arr.find(x=>x[key]===id)||{};}
+    const cfg=ADMIN_KINDS[kind],row=id?adminRows(kind).find(x=>x[cfg.key]===id)||{}:{};
     let fields=''; if(kind==='site')fields=`<div class="field"><label>Name</label><input name="name" value="${esc(row.name||'')}" required></div>`;
-    if(kind==='area')fields=`<div class="field"><label>Site</label><select name="site_id">${state.refs.sites.map(s=>`<option value="${esc(s.site_id)}" ${s.site_id===row.site_id?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div><div class="field"><label>Name</label><input name="name" value="${esc(row.name||'')}" required></div>`;
-    if(kind==='category')fields=`<div class="field"><label>Name</label><input name="name" value="${esc(row.name||'')}" required></div><div class="field"><label>Asset ID prefix</label><input name="prefix" value="${esc(row.prefix||'AS')}" maxlength="5"></div>`;
-    if(kind==='customField')fields=`<div class="field"><label>Label</label><input name="label" value="${esc(row.label||'')}" required></div><div class="field"><label>Type</label><select name="field_type">${['text','date','number','select','boolean'].map(t=>`<option ${row.field_type===t?'selected':''}>${t}</option>`).join('')}</select></div><div class="field full"><label>Options JSON <span style="font-weight:500">(select only)</span></label><input name="options_json" value='${esc(row.options_json||'')}' placeholder='["Option A","Option B"]'></div><div class="field"><label>Required</label><select name="required"><option value="false">No</option><option value="true" ${String(row.required)==='true'||row.required===true?'selected':''}>Yes</option></select></div><div class="field"><label>Sort order</label><input name="sort_order" type="number" value="${esc(row.sort_order||100)}"></div>`;
-    openModal(`${id?'Edit':'Add'} ${kind}`,`<form id="adminEditForm" class="form-grid">${fields}<div class="field"><label>Active</label><select name="active"><option value="true">Yes</option><option value="false" ${String(row.active)==='false'?'selected':''}>No</option></select></div><div class="field full"><div class="modal-actions"><button class="btn blue" type="submit">Save</button></div></div></form>`,()=>{$('adminEditForm').addEventListener('submit',async e=>{e.preventDefault();const btn=e.target.querySelector('[type=submit]');const p=Object.fromEntries(new FormData(e.target).entries());p.kind=kind;p.id=id;await withBusy(btn,'Saving...',async()=>{try{const r=await AssetAPI.post('adminSave',p);applyAdminRow(kind,r.row);toast('Saved.');closeModal();state.adminTab=kind==='customField'?'fields':kind==='category'?'categories':'sites';setRoute('admin');renderAdmin();scheduleSync('admin-config',40);}catch(err){toast(humanError(err),'error');}});});});
+    if(kind==='area')fields=`<div class="field"><label>Site</label><select name="site_id" required><option value="">Choose site</option>${state.refs.sites.map(s=>`<option value="${esc(s.site_id)}" ${s.site_id===row.site_id?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div><div class="field"><label>Name</label><input name="name" value="${esc(row.name||'')}" required></div>`;
+    if(kind==='category')fields=`<div class="field"><label>Name</label><input name="name" value="${esc(row.name||'')}" required></div><div class="field"><label>Asset ID prefix</label><input name="prefix" value="${esc(row.prefix||'AS')}" maxlength="5"><small>Used for new asset IDs, e.g. JCP-${esc(row.prefix||'AS')}-0001.</small></div>`;
+    let options=[];try{options=JSON.parse(row.options_json||'[]');}catch{}
+    if(kind==='customField')fields=`<div class="field"><label>Label</label><input name="label" value="${esc(row.label||'')}" required></div><div class="field"><label>Type</label><select name="field_type" id="adminFieldType">${[['text','Text'],['date','Date'],['number','Number'],['select','Choice list'],['boolean','Yes / No']].map(([v,l])=>`<option value="${v}" ${(row.field_type||'text')===v?'selected':''}>${l}</option>`).join('')}</select></div><div class="field full" id="adminOptionsField"><label>Choices <small>(one per line)</small></label><textarea id="adminOptions" rows="4" placeholder="Option A&#10;Option B">${esc(Array.isArray(options)?options.join('\n'):'')}</textarea></div><div class="field"><label>Required</label><select name="required"><option value="false">No</option><option value="true" ${String(row.required)==='true'||row.required===true?'selected':''}>Yes</option></select></div><div class="field"><label>Sort order</label><input name="sort_order" type="number" value="${esc(row.sort_order||100)}"></div>`;
+    openModal(`${id?'Edit':'Add'} ${cfg.label}`,`<form id="adminEditForm" class="form-grid">${fields}<div class="field full"><div class="modal-actions"><button type="button" class="btn light" data-close-modal>Cancel</button><button class="btn blue" type="submit">Save</button></div></div></form>`,()=>{
+      const type=$('adminFieldType'),optionsField=$('adminOptionsField');const syncType=()=>{if(optionsField)optionsField.hidden=type.value!=='select';};type?.addEventListener('change',syncType);syncType();
+      $('adminEditForm').addEventListener('submit',async e=>{e.preventDefault();const btn=e.target.querySelector('[type=submit]');const p=Object.fromEntries(new FormData(e.target).entries());p.kind=kind;p.id=id;
+        // Editing never changes whether a row is archived; that is its own action.
+        p.active=String(id?isActiveRow(row):true);
+        if(kind==='customField'){const list=String($('adminOptions')?.value||'').split('\n').map(x=>x.trim()).filter(Boolean);if(p.field_type==='select'&&!list.length)return toast('Add at least one choice.','error');p.options_json=p.field_type==='select'?JSON.stringify(list):'';}
+        await withBusy(btn,'Saving...',async()=>{try{const r=await AssetAPI.post('adminSave',p);applyAdminChange(kind,r.row);toast('Saved.');closeModal();state.adminTab=cfg.tab;setRoute('admin');renderAdmin({fetch:false});scheduleSync('admin-config',40);}catch(err){toast(humanError(err),'error');}});});
+    });
   }
-  function openUserEditor(u={}){openModal((u.username||u.email)?'Edit User':'Add User',`<form id="userForm" class="form-grid"><div class="field"><label>Username</label><input name="username" value="${esc(u.username||'')}" required></div><div class="field"><label>Email <span style="font-weight:500">(optional)</span></label><input name="email" type="email" value="${esc(u.email||'')}"></div><div class="field"><label>Name</label><input name="name" value="${esc(u.name||'')}" required></div><div class="field"><label>Role</label><select name="role"><option ${u.role==='STAFF'?'selected':''}>STAFF</option><option ${u.role==='ADMIN'?'selected':''}>ADMIN</option></select></div><div class="field"><label>Password</label><input name="password" type="password"><small>Leave blank to keep the existing password.</small></div><div class="field"><label>Active</label><select name="active"><option value="true" ${u.active!==false?'selected':''}>Yes</option><option value="false" ${u.active===false?'selected':''}>No</option></select></div><div class="field full"><div class="modal-actions"><button class="btn blue" type="submit">Save User</button></div></div></form>`,()=>{$('userForm').addEventListener('submit',async e=>{e.preventDefault();const btn=e.target.querySelector('[type=submit]');await withBusy(btn,'Saving...',async()=>{try{const r=await AssetAPI.post('saveUser',Object.fromEntries(new FormData(e.target).entries()));state.refs.users=upsertByKey(state.refs.users||[],r.row,'user_id');toast('User saved.');closeModal();state.adminTab='users';setRoute('admin');renderAdmin();scheduleSync('user-config',40);}catch(err){toast(humanError(err),'error');}});});});}
+  function openUserEditor(u={}){
+    const editing=!!(u.user_id||u.username);
+    openModal(editing?'Edit user':'Add user',`<form id="userForm" class="form-grid">${editing?`<input type="hidden" name="user_id" value="${esc(u.user_id||'')}">`:''}<div class="field"><label>Username</label><input name="username" value="${esc(u.username||'')}" ${editing?'readonly':'required'} autocomplete="off">${editing?'<small>Usernames cannot change; add a new user instead.</small>':''}</div><div class="field"><label>Email <small>(optional)</small></label><input name="email" type="email" value="${esc(u.email||'')}"></div><div class="field"><label>Name</label><input name="name" value="${esc(u.name||'')}" required></div><div class="field"><label>Role</label><select name="role"><option value="STAFF" ${u.role!=='ADMIN'?'selected':''}>Staff</option><option value="ADMIN" ${u.role==='ADMIN'?'selected':''}>Admin</option></select></div><div class="field"><label>${editing?'New password':'Password'}</label><input name="password" type="password" minlength="8" autocomplete="new-password" ${editing?'':'required'}><small>${editing?'Leave blank to keep the current password.':'At least 8 characters.'}</small></div><div class="field full"><div class="modal-actions"><button type="button" class="btn light" data-close-modal>Cancel</button><button class="btn blue" type="submit">Save user</button></div></div></form>`,()=>{$('userForm').addEventListener('submit',async e=>{e.preventDefault();const btn=e.target.querySelector('[type=submit]');const params=Object.fromEntries(new FormData(e.target).entries());if(editing){delete params.username;if(!params.password)delete params.password;}await withBusy(btn,'Saving...',async()=>{try{const r=await AssetAPI.post('saveUser',params);const row={...u,...r.row};state.refs.users=upsertByKey(state.refs.users||[],row,'user_id');if(state.adminRefs)state.adminRefs.users=upsertByKey(state.adminRefs.users||[],row,'user_id');toast('User saved.');closeModal();state.adminTab='users';setRoute('admin');renderAdmin({fetch:false});scheduleSync('user-config',40);}catch(err){toast(humanError(err),'error');}});});});}
 
   function setScannerStage(stage){
     const scanner=$('page-scanner'); if(!scanner)return;
@@ -2848,7 +3190,7 @@
     setScannerStage('result');
     $('scanResult').innerHTML=`<div class="result-card"><div class="recognition-badges"><span class="recognition-badge">${esc(String(format||'barcode').replaceAll('_',' '))}</span></div><strong>Code detected</strong><div class="result-grid"><span>Value</span><b>${esc(v)}</b><span>Meaning</span><b>${esc(note)}</b></div><div class="actions scan-result-actions" style="margin-top:10px"><button id="useCodeSerial" class="btn light sm">Use in New Asset</button><button id="scanAgain" class="btn light sm">Scan again</button></div></div>`;
     $('useCodeSerial')?.addEventListener('click',()=>openAssetForm({serial:v}));
-    $('scanAgain')?.addEventListener('click',resetScannerResult);
+    $('scanAgain')?.addEventListener('click',()=>void discardScan());
   }
 
   function renderScanAsset(a,meta={}){
@@ -2866,13 +3208,24 @@
       if(t)await openScanReconcile(t,incoming,meta.scanFile||state.scanFile);
     }));
     $('openScannedAsset')?.addEventListener('click' ,()=>openAsset(a.asset_id));
-    $('scanAgainExisting')?.addEventListener('click',resetScannerResult);
+    $('scanAgainExisting')?.addEventListener('click',()=>void discardScan());
     $('reconcileExactScan')?.addEventListener('click',()=>withAccess('STAFF',()=>openScanReconcile(a,incoming,meta.scanFile||state.scanFile)));
     $('mergeExactScan')?.addEventListener('click',()=>withAccess('STAFF',()=>openManualMerge(a)));
   }
 
+  // A deliberate "Discard scan": confirm when the person edited anything, and drop its draft.
+  async function discardScan(){
+    const session=state.recognitionSession;
+    if(session&&!session.locallySaved&&session.photos?.length){
+      const edited=Object.keys(session.overrides||{}).length+Object.keys(session.resolutions||{}).length+Object.keys(session.entry?.changed||{}).length;
+      if(edited&&await confirmAction({title:'Discard this scan?',body:'The photos and the values you edited will be removed from this device.',confirmLabel:'Discard scan',danger:true})!==true)return;
+      if(state.recognitionSession!==session)return;
+      if(session.draftId)await workflows?.forget(session.draftId);
+    }
+    resetScannerResult();
+  }
   function resetScannerResult({restartCamera=true}={}){
-    state.scannerVersion++;state.scanUpdateTarget=null;clearTimeout(universalMatchTimer);
+    state.scannerVersion++;state.scanUpdateTarget=null;$('scanTargetBanner')?.remove();clearTimeout(universalMatchTimer);
     $('scanMatchingUnits')?._dispose?.();
     $('scanResult').innerHTML='<div class="empty-state compact">Ready for another scan.</div>';
     state.lastRecognition=null;
@@ -2930,8 +3283,9 @@
     const session=recognitionState(),proposal=recognitionProposal();
     const editing=document.activeElement;
     const editingField=editing?.dataset?.universalField;
-    const editingSpecs=editing?.id==='v27Specs';
-    const selection=editingField||editingSpecs?[editing.selectionStart,editing.selectionEnd]:null;
+    const editingSpecs=false;
+    const attrFocus=editing?.closest?.('[data-attr-row]')?{row:editing.closest('[data-attr-row]').dataset.attrRow,field:editing.hasAttribute('data-attr-label')?'label':'value'}:null;
+    const selection=editingField?[editing.selectionStart,editing.selectionEnd]:null;
     const incoming=recognitionIncoming();
     const hasPhotos=session.photos.length>0;
     const running=session.photos.some(x=>x.processing);
@@ -2939,10 +3293,12 @@
     const photoHtml=session.photos.map((x,i)=>`<div class="v27-photo"><img src="${esc(x.url)}" alt="Source photo ${i+1}"><div><b>Image ${i+1}${workflows?.enabled()&&x.main?' · ★ Main':''}</b><small>${esc(x.processing?'Processing…':x.error?'Needs review':x.ai?'AI + OCR':x.observation?'OCR':'No OCR text')}</small></div><button type="button" class="v27-remove" data-remove-image="${esc(x.id)}" title="Remove this source" ${running?'disabled':''}>×</button></div>`).join('');
     const core=[...(workflows?.enabled()?[['asset_name','Asset name']]:[]),['category','Category'],['brand','Brand'],['model','Model'],['serial','Serial number']].map(([k,label])=>{
       const original=proposal.fields[k];
-      return `<label class="v27-edit-field"><span>${label}</span><input data-universal-field="${k}" value="${esc(incoming[k]||'')}" placeholder="Not detected — enter manually"><div class="input-suggestions">${(proposal.suggestions?.[k]||[]).slice(0,3).filter(x=>x.value!==incoming[k]).map(x=>`<button type="button" class="btn light sm" data-recognition-suggestion="${esc(k)}" data-value="${esc(x.value)}" title="${esc(x.reason||x.evidence)}">${esc(x.value)}</button>`).join('')}</div><small>${Object.hasOwn(session.overrides,k)?'Manual entry':original?.evidence?`Image ${esc(original.source_image.split('_')[1]||'?')} · ${esc(original.status)} · ${esc(original.evidence.slice(0,95))}`:'Not detected; manual confirmation required'}</small></label>`;
+      return `<label class="v27-edit-field"><span>${label}</span><input data-universal-field="${k}" value="${esc(incoming[k]||'')}" placeholder="Not detected — enter manually"><small>${Object.hasOwn(session.overrides,k)?'Manual entry':original?.evidence?`Image ${esc(original.source_image.split('_')[1]||'?')} · ${esc(original.status)} · ${esc(original.evidence.slice(0,95))}`:'Not detected; manual confirmation required'}</small></label>`;
     }).join('');
     const conflictHtml=proposal.conflicts.length?`<section class="v27-conflicts"><b>Review conflicting values (${proposal.conflicts.length})</b><p>Choose the correct value for each discrepancy before creating or updating an asset.</p>${proposal.conflicts.map(c=>`<div class="v27-conflict"><label>${esc(c.label.replace(/_/g,' '))}</label><select data-conflict="${esc(c.id)}"><option value="">Choose a source value…</option>${c.options.map(o=>`<option value="${esc(o.value)}" ${c.resolved&&session.resolutions[c.id]===o.value?'selected':''}>${esc(o.value)} — ${esc(o.source_image)}</option>`).join('')}</select></div>`).join('')}</section>`:'';
-    const attrRows=proposal.attributes.map(a=>`<tr><td>${esc(a.label||a.key)}</td><td>${esc(a.value)}</td><td>${esc(a.source_image)}<small class="v27-value-evidence">${esc(a.evidence||'OCR observation')}</small></td></tr>`).join('');
+    const attrRows=window.AssetRecognition.parseSpecLines(incoming.specifications);
+    const attrSource=label=>proposal.attributes.find(a=>(a.label||a.key)===label)?.source_image||'';
+    const attrRowHtml=(row,i)=>`<div class="attr-row" data-attr-row="${i}"><input data-attr-label aria-label="Attribute name" placeholder="Name" value="${esc(row.label)}"><input data-attr-value aria-label="Attribute value" placeholder="Value" value="${esc(row.value)}"><button type="button" class="iconbtn" data-attr-remove aria-label="Remove attribute">×</button>${attrSource(row.label)?`<small>${esc(attrSource(row.label))}</small>`:''}</div>`;
     const idRows=proposal.identifiers.map(a=>`<tr><td>${esc(window.AssetRecognition.ID_LABELS[a.type]||a.type)}</td><td>${esc(a.value)}</td><td>${esc(a.source_image)}<small class="v27-value-evidence">${esc(a.evidence||'OCR observation')}</small></td></tr>`).join('');
     const data=proposal.sourceCount;
     const raw=session.photos.filter(p=>p.ocr?.text).map(p=>`<h5>${esc(p.id)}</h5><pre>${esc(p.ocr.text)}</pre>`).join('');
@@ -2954,14 +3310,13 @@
     const pendingTarget=state.scanUpdateTarget;
     $('scanMatchingUnits')?._dispose?.();
     $('scanResult').innerHTML=`<div class="result-card v27-result"><div class="recognition-badges"><span class="recognition-badge">Universal recognition V2.7</span><span class="recognition-badge">${sourceCount} photo${sourceCount===1?'':'s'}</span>${running?'<span class="recognition-badge warn">Processing · preliminary fields visible</span>':''}</div><strong>One asset · multiple evidence sources</strong>${recognitionStatusHtml()}
-      <div class="v27-photo-strip">${photoHtml}</div><div class="v27-photo-actions"><button id="v27AddPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Choose from gallery</button><button id="v27CameraPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Take photo</button><button id="v27Reset" class="btn light sm" type="button">${running?'Cancel recognition':'Start new asset'}</button></div>
+      <div class="v27-photo-strip">${photoHtml}</div><div class="v27-photo-actions"><button id="v27AddPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Choose from gallery</button><button id="v27CameraPhoto" class="btn light sm" type="button" ${running||sourceCount>=6?'disabled':''}>Take photo</button><button id="v27Reset" class="btn light sm" type="button">Discard scan</button></div>
       ${errors}${session.matchWarning?`<div class="scan-warning">${esc(session.matchWarning)}</div>`:''}${conflictHtml}
       ${barcodeHtml}
       <div class="v27-core"><h4>Review the main information</h4><div class="v27-fields">${core}</div></div>
       ${idRows?`<details class="v27-evidence-block" open><summary>Additional identifiers (${proposal.identifiers.length})</summary><div class="v27-table-wrap"><table><thead><tr><th>Type</th><th>Value</th><th>Source</th></tr></thead><tbody>${idRows}</tbody></table></div></details>`:''}
-      ${attrRows?`<details class="v27-evidence-block" open><summary>Technical attributes (${proposal.attributes.length})</summary><div class="v27-table-wrap"><table><thead><tr><th>Attribute</th><th>Value</th><th>Source</th></tr></thead><tbody>${attrRows}</tbody></table></div></details>`:''}
-      <details class="v27-evidence-block"><summary>Specifications text · editable before save</summary><textarea id="v27Specs" rows="5" aria-label="Approved specifications">${esc(incoming.specifications)}</textarea></details>
-      <details class="v27-evidence-block"><summary>Source evidence and raw OCR</summary>${raw||'<p>OCR text unavailable.</p>'}</details>
+      <section class="v27-evidence-block attr-editor"><h4>Technical attributes</h4><div id="attrRows">${attrRows.map(attrRowHtml).join('')}</div><button type="button" id="attrAdd" class="btn light sm">${icon('plus','sm')}Add attribute</button><textarea id="v27Specs" hidden>${esc(incoming.specifications)}</textarea></section>
+      ${raw?`<button type="button" id="scanTextOpen" class="scan-text-btn">Scanned text ▴</button><div id="scanTextSheet" class="scan-text-sheet" hidden><div class="panel-head"><h3>Scanned text</h3><button type="button" class="iconbtn" id="scanTextClose" aria-label="Close scanned text">×</button></div><div class="scan-text-body">${raw}</div></div>`:''}
       ${session.matches.length?`<div class="scan-match-zone"><div class="scan-match-heading"><b>Check existing units (${session.matches.length})</b><small>A similar model alone does not prove this is the same physical item. Verify the JCP tag or serial before updating.</small></div>${matches}</div>`:''}
       ${session.relatedModels?.length?`<div class="scan-ai-note">${session.relatedModels.length} similar-model records have different serials. They are separate units; the asset list can show them together.</div>`:''}
       ${pendingTarget?`<div class="scan-target-panel"><b>Scan to update: ${esc(pendingTarget.asset_id)}</b><small>Compare only changed or missing fields before approval.</small></div>`:''}
@@ -2973,9 +3328,7 @@
     enhanceScanEntry();
     bindInputAssistance($('scanResult'));
     if(workflows?.enabled()){document.querySelectorAll('.v27-photo img').forEach((img,i)=>{img.tabIndex=0;img.setAttribute('role','button');img.onclick=()=>workflows.scanPreview(session,i);img.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();img.click();}};});}
-    $$('[data-recognition-suggestion]').forEach(button=>button.addEventListener('click',()=>{
-      session.overrides[button.dataset.recognitionSuggestion]=button.dataset.value;showUniversalRecognition();scheduleUniversalMatches();
-    }));
+    $$('[data-universal-field]').forEach(input=>{const k=input.dataset.universalField;AssetSuggest.attach(input,()=>(proposal.suggestions?.[k]||[]).map(x=>({value:x.value,hint:x.reason||x.evidence})),{priority:0,filter:false,key:'scan'});});
     $$('[data-barcode-candidate]').forEach(button=>button.addEventListener('click',()=>{
       const code=barcodeCandidates[Number(button.dataset.barcodeCandidate)];
       if(code?.kind!=='candidate')return;
@@ -2986,12 +3339,12 @@
     }));
     $('v27AddPhoto')?.addEventListener('click',()=>$('scannerFile')?.click());
     $('v27CameraPhoto')?.addEventListener('click',()=>$('scannerCameraFile')?.click());
-    $('v27Reset')?.addEventListener('click',resetScannerResult);
+    $('v27Reset')?.addEventListener('click',()=>void discardScan());
     $$('[data-remove-image]').forEach(btn=>btn.addEventListener('click',()=>{
       const idx=session.photos.findIndex(x=>x.id===btn.dataset.removeImage);
       if(idx<0)return;const [removed]=session.photos.splice(idx,1);removed.codeAbort?.abort();URL.revokeObjectURL(removed.url);
       session.matches=[];session.overrides={};session.resolutions={};
-      if(!session.photos.length)return resetScannerResult();
+      if(!session.photos.length){if(session.draftId)void workflows?.forget(session.draftId);return resetScannerResult();}
       showUniversalRecognition();updateUniversalMatches();
     }));
     $$('[data-conflict]').forEach(el=>el.addEventListener('change',()=>{
@@ -3000,11 +3353,17 @@
       showUniversalRecognition();updateUniversalMatches();
     }));
     $$('[data-universal-field]').forEach(el=>el.addEventListener('input',()=>{session.overrides[el.dataset.universalField]=el.value.trim();(session.touched||={})[el.dataset.universalField]=true;if(workflows?.enabled())workflows.persistScan(session);scheduleUniversalMatches();}));
-    $('v27Specs')?.addEventListener('input',e=>{session.overrides.specifications=e.target.value;(session.touched||={}).specifications=true;workflows?.persistScan(session);});
+    // Attribute rows are the editable view of the specification lines.
+    const syncAttrs=()=>{const rows=$$('#attrRows [data-attr-row]').map(r=>({label:r.querySelector('[data-attr-label]').value,value:r.querySelector('[data-attr-value]').value}));const text=window.AssetRecognition.formatSpecLines(rows);$('v27Specs').value=text;session.overrides.specifications=text;(session.touched||={}).specifications=true;workflows?.persistScan(session);};
+    const bindAttr=row=>{row.querySelectorAll('input').forEach(el=>el.addEventListener('input',syncAttrs));row.querySelector('[data-attr-remove]').onclick=()=>{row.remove();syncAttrs();};};
+    $$('#attrRows [data-attr-row]').forEach(bindAttr);
+    $('attrAdd')?.addEventListener('click',()=>{$('attrRows').insertAdjacentHTML('beforeend',attrRowHtml({label:'',value:''},Date.now()));const row=$('attrRows').lastElementChild;bindAttr(row);row.querySelector('input').focus();});
+    if($('scanTextOpen')){$('scanTextOpen').onclick=()=>{$('scanTextSheet').hidden=false;};$('scanTextClose').onclick=()=>{$('scanTextSheet').hidden=true;};}
     if(selection){
       const replacement=editingSpecs?$('v27Specs'):document.querySelector(`[data-universal-field="${editingField}"]`);
       replacement?.focus({preventScroll:true});replacement?.setSelectionRange(...selection);
     }
+    if(attrFocus)document.querySelector(`[data-attr-row="${attrFocus.row}"] [data-attr-${attrFocus.field}]`)?.focus({preventScroll:true});
     const blocked=running||unresolved;
     ['v27Create','v27UpdateTarget','v27FindMatch'].forEach(id=>{const el=$(id);if(el)el.disabled=blocked;});
     const getIncoming=()=>{
@@ -3187,7 +3546,7 @@
       if(suggestions.length&&!confirm('Possible existing assets were found. Create a separate new asset anyway?'))return;
       openAssetForm({category_name:f.category,brand:f.brand,model:f.model,serial:serial,specifications:f.specifications,_scanFile:file});
     });
-    $('scanAgain2')?.addEventListener('click',resetScannerResult);
+    $('scanAgain2')?.addEventListener('click',()=>void discardScan());
 
     if(duplicate && state.activeAuditId){
       try{await verifyAudit(state.activeAuditId,duplicate.asset_id,'Scanned in audit mode');state.activeAuditId='';}catch(err){console.warn('Audit verification from scan failed',err);}
@@ -3322,6 +3681,9 @@
   }
   async function applyAppUpdate(){
     const btn=$('updateBtn');
+    // Reloading mid-task would interrupt uploads or an open editor; make that a deliberate choice.
+    const busy=queueRows.some(r=>r.state!=='Saved')||!$('modalWrap').classList.contains('hidden')||!!state.recognitionSession;
+    if(busy&&await confirmAction({title:'Update now?',body:'The app will reload. Open forms are kept as drafts and unsent items stay on this device, but uploads in progress will pause until the app reopens.',confirmLabel:'Update and reload'})!==true)return;
     await withBusy(btn,'Updating...',async()=>{
       try{
         if('serviceWorker' in navigator){const reg=await navigator.serviceWorker.getRegistration();if(reg){await reg.update();if(reg.waiting)reg.waiting.postMessage({type:'SKIP_WAITING'});}}

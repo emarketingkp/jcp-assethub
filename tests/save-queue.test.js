@@ -93,3 +93,33 @@ test('choosing a pending photo waits for its upload and uses the real image ID a
   online=true;await q.pump();assert.deepEqual(calls.map(c=>c.action),['uploadImage','saveAssetOperation']);
   const operation=JSON.parse(calls[1].p.operation_json);assert.equal(operation.kind,'main_photo');assert.equal(operation.fields.main_image_id,'REAL-IMAGE');assert.equal(operation.expected_updated_at,'latest-revision');
 });
+function discardSetup(){const h=setup();h.options.storage.removeMany=async ids=>{for(const id of ids)h.data.delete(id);};return {...h,q:create(h.options)};}
+test('unsent items and their linked children can be discarded; sent but unconfirmed items need force',async()=>{
+  const h=discardSetup();
+  await h.q.enqueue({id:'main',params:params('M'),photos:[{file:new Blob(['p'])}]});
+  await h.q.enqueue({id:'child',params:params('C'),parent:'main'});
+  assert.deepEqual((await h.q.remove('main')).sort(),['child','main']);assert.equal((await h.q.rows()).length,0);
+  await h.q.enqueue({id:'sent',params:params('S')});const row=h.data.get('sent');row.payload={request_id:'sent'};row.state='Retry';row.error='Lost reply';h.data.set('sent',row);
+  await assert.rejects(h.q.remove('sent'),/SENT_UNCONFIRMED/);
+  await h.q.remove('sent',{force:true});assert.equal((await h.q.rows()).length,0);
+});
+test('a saved asset can finish without its failed photos, and a waiting child can be saved without its link',async()=>{
+  const h=discardSetup();
+  await h.q.enqueue({id:'a',params:params('A'),photos:[{file:new Blob(['1'])},{file:new Blob(['2'])}]});
+  const row=h.data.get('a');row.asset={asset_id:'JCP-1'};row.photos[0].uploaded=true;row.state='Retry';row.error='Upload failed';h.data.set('a',row);
+  const done=await h.q.finishWithoutPhotos('a');assert.equal(done.state,'Saved');assert.equal(done.photos.length,1);
+  await h.q.enqueue({id:'p',params:params('P')});await h.q.enqueue({id:'k',params:params('K'),parent:'p'});
+  const free=await h.q.unlink('k');assert.equal(free.parent,'');
+});
+test('only session errors pause the queue; transient errors are told apart from permanent ones',()=>{
+  const {authError,transientError}=require('../public/save-queue.js');
+  assert(authError('SESSION_EXPIRED'));assert(!authError('PERMISSION_DENIED: Only an Admin can retire an asset.'));
+  assert(transientError('Failed to fetch'));assert(transientError('Request timed out'));
+  assert(!transientError('OPERATION_NOT_STARTED: ITEM_CHANGED'));assert(!transientError('DUPLICATE_SERIAL: taken'));
+});
+test('a failed item can be reopened for editing, keeping its data and clearing the frozen request',async()=>{
+  const h=setup();await h.q.enqueue({id:'r',params:params('R')});
+  const row=h.data.get('r');row.payload={request_id:'r'};row.action='saveAssetOperation';row.state='Retry';row.error='Unknown failure';h.data.set('r',row);
+  const open=await h.q.reopen('r');assert.equal(open.payload,undefined);assert.equal(open.params.serial,'R');assert.match(open.error,/NOT_STARTED/);
+  const saved=await h.q.revise('r',params('R2'),[],null);assert.equal(saved.params.serial,'R2');
+});

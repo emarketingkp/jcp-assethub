@@ -151,6 +151,9 @@
     }
     return {fields,identifiers,attributes:cleaned,conflicts,evidence,suggestions,hasUnresolved:conflicts.some(x=>!x.resolved),sourceCount:observations.length};
   }
+  // Specifications stay plain text; these convert it to and from editable rows.
+  function parseSpecLines(text){return String(text||'').split('\n').map(line=>line.trim()).filter(Boolean).map(line=>{const at=line.indexOf(':');return at>0?{label:line.slice(0,at).trim(),value:line.slice(at+1).trim()}:{label:'',value:line};});}
+  function formatSpecLines(rows){return (rows||[]).map(r=>({label:String(r.label||'').trim(),value:String(r.value||'').trim()})).filter(r=>r.label||r.value).map(r=>r.label?r.label+': '+r.value:r.value).join('\n').slice(0,4800);}
   function specifications(proposal){
     const lines=[];
     for(const k of ['manufacturer','secondary_model']){
@@ -170,5 +173,5 @@
     fields.specifications=Object.hasOwn(overrides,'specifications')?value(overrides.specifications):specifications(proposal);
     return fields;
   }
-  return {CORE,ID_LABELS,norm,fromOcr,attachAi,consolidate,specifications,toIncoming};
+  return {CORE,ID_LABELS,norm,fromOcr,attachAi,consolidate,specifications,parseSpecLines,formatSpecLines,toIncoming};
 });

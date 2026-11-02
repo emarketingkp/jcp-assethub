@@ -43,3 +43,14 @@ test('serial list import preserves exact strings and blank units, and rejects ov
   for(const input of ['', '\n ',Array(26).fill('A').join('\n'),'A'.repeat(81)])assert.throws(()=>G.parseSerialList(input));
   assert.deepEqual(G.parseSerialList('001ABC,002ABC'),[{serial:'001ABC,002ABC'}],'A comma is not assumed to separate serials');
 });
+
+test('peripherals fold under a live main asset and a matching child brings its main row in',()=>{
+  const AG=require('../public/asset-groups.js');
+  const a=(id,extra={})=>({asset_id:id,brand:'B',model:'M'+id,status:'Active',...extra});
+  const pc=a('PC'),kb=a('KB',{parent_asset_id:'PC'}),mouse=a('MS',{parent_asset_id:'PC'}),old=a('OLD',{status:'Retired'}),orphan=a('OR',{parent_asset_id:'OLD'});
+  const index=AG.buildIndex([pc,kb,mouse,old,orphan]);
+  const all=AG.foldPeripherals([pc,kb,mouse,old,orphan],index);
+  assert.deepEqual(all.rows.map(r=>r.asset_id),['PC','OLD','OR']);assert.equal(all.attached,2);assert.equal(all.threads.get('PC').length,2);
+  const search=AG.foldPeripherals([kb],index);
+  assert.deepEqual(search.rows.map(r=>r.asset_id),['PC']);assert(search.matched.get('PC').has('KB'));
+});

@@ -1,8 +1,8 @@
 {
-  "version": "2.9.0",
-  "build": "2.9.0-unified-assets-1",
+  "version": "2.10.0",
+  "build": "2.10.0-usability-1",
   "released": null,
   "status": "preview",
-  "name": "Complete asset workflows",
-  "notes": "Complete shared editor, optional asset names, contextual reusable choices, scoped drafts, serial popup and compact main-image previews. Generic matching units remain distinct from linked assets. Requires updated Code.gs and AssetGroups.gs plus additive setupAssetGrouping. Not deployed."
+  "name": "Usability overhaul",
+  "notes": "Discard and restore everywhere, one action pattern, non-blocking notifications, maintenance and audit lifecycles, System Setup restore. Requires updated Code.gs and AssetGroups.gs plus setupAssetGrouping. Not deployed."
 }

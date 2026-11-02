@@ -96,7 +96,7 @@
           <div class="quick-stack">
             <button class="quick-secondary" data-action="find"><div class="quick-icon"><svg class="ico lg"><use href="#i-search"/></svg></div><div><b>Find Asset</b><small>Search by ID, model, serial, site or person.</small></div></button>
             <button class="quick-secondary issue" data-action="reportIssue"><div class="quick-icon"><svg class="ico lg"><use href="#i-tools"/></svg></div><div><b>Report Issue</b><small>Staff can raise a maintenance issue quickly.</small></div></button>
-            <button class="quick-secondary audit" data-action="continueAudit"><div class="quick-icon"><svg class="ico lg"><use href="#i-check"/></svg></div><div><b>Continue Audit</b><small>Open the latest physical verification.</small></div></button>
+            <button class="quick-secondary audit" data-action="continueAudit"><div class="quick-icon"><svg class="ico lg"><use href="#i-check"/></svg></div><div><b>Audit</b><small>Continue the open audit, or start a new one.</small></div></button>
           </div>
         </div>
         <div id="statusStrip" class="status-strip"></div>
@@ -165,7 +165,7 @@
             <div class="report-primary-grid">
               <label>Report<select id="reportType"><option value="asset">Asset register</option><option value="maintenance">Maintenance & repair</option><option value="warranty">Warranty</option><option value="audit">Physical audit</option><option value="movement">Movement history</option><option value="activity">Activity log</option><option value="incomplete">Missing information</option></select></label>
               <label>Time range<select id="reportDatePreset"><option value="30">Last 30 days</option><option value="7">Last 7 days</option><option value="90">Last 90 days</option><option value="month">This month</option><option value="all" selected>All time</option><option value="custom">Custom</option></select></label>
-              <button id="runReportBtn" class="btn blue"><svg class="ico sm"><use href="#i-chart"/></svg>Run Report</button>
+              <div class="report-run-actions"><button id="runReportBtn" class="btn blue"><svg class="ico sm"><use href="#i-chart"/></svg>Run report</button><button id="exportReportBtn" class="btn light"><svg class="ico sm"><use href="#i-download"/></svg>Export CSV</button><button id="printReportBtn" class="btn light"><svg class="ico sm"><use href="#i-printer"/></svg>Print / PDF</button></div>
             </div>
             <details class="report-disclosure" id="reportFilterDetails">
               <summary><span><b>More filters</b><small>Site, area, category, status, person and custom dates</small></span><span class="disclosure-chevron">⌄</span></summary>
@@ -199,7 +199,6 @@
 
           <details class="card report-disclosure report-result-section" id="reportDetailDetails">
             <summary><span><b>Detailed records</b><small id="reportDetailCount">Open the underlying rows and logs</small></span><span class="disclosure-chevron">⌄</span></summary>
-            <div class="report-detail-actions"><button id="exportReportBtn" class="btn light"><svg class="ico sm"><use href="#i-download"/></svg>Full CSV</button><button id="printReportBtn" class="btn light">Print / PDF</button></div>
             <div class="report-table-wrap"><table class="report-table"><thead id="reportHead"></thead><tbody id="reportBody"></tbody></table></div>
           </details>
         </div>
@@ -222,11 +221,11 @@
 <div id="sidebarBackdrop" class="sidebar-backdrop" aria-hidden="true"></div>
 
 <div id="drawerBackdrop" class="backdrop hidden"></div>
-<aside id="assetDrawer" class="drawer"><div class="drawer-head"><div><strong>Asset Details</strong><small id="drawerId"></small></div><button id="closeDrawerBtn" class="close-btn" aria-label="Close asset details">×</button></div><div id="drawerBody" class="drawer-body"></div></aside>
+<aside id="assetDrawer" class="drawer"><div class="drawer-head"><div><strong>Asset Details</strong><small id="drawerId"></small></div><button id="closeDrawerBtn" class="close-btn" aria-label="Close asset details">×</button></div><div id="drawerBody" class="drawer-body"></div><div id="drawerFooter" class="drawer-footer" hidden></div></aside>
 
 <div id="modalWrap" class="modal-wrap hidden" role="dialog" aria-modal="true"><div class="modal"><div class="modal-head"><h2 id="modalTitle">Modal</h2><button id="modalCloseBtn" class="close-btn" aria-label="Close dialog">×</button></div><div id="modalBody" class="modal-body"></div></div></div>
-<div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
-<div id="offlineBar" class="offline-bar hidden">You are offline. Existing screens may remain visible, but changes need a connection.</div>
+<div id="toast" class="toast-stack" aria-live="polite"></div>
+<div id="offlineBar" class="offline-bar hidden" role="status">You are offline. New work is saved on this device and will sync when you reconnect.</div>
 
 <!-- QR label helper is optional. Barcode decoding loads locally in a worker on demand. -->
 <div id="reportPrintSheet" class="report-print-sheet" aria-hidden="true"></div>
@@ -236,6 +235,7 @@
 <script defer src="./api.js"></script>
 <script defer src="./image.js"></script>
 <script defer src="./photo-picker.js"></script>
+<script defer src="./autosuggest.js"></script>
 <script defer src="./input-assist.js"></script>
 <script defer src="./code-scanner.js"></script>
 <script defer src="./asset-groups.js"></script>
