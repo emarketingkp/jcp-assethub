@@ -654,7 +654,7 @@ body.modal-open .mobile-nav,body.drawer-open .mobile-nav{opacity:0;transform:tra
 @media(max-width:520px){.local-draft-row{grid-template-columns:44px minmax(0,1fr)}.local-draft-row .actions{grid-column:1/-1}.local-draft-row .actions .btn{flex:1}}
 
 /* V2.10 Notifications: stacked bottom snackbars that never cover the task */
-#toast.toast-stack{position:fixed;left:auto;right:16px;top:auto;bottom:16px;z-index:220;width:min(400px,calc(100vw - 32px));display:flex;flex-direction:column;gap:8px;padding:0;border:0;background:none;box-shadow:none;transform:none;opacity:1;pointer-events:none}
+#toast.toast-stack{position:fixed;left:auto;right:16px;top:auto;bottom:16px;z-index:220;width:min(400px,calc(100vw - 32px));display:flex;flex-direction:column;max-height:35vh;max-height:35dvh;overflow-y:auto;gap:8px;padding:0;border:0;background:none;box-shadow:none;transform:none;opacity:1;pointer-events:none}
 #toast.toast-stack:not(.show){display:none}
 .toast-item{pointer-events:auto;display:grid;grid-template-columns:28px minmax(0,1fr) 32px;gap:10px;align-items:start;padding:12px;border:1px solid var(--line);border-left:4px solid var(--green);border-radius:12px;background:#fff;color:var(--ink);box-shadow:0 10px 30px rgba(15,31,57,.16);font-size:14px;animation:toast-in .16s ease}
 .toast-item.error{border-left-color:var(--red)}

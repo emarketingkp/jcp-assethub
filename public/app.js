@@ -16,8 +16,8 @@
     maintenanceSort:{key:'reported_at',dir:'desc'},
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
-  const APP_VERSION = '2.10.0';
-  const BUILD_ID = '2.10.0-usability-1';
+  const APP_VERSION = '2.10.1';
+  const BUILD_ID = '2.10.1-draft-recovery-1';
   // Full-field writes require the additive 2.9 backend setup; older services keep the legacy editor.
   const BACKEND_API_VERSION = '2.10.0';
   let workflows=null;
@@ -349,9 +349,9 @@
     const remove=()=>{clearTimeout(item._t);item.remove();sync();};
     item.querySelector('.toast-close').onclick=remove;
     // Repeated identical confirmations replace each other instead of piling up.
-    for(const old of stack.querySelectorAll('.toast-item:not(.error)'))if(old.textContent===item.textContent){clearTimeout(old._t);old.remove();}
+    for(const old of stack.querySelectorAll('.toast-item'))if(old.textContent===item.textContent){clearTimeout(old._t);old.remove();}
     stack.append(item);
-    const routine=[...stack.querySelectorAll('.toast-item:not(.error)')];while(stack.children.length>3&&routine.length){const old=routine.shift();clearTimeout(old._t);old.remove();}
+    while(stack.children.length>2){const old=stack.firstElementChild;clearTimeout(old._t);old.remove();}
     // Only an error with a next step waits for the person; everything else clears itself.
     if(isError&&actions.length)item.classList.add('sticky');
     else item._t=setTimeout(remove,isError?8000:actions.length?6500:3000);

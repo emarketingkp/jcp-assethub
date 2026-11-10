@@ -1,5 +1,5 @@
 /* Durable scoped operations. Sign-in tokens are read at send time, never stored here. Guest proof grants access only to its own new-asset onboarding. */
-(function(root,factory){const api=factory();if(typeof module==='object'&&module.exports)module.exports=api;if(root)root.AssetSaveQueue=api;})(typeof window!=='undefined'?window:null,()=>{
+(function(root,factory){const api=factory(typeof module==='object'&&module.exports?require('./local-storage.js'):root.AssetLocalStorage);if(typeof module==='object'&&module.exports)module.exports=api;if(root)root.AssetSaveQueue=api;})(typeof window!=='undefined'?window:null,(local)=>{
   function database(){
     let opened;
     const open=()=>opened||(opened=new Promise((resolve,reject)=>{
@@ -12,7 +12,7 @@
       const tx=db.transaction('operations',mode),req=action(tx.objectStore('operations'));
       tx.oncomplete=()=>resolve(req.result);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('Local save aborted'));
     });}
-    return {put:r=>transaction('readwrite',s=>s.put(r)),putMany:rows=>transaction('readwrite',s=>{for(const row of rows)s.put(row);return {}; }),all:()=>transaction('readonly',s=>s.getAll()),removeMany:ids=>transaction('readwrite',s=>{for(const id of ids)s.delete(id);return {};})};
+    return {put:async r=>{const stored=await local.encode(r);return transaction('readwrite',s=>s.put(stored));},putMany:async rows=>{const stored=await local.encode(rows);return transaction('readwrite',s=>{for(const row of stored)s.put(row);return {}; });},all:async()=>local.decode(await transaction('readonly',s=>s.getAll())),removeMany:ids=>transaction('readwrite',s=>{for(const id of ids)s.delete(id);return {};})};
   }
   function create({storage=database(),scope,api,online=()=>navigator.onLine,photosAllowed=()=>true,onChange=()=>{},onAsset=()=>{},onAuthRequired=()=>{},guestKey='',legacyScope='',legacyScopes=[],protocol=1,coordinationScope=scope,active=()=>true,prepare=async file=>{
     const {full,thumb}=await AssetImage.prepareForStorage(file);

@@ -1,3 +1,12 @@
+# 2.10.1 — draft recovery fix (2026-11-10)
+
+- Store photo bytes in browser draft and operation records, restoring File objects when read. Existing Blob records remain readable without clearing browser storage.
+- Serialize draft writes and deletion so a late autosave cannot recreate a finished draft.
+- Keep a confirmed local save successful when removing its old recovery draft fails. Resume already-sent drafts through their existing pending operation.
+- Collapse duplicate errors, show at most two notifications, and limit their height on phones.
+- Validation: 155 unit tests; focused Chromium regression covers photo storage when IndexedDB rejects Blobs, repeated writes, deletion ordering, pending-operation recovery, cleanup failure and notification bounds. Physical Android device behavior remains to be confirmed.
+- Frontend-only patch; backend API remains 2.10.0. No Apps Script changes.
+
 # 2.10.0 — preview, not deployed (2026-10-30)
 
 - Readability: 12px minimum text, normal font weights, sentence-case labels, one navy main-button colour and yellow only for brand and Scan.

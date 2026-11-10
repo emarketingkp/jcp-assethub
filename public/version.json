@@ -1,6 +1,6 @@
 {
-  "version": "2.10.0",
-  "build": "2.10.0-usability-1",
+  "version": "2.10.1",
+  "build": "2.10.1-draft-recovery-1",
   "released": null,
   "status": "preview",
   "name": "Usability overhaul",
