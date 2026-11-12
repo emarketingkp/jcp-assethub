@@ -89,6 +89,130 @@ test('browser regressions on mobile and desktop',async t=>{
   }
   if(process.env.BROWSER_SCENARIO){const run=t.test.bind(t),pattern=new RegExp(process.env.BROWSER_SCENARIO,'i');t.test=(name,...args)=>pattern.test(name)?run(name,...args):Promise.resolve();}
   try{
+    await t.test('Registration recovery: lookup and review errors stay inside the active scan dialog',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,unified:true,assets:[stock('TARGET')]});
+      try{
+        await scan(page);
+        await page.evaluate(()=>{
+          const get=AssetAPI.get;
+          AssetAPI.get=(action,params,...rest)=>action==='getAsset'&&window.failMatch
+            ?Promise.reject(new Error('Test connection interruption')):get(action,params,...rest);
+          window.failMatch=true;
+        });
+        await page.locator('#v27FindMatch').click();
+        const picked=page.locator('[data-match-pick="TARGET"]');
+        await picked.click();
+        const feedback=page.locator('#modalNotifications .toast-item.error');
+        await feedback.filter({hasText:'Test connection interruption'}).waitFor();
+        assert(await feedback.evaluate(el=>{
+          const r=el.getBoundingClientRect();return el.contains(document.elementFromPoint(r.left+r.width/2,r.top+r.height/2));
+        }));
+        assert.equal(await picked.isEnabled(),true);
+        await page.evaluate(()=>{window.failMatch=false;});
+        await picked.click();
+        await page.locator('#reconcileForm').waitFor();
+        assert.equal(await page.locator('#scanMatchSearch').count(),0);
+        assert.equal(await feedback.filter({hasText:'Test connection interruption'}).count(),0);
+        await page.locator('#reconcileForm [name="site_id"]').selectOption('');
+        await page.locator('#reconcileForm button[type="submit"]').click();
+        await feedback.filter({hasText:'Category, site and area are required'}).waitFor();
+        await page.locator('#reconcileCancel').click();
+        assert.equal(await page.locator('#modalWrap').isVisible(),false);
+        assert(await page.locator('.v27-photo').first().isVisible());
+        assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('Registration recovery: Guest sees pending and confirmed registration without a second save',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,unified:true,role:'GUEST'});
+      try{
+        await page.locator('[data-mobile-route="scanner"]').click();
+        await page.locator('#scannerManualEntry').click();
+        await page.locator('#assetForm [name="asset_name"]').fill('Guest test asset');
+        await page.locator('#assetForm button[type="submit"]').click();
+        await page.locator('#modalNotifications .toast-item.error').filter({hasText:'Category'}).waitFor();
+        assert.equal(await page.locator('#modalNotifications .toast-item.error').count(),1);
+        await page.locator('#assetForm [name="category"]').fill('Printer');
+        await page.locator('#assetSite').selectOption('SITE-TEST');
+        await page.locator('#assetArea').fill('Test Area');
+        await context.setOffline(true);
+        await page.locator('#assetForm button[type="submit"]').click();
+        await page.locator('#detailQueueStatus').filter({hasText:'Saved on this device'}).waitFor();
+        assert.equal(backend.read('Assets').length,0);
+        await page.evaluate(()=>{const get=AssetAPI.get;AssetAPI.get=(action,...args)=>action==='sync'?Promise.reject(new Error('Sync unavailable')):get(action,...args);});
+        await context.setOffline(false);
+        await page.locator('#assetList [data-asset]').filter({hasText:'Guest test asset'}).waitFor({state:'attached'});
+        assert.equal(backend.read('Assets').length,1);
+        assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('Registration recovery: another entry can save while an earlier photo is uploading',async()=>{
+      const {page,context,backend,errors}=await start({links:true,queue:true,unified:true});
+      try{
+        await page.evaluate(()=>{const post=AssetAPI.post;AssetAPI.post=async(action,...args)=>{
+          if(action==='uploadImage')await new Promise(resolve=>{window.__finishPhoto=resolve;});
+          return post(action,...args);
+        };});
+        const fill=async name=>{
+          await page.locator('#assetForm [name="asset_name"]').fill(name);
+          await page.locator('#assetForm [name="category"]').fill('Printer');
+          await page.locator('#assetSite').selectOption('SITE-TEST');
+          await page.locator('#assetArea').fill('Test Area');
+        };
+        await page.locator('[data-mobile-route="assets"]').click();
+        await page.locator('#addAssetBtn').click();
+        await fill('First printer');
+        await page.locator('#assetPhotoPicker input[type="file"][multiple]').setInputFiles(image('first.png'));
+        await page.locator('#assetForm button[type="submit"]').click();
+        await page.waitForFunction(()=>typeof window.__finishPhoto==='function');
+        await page.getByRole('button',{name:'Register another'}).click();
+        await fill('Second printer');
+        await page.locator('#assetForm button[type="submit"]').click();
+        await page.locator('#detailQueueStatus').filter({hasText:'Saved on this device'}).waitFor();
+        assert.equal(backend.read('Assets').length,1);
+        await page.evaluate(()=>window.__finishPhoto());
+        await page.locator('#assetList [data-asset]').filter({hasText:'Second printer'}).waitFor({state:'attached'});
+        assert.equal(backend.read('Assets').length,2);
+        assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('Registration recovery: maintenance errors remain visible without closing the issue form',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,unified:true,assets:[stock('REPAIR')]});
+      try{
+        await page.locator('[data-mobile-route="assets"]').click();
+        await page.locator('[data-asset="REPAIR"]').click();
+        await page.locator('#reportAssetIssue').click();
+        const issue=page.locator('#issueForm textarea[name="issue"]');
+        await issue.fill('Retain these issue details');
+        await page.evaluate(()=>{
+          const post=AssetAPI.post;
+          AssetAPI.post=(action,...args)=>action==='createMaintenance'
+            ?Promise.reject(new Error('Test maintenance save failure')):post(action,...args);
+        });
+        await page.locator('#issueForm button[type="submit"]').click();
+        const feedback=page.locator('#modalNotifications .toast-item.error').filter({hasText:'Test maintenance save failure'});
+        await feedback.waitFor();
+        assert.equal(await issue.inputValue(),'Retain these issue details');
+        await page.locator('#modalCloseBtn').click();
+        assert.equal(await page.locator('#modalWrap').isVisible(),false);
+        assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('Registration recovery: Escape closes the photo preview and preserves the form',async()=>{
+      const {page,context,errors}=await start({links:true,queue:true,unified:true});
+      try{
+        await page.locator('[data-mobile-route="scanner"]').click();
+        await page.locator('#scannerManualEntry').click();
+        await page.locator('#assetForm [name="asset_name"]').fill('Keep this draft');
+        await page.locator('#assetPhotoPicker input[type="file"]').last().setInputFiles(image('label.png'));
+        await page.locator('#assetPhotoPicker .photo-picker-preview img').click();
+        await page.locator('dialog:modal').waitFor();
+        await page.keyboard.press('Escape');
+        await page.locator('dialog:modal').waitFor({state:'detached'});
+        assert.equal(await page.locator('#assetForm [name="asset_name"]').inputValue(),'Keep this draft');
+        assert.equal(await page.locator('#assetPhotoPicker .photo-picker-preview img').count(),1);
+        assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
     await t.test('Unified: generic named units register together without dropping fields or copying private identity',async()=>{
       const {page,context,backend,errors}=await start({links:true,queue:true,unified:true});
       try{
@@ -444,7 +568,7 @@ test('browser regressions on mobile and desktop',async t=>{
     await t.test('a failed background photo keeps details saved, retries only remaining uploads, and sends no success popup',async()=>{
       const {page,context,backend,errors}=await start({links:true,queue:true});
       try{
-        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.evaluate(()=>window.__mock.failNextUpload=true);await page.locator('#v27Create').click();await page.locator('#saveFailureNotice').waitFor();assert.equal(backend.read('Assets').length,1);await page.evaluate(()=>document.getElementById('pendingSavesBtn').click());assert.match(await page.locator('#linkedPendingItems').textContent(),/DetailsSaved/);await page.locator('[data-retry-save]').click();await page.waitForFunction(()=>document.getElementById('linkedPendingItems').textContent.includes('No pending'));assert.equal(await page.evaluate(()=>window.__mock.uploadAttempts),2);assert.equal(backend.read('Assets').length,1);assert.equal(await page.locator('#toast.show:not(.error)').count(),0);assert.deepEqual(errors,[]);
+        await scan(page);await page.locator('#scanEntrySite').selectOption('SITE-TEST');await page.locator('#scanEntryArea').fill('Desk');await page.evaluate(()=>window.__mock.failNextUpload=true);await page.locator('#v27Create').click();await page.locator('#saveFailureNotice').waitFor();assert.equal(backend.read('Assets').length,1);await page.evaluate(()=>document.getElementById('pendingSavesBtn').click());assert.match(await page.locator('#linkedPendingItems').textContent(),/DetailsSaved/);for(const notice of await page.locator('#toast .toast-item:not(.error) .toast-close').all())await notice.click();await page.locator('[data-retry-save]').click();await page.getByText('Nothing is waiting to sync.').waitFor();assert.equal(await page.evaluate(()=>window.__mock.uploadAttempts),2);assert.equal(backend.read('Assets').length,1);assert.equal(await page.locator('#toast.show:not(.error)').count(),0);assert.deepEqual(errors,[]);
       }finally{await context.close();}
     });
     await t.test('browser persistence failure keeps the original validated result open and sends nothing',async()=>{

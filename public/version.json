@@ -1,8 +1,8 @@
 {
-  "version": "2.10.2",
-  "build": "2.10.2-asset-overview-1",
+  "version": "2.10.3",
+  "build": "2.10.3-registration-feedback-1",
   "released": "2026-11-12",
   "status": "released",
-  "name": "Asset details overview",
-  "notes": "Overview, Photos and Activity tabs; data-driven specifications; expandable details; loading and retry feedback. Frontend-only update. Backend API remains 2.10.0."
+  "name": "Registration and dialog feedback",
+  "notes": "Show registration and scan-match errors in the active dialog, keep drafts available, and show confirmed assets in the register immediately."
 }

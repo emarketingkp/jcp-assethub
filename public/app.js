@@ -16,8 +16,8 @@
     maintenanceSort:{key:'reported_at',dir:'desc'},
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
-  const APP_VERSION = '2.10.2';
-  const BUILD_ID = '2.10.2-asset-overview-1';
+  const APP_VERSION = '2.10.3';
+  const BUILD_ID = '2.10.3-registration-feedback-1';
   // Full-field writes require the additive 2.9 backend setup; older services keep the legacy editor.
   const BACKEND_API_VERSION = '2.10.0';
   let workflows=null;
@@ -338,11 +338,27 @@
   // Stacked, non-blocking notifications at the bottom of the screen. Confirmations fade on
   // their own; errors stay until dismissed, so a later message never hides a failure.
   // `actions` adds inline buttons: [{label, onClick}].
+  function placeNotifications(){
+    const native=Array.from(document.querySelectorAll('dialog:modal')).at(-1);
+    let host=native?.querySelector('.dialog-notifications');
+    if(!host&&!$('modalWrap').classList.contains('hidden'))host=$('modalNotifications');
+    const parent=host||document.body;
+    for(const notice of [$('toast'),$('saveFailureNotice')]){
+      if(!notice)continue;
+      if(notice.parentElement!==parent)parent.append(notice);
+      notice.toggleAttribute('data-inline',!!host);
+    }
+  }
+  function clearDialogErrors(){
+    for(const item of $('toast').querySelectorAll('[data-dialog-error]'))item.querySelector('.toast-close').click();
+  }
   function toast(message,type='ok',{actions=[]}={}){
     const stack=$('toast'); if(!stack)return;
     const isError=type==='error';
+    placeNotifications();
     stack.className='toast-stack';stack.removeAttribute('role');
     const item=document.createElement('div');item.className='toast-item'+(isError?' error':'');item.setAttribute('role',isError?'alert':'status');
+    if(isError&&!actions.length&&stack.hasAttribute('data-inline'))item.dataset.dialogError='';
     item.innerHTML=`<div class="toast-mark" aria-hidden="true">${isError?'!':'✓'}</div><div class="toast-copy"><span>${esc(message)}</span>${actions.length?'<div class="toast-actions"></div>':''}</div><button class="toast-close" type="button" aria-label="Close notification">×</button>`;
     for(const a of actions){const b=document.createElement('button');b.type='button';b.className='link-btn';b.textContent=a.label;b.onclick=()=>{remove();a.onClick();};item.querySelector('.toast-actions').append(b);}
     const sync=()=>{stack.classList.toggle('show',!!stack.children.length);stack.classList.toggle('error',!!stack.querySelector('.toast-item.error'));};
@@ -352,14 +368,15 @@
     for(const old of stack.querySelectorAll('.toast-item'))if(old.textContent===item.textContent){clearTimeout(old._t);old.remove();}
     stack.append(item);
     while(stack.children.length>2){const old=stack.firstElementChild;clearTimeout(old._t);old.remove();}
-    // Only an error with a next step waits for the person; everything else clears itself.
-    if(isError&&actions.length)item.classList.add('sticky');
+    // Dialog errors and errors with a recovery action remain available until dismissed.
+    if(isError&&(actions.length||stack.hasAttribute('data-inline')))item.classList.add('sticky');
     else item._t=setTimeout(remove,isError?8000:actions.length?6500:3000);
     sync();
   }
   function humanError(err){
     const raw=String(err?.message||err||'Unknown error');
     const map={
+      'EDITOR_NOT_READY':'The registration service needs its spreadsheet setup updated. Your draft is kept on this device.',
       'LINKS_NOT_READY':'The asset service needs an update before background saves can start. Your draft is kept.',
       'ITEM_CHANGED':'This asset changed since review. Open the pending item to compare your draft with the latest record.',
       'DUPLICATE_SERIAL':'This serial is already registered. Review the existing asset before continuing.',
@@ -605,7 +622,7 @@
   }
 
   async function init(){
-    workflows=AssetWorkflows.create({state,esc,icon,isAuthenticated,isAdmin,scope:()=>queueScope,queue:()=>saveQueue,rows:()=>queueRows,toast,stopCamera,resumeScannerCamera,openModal,closeModal,hasModalReturn:()=>modalStack.length>0,returnToInterruptedTask,openAsset,openAssetForm,setRoute,renderDrawer,scanEntry,mainAssetFields,bindMainAssetFields,linkedAssetFields,customFieldsHtml,recognitionEvidence,resetScannerResult,showUniversalRecognition,confirmAddLinkedAsset,contextFromRow,setLinkedContext,openLocalOperation,restoreScanDraft,openPending:openLinkedPendingSaves,confirmAction,openNestedAsset,openLinkedCaptureChoices,renderLinkContext,renderScanTarget,setDraftCount:n=>{draftCount=n;paintLocalWorkEntry();}});
+    workflows=AssetWorkflows.create({state,esc,icon,isAuthenticated,isAdmin,scope:()=>queueScope,queue:()=>saveQueue,rows:()=>queueRows,toast,stopCamera,resumeScannerCamera,openModal,closeModal,hasModalReturn:()=>modalStack.length>0,returnToInterruptedTask,openAsset,openAssetForm,setRoute,renderDrawer,scanEntry,mainAssetFields,bindMainAssetFields,linkedAssetFields,customFieldsHtml,recognitionEvidence,resetScannerResult,showUniversalRecognition,showRegistrationSaved,setLinkedContext,openLocalOperation,restoreScanDraft,openPending:openLinkedPendingSaves,confirmAction,openNestedAsset,openLinkedCaptureChoices,renderLinkContext,renderScanTarget,setDraftCount:n=>{draftCount=n;paintLocalWorkEntry();}});
     void window.AssetInput?.ready();
     bindStaticEvents();
     applyReportDatePreset(false);
@@ -703,7 +720,25 @@
     $('updateBtn').addEventListener('click',applyAppUpdate);
     $('modalCloseBtn').addEventListener('click',closeModal);
     $('modalWrap').addEventListener('click',e=>{ if(e.target===$('modalWrap') && !$('modalWrap').classList.contains('locked')) closeModal(); });
+    document.addEventListener('asset-dialog-change',placeNotifications);
+    let invalidFieldPending=false;
+    document.addEventListener('invalid',e=>{
+      const input=e.target;
+      if(!input.closest('#modalWrap,#page-scanner'))return;
+      e.preventDefault();
+      if(invalidFieldPending)return;
+      const current=currentView();
+      clearDialogErrors();
+      invalidFieldPending=true;
+      for(let parent=input.parentElement;parent&&!parent.matches('#modalWrap,#page-scanner');parent=parent.parentElement){
+        if(parent.tagName==='DETAILS')parent.open=true;
+      }
+      const label=input.labels?.[0]?.textContent||input.closest('.field')?.querySelector('label')?.textContent||input.getAttribute('aria-label');
+      toast((label?label.trim()+'. ':'')+input.validationMessage,'error');
+      setTimeout(()=>{invalidFieldPending=false;if(current()&&input.isConnected)input.focus();},0);
+    },true);
     document.addEventListener('keydown',e=>{
+      if(document.querySelector('dialog:modal'))return;
       const modalOpen=!$('modalWrap').classList.contains('hidden');
       if(e.key==='Escape'){
         if(modalOpen&&!$('modalWrap').classList.contains('locked')) closeModal();
@@ -772,10 +807,13 @@
     state.modalCleanup=null;state.modalRestoreFocus=null;return saved;
   }
   function restoreModal(saved){
-    if(!saved||saved.scope!==queueScope)return;const wrap=$('modalWrap');$('modalBody').replaceChildren(saved.fragment);$('modalTitle').textContent=saved.title;wrap.querySelector('.modal').className=saved.className;wrap.classList.toggle('locked',saved.locked);$('modalCloseBtn').classList.toggle('hidden',saved.locked);wrap.classList.remove('hidden');document.body.classList.add('modal-open');state.modalCleanup=saved.cleanup;state.modalRestoreFocus=saved.restoreFocus;wrap.querySelector('.modal').scrollTop=saved.scroll;requestAnimationFrame(()=>{if(saved.focus?.isConnected)saved.focus.focus({preventScroll:true});});
+    if(!saved||saved.scope!==queueScope)return;const wrap=$('modalWrap');$('modalBody').replaceChildren(saved.fragment);$('modalTitle').textContent=saved.title;wrap.querySelector('.modal').className=saved.className;wrap.classList.toggle('locked',saved.locked);$('modalCloseBtn').classList.toggle('hidden',saved.locked);wrap.classList.remove('hidden');document.body.classList.add('modal-open');state.modalCleanup=saved.cleanup;state.modalRestoreFocus=saved.restoreFocus;wrap.querySelector('.modal').scrollTop=saved.scroll;placeNotifications();requestAnimationFrame(()=>{if(saved.focus?.isConnected)saved.focus.focus({preventScroll:true});});
   }
   function openModal(title,html,onReady,options={}){
     const version=++state.modalVersion;
+    clearDialogErrors();
+    document.querySelectorAll('dialog:modal').forEach(dialog=>dialog.close());
+    if($('scanTextSheet'))$('scanTextSheet').hidden=true;
     stopCamera();
     if(workflows?.enabled()){workflows.flush();if(options.stack||title==='On this device'||title==='Review pending changes'||title==='Sign in to resume'){const saved=takeModal();if(saved)modalStack.push(saved);}}
     state.modalCleanup?.();state.modalCleanup=null;
@@ -787,7 +825,11 @@
     $('modalCloseBtn').classList.toggle('hidden',options.closeable===false);
     wrap.classList.remove('hidden'); document.body.classList.add('modal-open');
     modal.scrollTop=0;$('modalBody').scrollTop=0;
-    if(onReady) onReady();
+    placeNotifications();
+    if(onReady){
+      const report=err=>{if(version===state.modalVersion)toast('This screen could not finish loading. '+humanError(err),'error');};
+      try{Promise.resolve(onReady()).catch(report);}catch(err){report(err);}
+    }
     requestAnimationFrame(()=>{if(version!==state.modalVersion||wrap.classList.contains('hidden')||wrap.contains(document.activeElement)&&document.activeElement.id!=='modalCloseBtn')return;const target=wrap.querySelector('input:not([type=hidden]),select,textarea,button:not(#modalCloseBtn)');target?.focus?.({preventScroll:true});});
   }
   // Promise-based confirmation on the modal stack. Resolves true, 'alt' for the optional
@@ -807,8 +849,9 @@
     const wrap=$('modalWrap'); if(wrap.classList.contains('hidden'))return;
     workflows?.enabled()&&workflows.flush();
     state.modalVersion++;
+    clearDialogErrors();
     state.modalCleanup?.();state.modalCleanup=null;
-    wrap.classList.add('hidden');wrap.classList.remove('locked');$('modalBody').innerHTML='';document.body.classList.remove('modal-open');
+    wrap.classList.add('hidden');wrap.classList.remove('locked');$('modalBody').innerHTML='';document.body.classList.remove('modal-open');placeNotifications();
     if(workflows?.enabled()){
       if(options?.all){for(const saved of modalStack.splice(0))saved.cleanup?.();}
       else if(modalStack.length){restoreModal(modalStack.pop());return;}
@@ -819,7 +862,7 @@
     if(!workflows?.enabled())return;
     if($('modalTitle').textContent==='On this device')closeModal();
     workflows.flush();const snapshot={operationId,scope:queueScope,route:state.route,assetId:state.openAssetId,session:state.recognitionSession,target:state.scanUpdateTarget,context:linkedContext,scroll:window.scrollY,scannerScroll:$('page-scanner').scrollTop,modal:takeModal(),modalStack:modalStack.splice(0)};
-    interruptedTasks.push(snapshot);state.recognitionSession=null;state.scanUpdateTarget=null;$('modalWrap').classList.add('hidden');document.body.classList.remove('modal-open');
+    interruptedTasks.push(snapshot);state.recognitionSession=null;state.scanUpdateTarget=null;$('modalWrap').classList.add('hidden');document.body.classList.remove('modal-open');placeNotifications();
   }
   function returnToInterruptedTask(operationId=''){
     const task=interruptedTasks.at(-1);if(!task||task.scope!==queueScope||operationId&&task.operationId!==operationId)return false;
@@ -1068,7 +1111,7 @@
   }
 
 
-  async function loadAssets(silent=false){
+  async function loadAssets(silent=false,{throwOnError=false}={}){
     let showedCache=state.assets.length>0;
     if(showedCache)renderAssets();
     if(!showedCache){
@@ -1096,6 +1139,7 @@
     }catch(err){
       if(!showedCache) $('assetList').innerHTML=`<div class="empty-state">${esc(humanError(err))}</div>`;
       else console.warn('Asset refresh failed; cached data remains visible',err);
+      if(throwOnError)throw err;
       return state.assets;
     }finally{if(indicatorId)endIndicator(indicatorId);else if(showedCache)endPassiveSync();}
   }
@@ -1793,21 +1837,21 @@
     for(const row of pending){
       if(!row.error){notifiedSaves.delete(row.id);continue;}
       if(notifiedSaves.get(row.id)===row.error)continue;notifiedSaves.set(row.id,row.error);
-      toast(assetDisplayName(row.params)+' could not sync. Review it under Assets › On this device.','error');
+      showSaveFailure(row);
     }
   }
   function showQueueStorageFailure(){
     let notice=$('saveFailureNotice');if(!notice){notice=document.createElement('aside');notice.id='saveFailureNotice';notice.className='save-failure-notice';notice.setAttribute('role','alert');document.body.append(notice);}
     notice.innerHTML='<div><b>Background syncing paused</b><small>Device storage could not be updated. Your pending items are kept; free space and retry.</small></div><button id="openStoragePending" class="btn light sm">Pending items</button><button id="dismissStoragePending" class="iconbtn" aria-label="Dismiss notification">×</button>';
-    $('openStoragePending').onclick=openLinkedPendingSaves;$('dismissStoragePending').onclick=()=>notice.remove();
+    $('openStoragePending').onclick=openLinkedPendingSaves;$('dismissStoragePending').onclick=()=>notice.remove();placeNotifications();
   }
   function showAuthPauseNotice(){
     let notice=$('saveFailureNotice');if(notice?.dataset.authPause==='true')return;if(!notice){notice=document.createElement('aside');notice.id='saveFailureNotice';notice.className='save-failure-notice';notice.setAttribute('role','alert');document.body.append(notice);}notice.dataset.authPause='true';
     notice.innerHTML=`<div><b>Syncing is paused</b><small>Sign in as ${esc(state.user?.username||state.user?.email||'the same account')} to continue. Items stay on this device until then.</small></div><button id="signInPendingNotice" class="btn light sm">Sign in</button><button id="dismissPendingNotice" class="iconbtn" aria-label="Dismiss notification">×</button>`;
-    $('signInPendingNotice').onclick=()=>openLogin();$('dismissPendingNotice').onclick=()=>notice.remove();
+    $('signInPendingNotice').onclick=()=>openLogin();$('dismissPendingNotice').onclick=()=>notice.remove();placeNotifications();
   }
   function openLinkedPendingSaves(){
-    openModal('On this device',`${queuePaused?`<div class="login-note">Syncing is paused. <button id="resumePendingSignIn" class="link-btn" type="button">Sign in</button> to continue. You can still discard items.</div>`:''}<div id="linkedPendingItems"></div><section class="local-drafts"><div class="panel-head"><h3>Drafts</h3><button type="button" id="discardAllDrafts" class="btn light sm danger-text" hidden>Discard all</button></div><div id="localDraftItems"></div></section><p class="pending-footnote">You can close this and keep working. Uploads may pause when the app is closed or your phone suspends it.</p>`,()=>{if($('resumePendingSignIn'))$('resumePendingSignIn').onclick=()=>openLogin();paintLinkedPendingItems();void workflows?.paintDrafts?.($('localDraftItems'));});
+    openModal('On this device',`${queuePaused?`<div class="login-note">Syncing is paused. <button id="resumePendingSignIn" class="link-btn" type="button">Sign in</button> to continue. You can still discard items.</div>`:''}<div id="linkedPendingItems"></div><section class="local-drafts"><div class="panel-head"><h3>Drafts</h3><button type="button" id="discardAllDrafts" class="btn light sm danger-text" hidden>Discard all</button></div><div id="localDraftItems"></div></section><p class="pending-footnote">You can close this and keep working. Uploads may pause when the app is closed or your phone suspends it.</p>`,()=>{if($('resumePendingSignIn'))$('resumePendingSignIn').onclick=()=>openLogin();paintLinkedPendingItems();return workflows?.paintDrafts?.($('localDraftItems'));});
   }
   // What a person can do with one queued item depends on whether the server may already have it.
   function pendingItemActions(r,waiting,main){
@@ -1834,13 +1878,13 @@
     const list=$('linkedPendingItems');if(!list)return;
     const rows=queueRows.filter(r=>r.state!=='Saved'),attention=rows.filter(r=>r.state==='Retry'),syncing=rows.filter(r=>r.state!=='Retry');
     list.innerHTML=(attention.length?`<section><h3>Needs attention</h3>${attention.map(pendingItemHtml).join('')}</section>`:'')+(syncing.length?`<section><h3>Waiting to sync</h3>${syncing.map(pendingItemHtml).join('')}</section>`:'')+(!rows.length?'<p class="input-hint">Nothing is waiting to sync.</p>':'');
-    list.querySelectorAll('[data-retry-save]').forEach(b=>b.onclick=()=>{notifiedSaves.delete(b.dataset.retrySave);$('saveFailureNotice')?.remove();void saveQueue.retry(b.dataset.retrySave);});
+    list.querySelectorAll('[data-retry-save]').forEach(b=>b.onclick=()=>void retryBackgroundSave(b.dataset.retrySave));
     list.querySelectorAll('[data-reopen-save]').forEach(b=>b.onclick=async()=>{try{const row=await saveQueue.reopen(b.dataset.reopenSave);notifiedSaves.delete(row.id);reviewQueuedSave(row);}catch(err){toast(humanError(err),'error');}});
     list.querySelectorAll('[data-discard-save]').forEach(b=>b.onclick=()=>void discardQueuedSave(b.dataset.discardSave));
     list.querySelectorAll('[data-finish-photos]').forEach(b=>b.onclick=async()=>{const r=queueRows.find(x=>x.id===b.dataset.finishPhotos),left=(r?.photos||[]).filter(p=>!p.uploaded).length;if(await confirmAction({title:'Finish without these photos?',body:'The asset is already saved. '+left+' photo'+(left===1?'':'s')+' that did not upload will be removed from this device.',confirmLabel:'Finish',danger:true})!==true)return;try{await saveQueue.finishWithoutPhotos(r.id);notifiedSaves.delete(r.id);toast('Saved without the remaining photos.');}catch(err){toast(humanError(err),'error');}});
     list.querySelectorAll('[data-unlink-save]').forEach(b=>b.onclick=async()=>{try{await saveQueue.unlink(b.dataset.unlinkSave);toast('This item will save on its own. You can link it later.');}catch(err){toast(humanError(err),'error');}});
     list.querySelectorAll('[data-review-save],[data-review-main]').forEach(b=>b.onclick=()=>reviewQueuedSave(queueRows.find(r=>r.id===(b.dataset.reviewSave||b.dataset.reviewMain))));
-    list.querySelectorAll('[data-open-saved]').forEach(b=>b.onclick=async()=>{if(workflows?.enabled()&&modalStack.length){const expected=queueScope,asset=await fetchAssetDetail(b.dataset.openSaved);if(expected!==queueScope||!b.isConnected)return;openModal(assetDisplayName(asset),workflows.referenceHtml(asset,{full:true})+'<div class="detail-grid">'+AssetEditor.fields.filter(f=>f.key!=='movement_note').map(f=>'<div class="detail-field"><label>'+esc(f.label)+'</label><div>'+esc(AssetEditor.values(asset)[f.key]||'—')+'</div></div>').join('')+'</div>',null,{stack:true});return;}closeModal();openAsset(b.dataset.openSaved);});
+    list.querySelectorAll('[data-open-saved]').forEach(b=>b.onclick=async()=>{if(workflows?.enabled()&&modalStack.length){const expected=queueScope;let asset;try{asset=await fetchAssetDetail(b.dataset.openSaved);}catch(err){if(expected===queueScope&&b.isConnected)toast('Could not open this asset. '+humanError(err),'error');return;}if(expected!==queueScope||!b.isConnected)return;openModal(assetDisplayName(asset),workflows.referenceHtml(asset,{full:true})+'<div class="detail-grid">'+AssetEditor.fields.filter(f=>f.key!=='movement_note').map(f=>'<div class="detail-field"><label>'+esc(f.label)+'</label><div>'+esc(AssetEditor.values(asset)[f.key]||'—')+'</div></div>').join('')+'</div>',null,{stack:true});return;}closeModal();openAsset(b.dataset.openSaved);});
   }
   async function discardQueuedSave(id){
     const row=queueRows.find(r=>r.id===id);if(!row)return;
@@ -1849,10 +1893,15 @@
     if(await confirmAction({title:'Discard this change?',body,confirmLabel:'Discard',danger:true})!==true)return;
     try{await saveQueue.remove(id,{force:risky});notifiedSaves.delete(id);toast('Discarded from this device.');}catch(err){toast(humanError(err),'error');}
   }
+  async function retryBackgroundSave(id){
+    notifiedSaves.delete(id);
+    $('saveFailureNotice')?.remove();
+    try{await saveQueue.retry(id);}catch(err){toast('Could not retry this save. '+humanError(err),'error');}
+  }
   function showSaveFailure(row){
     let notice=$('saveFailureNotice');if(!notice){notice=document.createElement('aside');notice.id='saveFailureNotice';notice.className='save-failure-notice';notice.setAttribute('role','alert');document.body.append(notice);}
-    notice.innerHTML=`<div><b>${row.asset?'Some photos could not upload':'A pending asset needs review'}</b><small>${row.asset?'Asset details are saved. Retry the remaining photos.':'Your draft and photos are kept on this device.'}</small></div><button class="btn light sm" id="reviewSaveFailure">${row.asset?'Retry':'Review'}</button><button class="iconbtn" id="dismissSaveFailure" aria-label="Dismiss notification">×</button>`;
-    $('reviewSaveFailure').onclick=()=>{notice.remove();if(row.asset)void saveQueue.retry(row.id);else openLinkedPendingSaves();};$('dismissSaveFailure').onclick=()=>notice.remove();
+    notice.innerHTML=`<div><b>${row.asset?'Some photos could not upload':'A background save needs review'}</b><small>${esc(assetDisplayName(row.params)+'. '+humanError(row.error))}${row.asset?' Asset details are saved.':' Your entry is kept on this device.'}</small></div><button class="btn light sm" id="reviewSaveFailure">${row.asset?'Retry':'Review'}</button><button class="iconbtn" id="dismissSaveFailure" aria-label="Dismiss notification">×</button>`;
+    $('reviewSaveFailure').onclick=()=>{notice.remove();if(row.asset)void retryBackgroundSave(row.id);else openLinkedPendingSaves();};$('dismissSaveFailure').onclick=()=>notice.remove();placeNotifications();
   }
   function paintPendingRegister(){
     if(!simpleLinksEnabled())return;
@@ -1891,6 +1940,14 @@
     if(!simpleLinksEnabled()||!isAuthenticated())return;
     const main=mainDescriptor(context);
     toast(main.name+(main.pending?' is saved on this device and will sync in the background.':' is saved.'),'ok',{actions:[{label:'Add linked asset',onClick:()=>openLinkedCaptureChoices(context)},{label:'Scan next',onClick:()=>beginScanner()}]});
+  }
+  function showRegistrationSaved(rows,{scan=false,offerLink=false}={}){
+    const context=contextFromRow(rows[0]);
+    const actions=[scan
+      ?{label:'Scan next',onClick:()=>beginScanner()}
+      :{label:'Register another',onClick:()=>{closeDrawer();openAssetForm();}}];
+    if(offerLink&&isAuthenticated())actions.push({label:'Add linked asset',onClick:()=>openLinkedCaptureChoices(context)});
+    toast(rows.length===1?'Saved on this device. Sync continues in the background.':rows.length+' units saved on this device. Sync continues in the background.','ok',{actions});
   }
   function openLinkedCaptureChoices(context){
     const main=mainDescriptor(context);
@@ -3383,7 +3440,7 @@
       openAssetForm({category_name:f.category,brand:f.brand,model:f.model,serial:f.serial,specifications:f.specifications,_scanFiles:recognitionPhotos()});
     });
     $('v27UpdateTarget')?.addEventListener('click',()=>withAccess('STAFF',()=>openScanReconcile(pendingTarget,getIncoming(),recognitionPhotos())));
-    $('v27FindMatch')?.addEventListener('click',()=>withAccess('STAFF',()=>openScanMatchPicker(getIncoming(),recognitionPhotos())));
+    $('v27FindMatch')?.addEventListener('click',()=>withAccess('STAFF',()=>withBusy($('v27FindMatch'),'Opening match…',()=>openScanMatchPicker(getIncoming(),recognitionPhotos()))));
     $$('[data-v27-match]').forEach(btn=>btn.addEventListener('click',()=>{
       const m=session.matches[Number(btn.dataset.v27Match)];if(m)withAccess('STAFF',()=>openScanReconcile(m.asset,getIncoming(),recognitionPhotos()));
     }));
@@ -3558,7 +3615,8 @@
 
   async function openScanMatchPicker(incoming,scanFile){
     const current=currentView();
-    if(!state.assets.length)await loadAssets(true);
+    try{if(!state.assets.length)await loadAssets(true,{throwOnError:true});}
+    catch(err){if(current())toast('Could not load assets to match. '+humanError(err),'error');return;}
     if(!current())return;
     openModal('Match Scan to Existing Asset',`<div class="login-note">Search for the device already in AssetHub. Choosing a device opens a comparison; it never changes or merges records automatically.</div><div class="field"><label>Find an asset</label><input id="scanMatchSearch" placeholder="Asset ID, brand, model, serial, site" autocomplete="off"></div><div id="scanMatchOptions" class="scan-match-choices"></div>`,()=>{
       const search=$('scanMatchSearch'), list=$('scanMatchOptions');
@@ -3568,7 +3626,20 @@
         list.innerHTML=matches.length?matches.map(x=>`<button class="scan-match-choice" data-match-pick="${esc(x.asset_id)}" type="button"><b>${esc(x.brand||'Unknown')} ${esc(x.model||'')}</b><small>${esc(x.asset_id)} · ${esc(x.site_name||'No site')} · ${esc(x.serial||'No serial')}</small></button>`).join(''):'<div class="empty-state compact">No matching assets. Check spelling or create a new record.</div>';
         list.querySelectorAll('[data-match-pick]').forEach(el=>el.addEventListener('click',()=>{
           const picked=matches.find(x=>String(x.asset_id)===el.dataset.matchPick);
-          if(picked)openScanReconcile(picked,incoming,scanFile);
+          if(!picked||list.dataset.loading)return;
+          list.dataset.loading='true';
+          clearDialogErrors();
+          search.disabled=true;
+          const buttons=Array.from(list.querySelectorAll('button'));
+          buttons.forEach(button=>button.disabled=true);
+          const label=el.innerHTML;
+          el.textContent='Loading asset…';
+          void openScanReconcile(picked,incoming,scanFile,{fromPicker:true}).finally(()=>{
+            delete list.dataset.loading;
+            search.disabled=false;
+            buttons.forEach(button=>button.disabled=false);
+            el.innerHTML=label;
+          });
         }));
       };
       search.addEventListener('input',draw);draw();
@@ -3578,7 +3649,7 @@
   function compareValue(a,b){return String(a||'').trim().toLowerCase()===String(b||'').trim().toLowerCase();}
   function fieldLabel(key){return ({category:'Category',brand:'Brand',model:'Model',serial:'Serial',specifications:'Specifications',exact_location:'Exact location',assigned_to:'Assigned to',site_id:'Site',area:'Area',status:'Status',parent_asset_id:'Main asset'})[key]||key;}
 
-  async function openScanReconcile(existing,incoming,scanFile){
+  async function openScanReconcile(existing,incoming,scanFile,{fromPicker=false}={}){
     const current=currentView();
     const scanFiles=Array.isArray(scanFile)?scanFile:(scanFile?[scanFile]:[]);
     let full;
@@ -3586,6 +3657,12 @@
     catch(err){if(current())toast('Could not load the latest asset record: '+humanError(err),'error');return;}
     if(!current())return;
     if(!full){toast('Unable to compare: the asset record is unavailable.','error');return;}
+    const waiting=simpleLinksEnabled()&&queueRows.some(row=>row.params.asset_id===full.asset_id&&!row.asset&&row.state!=='Saved');
+    if(waiting){
+      toast('This asset already has a change waiting to sync. Review that save before adding another.', 'error', {actions:[{label:'Review save',onClick:openLinkedPendingSaves}]});
+      return;
+    }
+    if(fromPicker)closeModal();
     if(workflows?.enabled())return workflows.openReconcile(full,incoming,scanFiles);
     const fields=['category','brand','model','serial','specifications'];
     const changed=fields.filter(key=>{

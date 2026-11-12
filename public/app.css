@@ -807,3 +807,10 @@ body.modal-open .mobile-nav,body.drawer-open .mobile-nav{opacity:0;transform:tra
 .scan-text-sheet[hidden]{display:none}
 .scan-text-body{overflow:auto;font-size:14px}
 @media(min-width:761px){.scan-text-btn{bottom:16px}.scan-text-sheet{left:auto;right:16px;bottom:16px;width:420px;border-radius:14px}}
+
+.dialog-notifications{flex:none;min-width:0}
+body #toast.toast-stack[data-inline]{position:static;width:auto;max-height:25dvh;margin:0;padding:8px 12px;box-sizing:border-box}
+body #toast.toast-stack[data-inline] .toast-item{box-shadow:none}
+
+body > .save-failure-notice{top:calc(65px + env(safe-area-inset-top));bottom:auto}
+.dialog-notifications .save-failure-notice[data-inline]{position:static;max-width:none;margin:8px 12px;box-shadow:none;flex-wrap:wrap}

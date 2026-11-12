@@ -7,9 +7,14 @@
   function dialog(label,onClose=()=>{}){
     const d=document.createElement('dialog');d.className='asset-media-dialog';d.setAttribute('aria-label',label);
     let disposed=false;
-    const dispose=()=>{if(disposed)return;disposed=true;onClose();d.remove();};
+    const dispose=()=>{if(disposed)return;disposed=true;for(const notice of d.querySelectorAll('.dialog-notifications>[data-inline]'))document.body.append(notice);d.remove();document.dispatchEvent(new Event('asset-dialog-change'));onClose();};
     d.addEventListener('close',dispose);d.addEventListener('cancel',dispose);
-    document.body.append(d);return {element:d,open:()=>d.showModal(),close:()=>{if(d.open)d.close();else dispose();},alive:()=>!disposed};
+    const notices=document.createElement('div');notices.className='dialog-notifications';
+    document.body.append(d);return {element:d,open:()=>{
+      d.firstElementChild.after(notices);
+      d.showModal();
+      document.dispatchEvent(new Event('asset-dialog-change'));
+    },close:()=>{if(d.open)d.close();else dispose();},alive:()=>!disposed};
   }
   function serial({onRead,active=()=>true,onOpen=()=>{},onClose=()=>{}}){
     onOpen();let stream,timer,reading=false;const abort=new AbortController();

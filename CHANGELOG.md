@@ -1,3 +1,11 @@
+# 2.10.3 — registration and dialog feedback (2026-11-12)
+
+- Keep validation and sync feedback visible inside the active dialog, including on mobile Scan.
+- Replace the match picker with the comparison once the asset loads. Failed lookups retain the picker for retry.
+- Confirm when registration is saved on the device and offer a next entry while details and photos sync.
+- Show confirmed registrations in the register immediately and support Guest drafts while they await confirmation.
+- Preserve the underlying form when a photo preview or serial reader closes.
+
 # 2.10.2 — asset details overview (2026-11-12)
 
 - Add Overview, Photos and Activity tabs with accessible keyboard navigation and expandable supporting information.
