@@ -16,8 +16,8 @@
     maintenanceSort:{key:'reported_at',dir:'desc'},
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
-  const APP_VERSION = '2.10.1';
-  const BUILD_ID = '2.10.1-draft-recovery-1';
+  const APP_VERSION = '2.10.2';
+  const BUILD_ID = '2.10.2-asset-overview-1';
   // Full-field writes require the additive 2.9 backend setup; older services keep the legacy editor.
   const BACKEND_API_VERSION = '2.10.0';
   let workflows=null;
@@ -1381,6 +1381,7 @@
       const r=await AssetAPI.get('getAsset',{asset_id:key});
       if(credential!==AssetAPI.getToken()||scope!==detailStoreKey(key)||(state.detailEpochs.get(key)||0)!==epoch)return detailMemoryRecord(key)?.data||null;
       if((detailMemoryRecord(key)?.savedAt||0)>before)return detailMemoryRecord(key).data;
+      if(!r.asset||String(r.asset.asset_id)!==key)throw new Error('The asset service returned incomplete details. Retry loading this asset.');
       cacheAssetDetail(r.asset);
       return r.asset;
     }).finally(()=>{if(state.detailRequests.get(key)===promise)state.detailRequests.delete(key);});
@@ -1392,7 +1393,8 @@
     id=String(id||'').trim(); if(!id)return;
     const version=++state.drawerVersion,view=currentView();
     const current=()=>version===state.drawerVersion&&state.openAssetId===id&&view();
-    stopCamera();
+    stopCamera();AssetDetailView.remember($('drawerBody'));
+    delete $('drawerBody').dataset.detailAssetId;$('drawerBody').classList.remove('asset-overview-body');$('drawerFooter').replaceChildren();$('drawerFooter').hidden=true;
     state.openAssetId=id;
     $('drawerId').textContent=id;$('drawerBody').innerHTML='<div class="drawer-loading"><span class="btn-spinner"></span><b>Loading asset details…</b><small>You can continue using AssetHub while this loads.</small></div>';$('drawerBody').scrollTop=0;
     $('assetDrawer').classList.add('open'); $('drawerBackdrop').classList.remove('hidden'); document.body.classList.add('drawer-open');
@@ -1414,13 +1416,13 @@
 
     const shouldRefresh=force||!record||detailNeedsRefresh(record);
     if(!shouldRefresh)return cached;
+    if(cached)AssetDetailView.status($('drawerBody'),'Refreshing asset details…');
     try{
       const fresh=await fetchAssetDetail(id,{label:cached?'Refreshing asset…':'Loading asset…'});
       if(current()&&$('assetDrawer').classList.contains('open')) await renderDrawer(fresh);
       return fresh;
     }catch(err){
-      if(!cached&&current())$('drawerBody').innerHTML=`<div class="empty-state">${esc(humanError(err))}</div>`;
-      else if(cached)console.warn('Asset refresh failed; cached detail remains visible',err);
+      if(current()){if(!cached){$('drawerBody').innerHTML=`<div class="empty-state detail-load-error" role="alert"><p>${esc(humanError(err))}</p><button type="button" id="retryAssetDetail" class="btn light">Retry loading</button></div>`;$('retryAssetDetail').onclick=()=>openAsset(id,{force:true});}else AssetDetailView.status($('drawerBody'),'Showing saved details. '+humanError(err),{error:true,retry:()=>openAsset(id,{force:true})});}
       return cached;
     }
   }
@@ -1432,14 +1434,15 @@
     if(typeof step==='string')return void openAsset(step);
     closeDrawer();state.drawerTrail=trail;step?.();
   }
-  function closeDrawer(){ const wasOpen=!!state.openAssetId;state.drawerTrail=[];state.drawerVersion++;state.openAssetId=''; $('assetDrawer').classList.remove('open'); $('drawerBackdrop').classList.add('hidden'); document.body.classList.remove('drawer-open');if(wasOpen)resumeScannerCamera(); }
+  function closeDrawer(){ AssetDetailView.remember($('drawerBody'));const wasOpen=!!state.openAssetId;state.drawerTrail=[];state.drawerVersion++;state.openAssetId=''; $('assetDrawer').classList.remove('open'); $('drawerBackdrop').classList.add('hidden'); document.body.classList.remove('drawer-open');if(wasOpen)resumeScannerCamera(); }
   async function renderDrawer(a){
     if(!a||String(state.openAssetId)!==String(a.asset_id)||!$('assetDrawer').classList.contains('open'))return;
+    AssetDetailView.remember($('drawerBody'));
     const mainImage=a.images?.find(x=>String(x.image_id)===String(a.main_image_id)&&String(x.active)!=='false')||a.images?.find(x=>String(x.image_type)==='main'&&String(x.active)!=='false')||null;
     const mainFile=mainImage?.thumbnail_file_id||mainImage?.drive_file_id||a.thumbnail_file_id||a.image_file_id;
     const custom=(a.custom_fields||[]).filter(f=>f.value).map(f=>`<div class="detail-field"><label>${esc(f.label)}</label><div>${esc(f.value)}</div></div>`).join('');
-    const pd=a.private_details||null;
-    const privateSection=pd&&Object.values(pd).some(Boolean)?`<div class="detail-section staff-private-section"><div class="staff-private-head"><div><h3>Staff-only information</h3><small>Visible only to signed-in Staff and Admin.</small></div><span class="private-badge">STAFF / ADMIN</span></div><div class="detail-grid"><div class="detail-field"><label>Mobile number</label><div>${esc(pd.mobile_number||'—')}</div></div><div class="detail-field"><label>Registered owner</label><div>${esc(pd.register_owner||'—')}</div></div><div class="detail-field"><label>Account number</label><div>${esc(pd.account_number||'—')}</div></div><div class="detail-field"><label>Amount paid</label><div>${esc(pd.amount_paid||'—')}</div></div></div></div>`:'';
+    const pd=isAuthenticated()?a.private_details||null:null;
+    const privateSection=pd&&Object.values(pd).some(AssetDetailView.present)?`<div class="detail-section staff-private-section"><div class="staff-private-head"><div><h3>Staff-only information</h3><small>Visible only to signed-in Staff and Admin.</small></div><span class="private-badge">STAFF / ADMIN</span></div><div class="detail-grid"><div class="detail-field"><label>Mobile number</label><div>${esc(AssetDetailView.present(pd.mobile_number)?pd.mobile_number:'—')}</div></div><div class="detail-field"><label>Registered owner</label><div>${esc(AssetDetailView.present(pd.register_owner)?pd.register_owner:'—')}</div></div><div class="detail-field"><label>Account number</label><div>${esc(AssetDetailView.present(pd.account_number)?pd.account_number:'—')}</div></div><div class="detail-field"><label>Amount paid</label><div>${esc(AssetDetailView.present(pd.amount_paid)?pd.amount_paid:'—')}</div></div></div></div>`:'';
     $('drawerBody').innerHTML=`<div class="detail-hero"><div id="drawerMainPhoto" class="detail-photo">${icon(catIcon(a.category_name),'xl')}</div><div class="detail-title"><h2>${esc(assetTitle(a))}</h2><p>${esc(a.asset_id)} · ${esc(a.category_name)}</p>${statusBadge(a.status)}${drawerActionsHtml(a)}</div></div><div class="detail-section"><h3>Placement & assignment</h3><div class="detail-grid"><div class="detail-field"><label>Site</label><div>${esc(a.site_name||'—')}</div></div><div class="detail-field"><label>Area</label><div>${esc(a.area_name||'—')}</div></div><div class="detail-field"><label>Exact location</label><div>${esc(a.exact_location||'—')}</div></div><div class="detail-field"><label>Assigned to</label><div>${esc(a.assigned_to||'—')}</div></div></div></div><div class="detail-section"><h3>Device information</h3><div class="detail-grid"><div class="detail-field"><label>Serial</label><div>${esc(a.serial||'—')}</div></div><div class="detail-field"><label>Specifications</label><div>${esc(a.specifications||'—')}</div></div>${custom}</div></div>${privateSection}<div class="detail-section"><div class="panel-head"><div><h3>Images</h3><small>Main, label, condition, damage and repair photos.</small></div><div class="photo-picker-actions"><button id="addAssetImage" class="btn light sm">${icon('camera','sm')}Take photo</button><button id="addAssetGallery" class="btn light sm">${icon('image','sm')}Choose from gallery</button></div></div><div id="drawerGallery" class="gallery"></div></div><div class="detail-section"><h3>Maintenance</h3><div>${(a.maintenance||[]).slice(0,5).map(m=>`<div class="ref-row"><div><b>${esc(m.issue)}</b><small>${esc(m.status)} · ${esc(nowText(m.reported_at))}</small></div>${isAuthenticated()?`<button class="btn light sm" data-drawer-maint="${esc(m.maintenance_id)}">${icon('edit','sm')}Edit</button>`:''}</div>`).join('')||'<div class="empty-state compact">No maintenance history.</div>'}</div></div><div class="detail-section"><h3>Movement history</h3><div>${(a.movements||[]).slice(0,5).map(m=>`<div class="ref-row"><div><b>${esc(m.from_site||'—')} → ${esc(m.to_site||'—')}</b><small>${esc(m.from_area||'')} → ${esc(m.to_area||'')} · ${esc(nowText(m.moved_at))}</small></div></div>`).join('')||'<div class="empty-state compact">No movement history.</div>'}</div></div><div class="detail-section"><h3>Activity log</h3><div>${(a.activity||[]).slice(0,8).map(x=>`<div class="ref-row"><div><b>${esc(activityLabel(x.action))}</b><small>${esc(x.user||'Guest')} · ${esc(nowText(x.timestamp))}</small></div></div>`).join('')||'<div class="empty-state compact">No activity yet.</div>'}</div></div>`;
     // On phones the actions live in a bar at the bottom of the drawer, within thumb reach.
     const drawerFooter=$('drawerFooter'),actionBar=$('drawerBody').querySelector('.detail-title .action-bar');drawerFooter.replaceChildren();
@@ -1457,16 +1460,6 @@
       document.querySelector('#assetDrawer .asset-drawer-more .actions')?.append(another);
     }
     }
-    // Keep the essential placement visible; collapse supporting detail only on phones.
-    if(window.matchMedia('(max-width:760px)').matches){
-      const sections=Array.from($('drawerBody').querySelectorAll(':scope > .detail-section'));
-      sections.slice(1).forEach(section=>{
-        const heading=section.querySelector('h3')?.textContent?.trim()||'Additional information';
-        const fold=document.createElement('details');fold.className='asset-detail-fold';
-        const summary=document.createElement('summary');summary.textContent=heading;
-        section.parentNode.insertBefore(fold,section);fold.append(summary,section);
-      });
-    }
     renderLinkedDetailSection();decorateDetailHeadings();
     $('editAssetDrawer')?.addEventListener('click',()=>withAccess('STAFF',()=>openAssetForm(a)));
     $('moveAssetDrawer')?.addEventListener('click',()=>withAccess('STAFF',()=>openMoveAssign(a)));
@@ -1479,16 +1472,26 @@
     $('addAssetImage')?.addEventListener('click',()=>withAccess('STAFF',()=>openImageUpload(a.asset_id,'camera')));
     $('addAssetGallery')?.addEventListener('click',()=>withAccess('STAFF',()=>openImageUpload(a.asset_id,'gallery')));
     workflows?.enabled()&&workflows.decorateDetail(a);
+    AssetDetailView.mount($('drawerBody'),a,{icon,productName:AssetEditor.productName,onCopy:copyDetailAssetId,onRetry:()=>openAsset(a.asset_id,{force:true})});
+    updateDetailQueueStatus();
     // Image delivery may finish after another linked record has replaced this drawer.
     const version=state.drawerVersion,hero=$('drawerBody').firstElementChild,scope=detailStoreKey('');
     const current=()=>state.openAssetId===String(a.asset_id)&&state.drawerVersion===version&&$('drawerBody').firstElementChild===hero&&scope===detailStoreKey('');
     void (async()=>{
+      if(current())void renderGallery(a);
       if(mainFile){
-        try{const src=await imageData(mainFile,{persistent:true});if(current())$('drawerMainPhoto').innerHTML=`<img src="${src}" alt="${esc(a.asset_id)}">`;}
-        catch{if(current()){$('drawerMainPhoto').classList.add('thumb-error');$('drawerMainPhoto').title='Image unavailable';}}
+        const load=async()=>{if(!current())return;const box=$('drawerMainPhoto');box.classList.remove('thumb-error');box.innerHTML='<span class="detail-photo-loading" role="status">Loading photo…</span>';try{const src=await imageData(mainFile,{persistent:true});if(current()){box.innerHTML=`<img src="${esc(src)}" alt="${esc(assetTitle(a))}">`;box.onclick=()=>openGalleryViewer(a,Math.max(0,(a.images||[]).filter(i=>String(i.active)!=='false').findIndex(i=>i.image_id===a.main_image_id)));}}catch{if(current()){box.onclick=null;box.classList.add('thumb-error');box.innerHTML='<button type="button" class="detail-photo-retry">Photo unavailable. Retry</button>';box.firstElementChild.onclick=e=>{e.stopPropagation();void load();};}}};await load();
       }
-      if(current())renderGallery(a);
     })();
+  }
+  async function copyDetailAssetId(id){
+    try{if(!navigator.clipboard?.writeText)throw new Error('Clipboard unavailable');await navigator.clipboard.writeText(id);toast('Asset ID copied.');}
+    catch{openModal('Copy asset ID',`<p>Select and copy this asset ID.</p><input class="copy-asset-id" aria-label="Asset ID" readonly value="${esc(id)}">`,()=>{const field=document.querySelector('.copy-asset-id');field.focus();field.select();});}
+  }
+  function updateDetailQueueStatus(){
+    if(!$('drawerBody').querySelector('.asset-detail-tabs')||!$('assetDrawer').classList.contains('open'))return;
+    const id=state.openAssetId,row=queueRows.find(r=>r.state!=='Saved'&&(id==='local:'+r.id||r.asset?.asset_id===id||r.params.asset_id===id));
+    AssetDetailView.queueStatus($('drawerBody'),row,openLinkedPendingSaves);
   }
   function assetPublicUrl(assetId){
     const base = ASSET_BASE_URL.endsWith('/') ? ASSET_BASE_URL : ASSET_BASE_URL + '/';
@@ -1656,7 +1659,7 @@
     }:null});
   }
   function renderUnifiedGallery(asset){
-    const box=$('drawerGallery'),images=(asset.images||[]).filter(i=>String(i.active)!=='false');if(!box)return;
+    const box=$('drawerGallery'),images=(asset.images||[]).filter(i=>String(i.active)!=='false');if(!box)return;if(asset._nonimageOnly){box.innerHTML='<div class="overview-partial" role="status">Loading the photo list… <button type="button" class="btn light sm" id="retryDetailImages">Retry loading</button></div>';$('retryDetailImages').onclick=()=>openAsset(asset.asset_id,{force:true});return;}
     box.innerHTML=images.map((i,n)=>`<button class="gallery-item ${i.image_id===asset.main_image_id?'is-main':''}" data-preview-index="${n}"><div class="asset-thumb" ${i._localPreview?'':'data-thumb="'+esc(i.thumbnail_file_id||i.drive_file_id||'')+'"'}>${i._localPreview?'<img src="'+esc(i._localPreview)+'" alt="'+esc(i.image_type||'Asset photo')+'">':icon('image','lg')}</div><span class="gallery-label">${i.image_id===asset.main_image_id?'★ Main photo':esc(i.image_type||'Photo')}${i._pending?' · Pending':''}</span></button>`).join('')||'<div class="empty-state compact">No images yet.</div>';
     box.querySelectorAll('[data-preview-index]').forEach(b=>b.onclick=()=>previewUnifiedImages(asset,Number(b.dataset.previewIndex)));void hydrateThumbs(box);
     const main=images.find(i=>i.image_id===asset.main_image_id)||images[0];if(main?._localPreview&&$('drawerMainPhoto')){$('drawerMainPhoto').innerHTML='<img src="'+esc(main._localPreview)+'" alt="Main asset photo">';$('drawerMainPhoto').onclick=()=>previewUnifiedImages(asset,images.indexOf(main));}
@@ -1694,7 +1697,7 @@
     if(previous?.updated_at&&asset.updated_at&&String(previous.updated_at)>String(asset.updated_at))return;
     const merged=metadata?asset:{...previous,...Object.fromEntries(['asset_id','updated_at','main_image_id','thumbnail_file_id','image_file_id','images'].filter(k=>asset[k]!==undefined).map(k=>[k,asset[k]]))};
     const local=localAssetRecord(row,merged);cacheAssetDetail(local);
-    if(state.openAssetId==='local:'+row.id){state.openAssetId=asset.asset_id;$('drawerId').textContent=asset.asset_id;}
+    if(state.openAssetId==='local:'+row.id){AssetDetailView.remember($('drawerBody'));AssetDetailView.migrate('local:'+row.id,asset.asset_id);delete $('drawerBody').dataset.detailAssetId;state.openAssetId=asset.asset_id;$('drawerId').textContent=asset.asset_id;}
     if(state.openAssetId===asset.asset_id&&$('assetDrawer').classList.contains('open'))void renderDrawer(local);
     if(linkedContext?.operationId===row.id)setLinkedContext({...linkedContext,assetId:asset.asset_id,operationId:''});
     renderLinkContext();paintPendingRegister();
@@ -1738,7 +1741,7 @@
       active:()=>queueScope===scope&&queueProtocol==='links'&&saveQueue===current&&!queuePaused&&AssetAPI.getUrl()===endpoint&&AssetAPI.getToken()===credential,
       photosAllowed:()=>!state.recognitionSession?.photos?.some(p=>p.processing||p.codeBusy),
       onAuthRequired:()=>{queuePaused=true;clearSensitiveDetailCache();document.querySelectorAll('.staff-private-section').forEach(el=>el.remove());$('profileRole').textContent='Session expired';$('signInBtn').classList.remove('hidden');paintLinkedPendingSaves();},
-      onChange:(rows,error)=>{if(rows)queueRows=rows;paintLinkedPendingSaves();if(error){console.warn('Background saves paused:',error);if(queueStorageError!==error){queueStorageError=error;showQueueStorageFailure();}}},
+      onChange:(rows,error)=>{if(rows)queueRows=rows;paintLinkedPendingSaves();updateDetailQueueStatus();if(error){console.warn('Background saves paused:',error);if(queueStorageError!==error){queueStorageError=error;showQueueStorageFailure();}}},
       onAsset:(asset,row,metadata)=>{
         if(workflows?.enabled()){applyLocalAssetResult(asset,row,metadata);return;}
         const previous=state.assets.find(a=>a.asset_id===asset.asset_id);

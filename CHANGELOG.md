@@ -1,3 +1,11 @@
+# 2.10.2 — asset details overview (2026-11-12)
+
+- Add Overview, Photos and Activity tabs with accessible keyboard navigation and expandable supporting information.
+- Build highlights from saved specification labels for every asset category; retain free text, all original specifications, custom values including zero/false, and Staff-only visibility.
+- Preserve existing Edit, Move, Report issue, More, linked-asset and photo handlers. Keep tab and fold state during background confirmations.
+- Add initial-load and cached-refresh errors with retry, independent main-photo/gallery loading, photo retry, copy-ID feedback and queued-save attention/progress messages.
+- Frontend only. Existing backend API 2.10.0 and Apps Script deployment remain unchanged.
+
 # 2.10.1 — draft recovery fix (2026-11-10)
 
 - Store photo bytes in browser draft and operation records, restoring File objects when read. Existing Blob records remain readable without clearing browser storage.

@@ -116,7 +116,7 @@ test('browser regressions on mobile and desktop',async t=>{
       const {page,context,errors}=await start({links:true,queue:true,unified:true,assets:[stock('PC1',{asset_name:'Finance PC 01',serial:'PC-SN-001'}),stock('PC2',{asset_name:'Reception PC 01',serial:'PC-SN-002'})]},{width:1440,height:1100});
       try{
         await page.locator('.nav-btn[data-route="assets"]').click();assert(await page.locator('#addAssetBtn').isHidden());await page.locator('.asset-group summary').click();assert.equal(await page.locator('[data-group-add]').count(),0);
-        await page.locator('[data-asset="PC1"]').click();await page.locator('#registerMatchingUnits').click();assert.equal(await page.locator('#assetForm [name="asset_name"]').inputValue(),'');assert.equal(await page.locator('#assetForm [name="serial"]').inputValue(),'');assert.equal(await page.locator('#assetForm [name="model"]').inputValue(),'M-10');assert.deepEqual(errors,[]);
+        await page.locator('[data-asset="PC1"]').click();await page.locator('[data-detail-fold="related"]>summary').click();await page.locator('#registerMatchingUnits').click();assert.equal(await page.locator('#assetForm [name="asset_name"]').inputValue(),'');assert.equal(await page.locator('#assetForm [name="serial"]').inputValue(),'');assert.equal(await page.locator('#assetForm [name="model"]').inputValue(),'M-10');assert.deepEqual(errors,[]);
       }finally{await context.close();}
     });
     await t.test('Unified: an unfinished form and its photo survive Pending and a reload',async()=>{
@@ -518,7 +518,7 @@ test('browser regressions on mobile and desktop',async t=>{
     await t.test('detail camera/gallery photos persist offline and upload after reopening',async()=>{
       const {page,context,errors}=await start({queue:true,assets:[stock('A')]});
       try{
-        await page.locator('[data-mobile-route="assets"]').click();await page.locator('[data-asset="A"]').click();await page.locator('.asset-detail-fold > summary').filter({hasText:'Images'}).click();await page.locator('#addAssetGallery').waitFor();
+        await page.locator('[data-mobile-route="assets"]').click();await page.locator('[data-asset="A"]').click();await page.getByRole('tab',{name:'Photos',exact:true}).click();await page.locator('#addAssetGallery').waitFor();
         await page.locator('#addAssetGallery').click();await page.locator('#detailPhotoPicker input[type="file"]').last().setInputFiles(image('detail.png'));await context.setOffline(true);await page.locator('#uploadImageSubmit').click();await page.locator('#modalWrap').waitFor({state:'hidden'});
         assert.equal(await page.evaluate(()=>window.__mock.uploadAttempts),0);await context.setOffline(false);await page.reload();await page.locator('#appLoading').waitFor({state:'hidden'});await page.waitForFunction(()=>window.__mock.uploadAttempts===1);assert.deepEqual(errors,[]);
       }finally{await context.close();}
@@ -526,7 +526,7 @@ test('browser regressions on mobile and desktop',async t=>{
     await t.test('session expiry closes private details and pauses the scoped queue',async()=>{
       const {page,context}=await start({queue:true,assets:[stock('A',{private_details:{mobile_number:'private-fixture'}})]});
       try{
-        await page.locator('[data-mobile-route="assets"]').click();await page.locator('[data-asset="A"]').click();await page.locator('.staff-private-section').waitFor({state:'attached'});
+        await page.locator('[data-mobile-route="assets"]').click();await page.locator('[data-asset="A"]').click();await page.locator('details.staff-private-section').waitFor({state:'attached'});
         await page.evaluate(()=>{const get=AssetAPI.get;AssetAPI.get=async(action,params)=>action==='sync'?{sync:{user:{username:'guest',role:'GUEST'},authenticated:false,assets:[],server_time:new Date().toISOString()}}:get(action,params);});
         await page.evaluate(()=>window.dispatchEvent(new Event('online')));await page.waitForFunction(()=>document.querySelector('#profileRole').textContent==='Read + Add');
         assert.equal(await page.locator('#assetDrawer').evaluate(el=>el.classList.contains('open')),false);assert.equal(await page.locator('#localWorkBar').isVisible(),false);
@@ -1042,15 +1042,14 @@ test('browser regressions on mobile and desktop',async t=>{
       const {page,context,errors}=await start();
       try{
         await formAfterScan(page);await page.locator('#assetForm [type="submit"]').click();await page.locator('#assetDrawer.open').waitFor();
-        // Mobile details fold secondary sections; staff explicitly opens Images.
-        await page.locator('summary').filter({hasText:/^Images$/}).click();
+        await page.getByRole('tab',{name:'Photos',exact:true}).click();
         const [chooser]=await Promise.all([page.waitForEvent('filechooser'),page.locator('#addAssetGallery').click()]);
         assert.equal(await chooser.element().getAttribute('capture'),null);
         await chooser.setFiles(image('detail-gallery.png'));
         await page.locator('#imageType').selectOption('condition');
         await page.locator('#uploadImageSubmit').click();await page.locator('#modalWrap').waitFor({state:'hidden'});
         assert.equal(await page.evaluate(()=>window.__mock.assets[0].images.at(-1).image_type),'condition');
-        await page.locator('summary').filter({hasText:/^Images$/}).click();
+        await page.getByRole('tab',{name:'Photos',exact:true}).click();
         const [camera]=await Promise.all([page.waitForEvent('filechooser'),page.locator('#addAssetImage').click()]);
         assert.equal(await camera.element().getAttribute('capture'),'environment');
         await camera.setFiles([]);assert.equal(await page.locator('#detailPhotoPicker .photo-picker-preview').count(),0);
@@ -1087,7 +1086,7 @@ test('browser regressions on mobile and desktop',async t=>{
       try{
         await page.locator('#adminToggle').click();
         await formAfterScan(page);await page.locator('#assetForm [type="submit"]').click();await page.locator('#assetDrawer.open').waitFor();
-        await page.locator('summary').filter({hasText:/^Images$/}).click();await page.locator('.gallery-item').first().click();
+        await page.getByRole('tab',{name:'Photos',exact:true}).click();await page.locator('.gallery-item').first().click();
         await page.locator('#replaceGalleryImage').click();
         const input=page.locator('#replacePhotoPicker [data-photo-gallery-input]');
         assert.equal(await input.getAttribute('multiple'),null);
@@ -1118,8 +1117,8 @@ test('browser regressions on mobile and desktop',async t=>{
         await formAfterScan(page);await page.locator('#assetForm [type="submit"]').click();await page.locator('#assetDrawer.open').waitFor();
         assert.equal(await page.evaluate(()=>window.__mock.calls.find(c=>c.action==='uploadImage').params.guest_upload_token),'test-upload-grant');
         const callsBefore=await page.evaluate(()=>window.__mock.uploadAttempts);
-        await page.locator('summary').filter({hasText:/^Images$/}).click();await page.locator('#addAssetGallery').click();
-        await page.locator('#loginForm').waitFor();assert.equal(await page.evaluate(()=>window.__mock.uploadAttempts),callsBefore);assert.deepEqual(errors,[]);
+        await page.getByRole('tab',{name:'Photos',exact:true}).click();
+        assert.equal(await page.locator('#addAssetGallery').count(),0);assert.equal(await page.evaluate(()=>window.__mock.uploadAttempts),callsBefore);assert.deepEqual(errors,[]);
       }finally{await context.close();}
     });
     await t.test('desktop manual creation keeps QR workflow and supports brand suggestions',async()=>{

@@ -1,8 +1,8 @@
 {
-  "version": "2.10.1",
-  "build": "2.10.1-draft-recovery-1",
-  "released": null,
-  "status": "preview",
-  "name": "Usability overhaul",
-  "notes": "Discard and restore everywhere, one action pattern, non-blocking notifications, maintenance and audit lifecycles, System Setup restore. Requires updated Code.gs and AssetGroups.gs plus setupAssetGrouping. Not deployed."
+  "version": "2.10.2",
+  "build": "2.10.2-asset-overview-1",
+  "released": "2026-11-12",
+  "status": "released",
+  "name": "Asset details overview",
+  "notes": "Overview, Photos and Activity tabs; data-driven specifications; expandable details; loading and retry feedback. Frontend-only update. Backend API remains 2.10.0."
 }

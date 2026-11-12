@@ -32,5 +32,7 @@ jobs:
           done
       - name: Install Chromium for browser regressions
         run: npx playwright install --with-deps chromium
+      - name: Run asset detail overview regressions
+        run: node tests/asset-detail-overview.browser.cjs
       - name: Run mobile and desktop browser regressions
         run: npm run test:browser
