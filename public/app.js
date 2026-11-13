@@ -16,8 +16,8 @@
     maintenanceSort:{key:'reported_at',dir:'desc'},
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
-  const APP_VERSION = '2.10.5';
-  const BUILD_ID = '2.10.5-photo-access-2';
+  const APP_VERSION = '2.10.6';
+  const BUILD_ID = '2.10.6-register-grouping-1';
   // Full-field writes require the additive 2.9 backend setup; older services keep the legacy editor.
   const BACKEND_API_VERSION = '2.10.0';
   let workflows=null;
@@ -1194,22 +1194,21 @@
   }
   function groupUnitHtml(a,index){
     const duplicate=index.serials.get(AssetGroups.serialKey(a.serial))?.length>1;
-    return `<div class="group-unit"><button type="button" data-asset="${esc(a.asset_id)}"><b>${esc(assetDisplayName(a))}</b><small>${esc(a.asset_id)} · Serial: ${esc(a.serial||'Not recorded')}</small><small>${esc([a.site_name,a.area_name,a.exact_location,a.assigned_to].filter(Boolean).join(' · '))}</small>${duplicate?'<span class="group-duplicate">Repeated serial · review records</span>':''}</button><div>${statusBadge(a.status)}${a.set_id&&isAuthenticated()&&!workflows?.enabled()?`<details class="group-unit-menu"><summary aria-label="Actions for ${esc(a.asset_id)}">⋯</summary><button type="button" class="btn light sm" data-unlink-asset="${esc(a.asset_id)}">Remove from set</button></details>`:''}</div></div>`;
+    return `<div class="group-unit"><button type="button" data-asset="${esc(a.asset_id)}"><b>${esc(assetDisplayName(a))}</b><small>${esc(a.asset_id)} · Serial: ${esc(a.serial||'Not recorded')}</small><small>${esc([a.site_name,a.area_name,a.exact_location,a.assigned_to].filter(Boolean).join(' · '))}</small>${assetThreadHtml(a)}${duplicate?'<span class="group-duplicate">Repeated serial · review records</span>':''}</button><div>${statusBadge(a.status)}${a.set_id&&isAuthenticated()&&!workflows?.enabled()?`<details class="group-unit-menu"><summary aria-label="Actions for ${esc(a.asset_id)}">⋯</summary><button type="button" class="btn light sm" data-unlink-asset="${esc(a.asset_id)}">Remove from set</button></details>`:''}</div></div>`;
   }
   function groupCardHtml(entry,i,index){
-    const a=entry.assets[0],isSet=entry.kind==='set',title=isSet?(a.set_name||'Unnamed set'):entry.kind==='unmarked'?([a.category_name||a.category,AssetGroups.template(a).brand,AssetGroups.template(a).model].filter(Boolean).join(' · ')):workflows?.enabled()?AssetEditor.productName(a):assetDisplayName(a);
+    const a=entry.assets[0],isSet=entry.kind==='set',title=isSet?(a.set_name||'Unnamed set'):entry.kind==='similar-name'?a.asset_name.trim():entry.kind==='unmarked'?([a.category_name||a.category,AssetGroups.template(a).brand,AssetGroups.template(a).model].filter(Boolean).join(' · ')):workflows?.enabled()?AssetEditor.productName(a):assetDisplayName(a);
     const sites=new Set(entry.assets.map(r=>[r.site_name,r.area_name].filter(Boolean).join(' / ')).filter(Boolean));
     const locations=sites.size===1?[...sites][0]:sites.size+' locations';
     const statuses=new Map();entry.assets.forEach(a=>statuses.set(a.status||'Unrecorded',(statuses.get(a.status||'Unrecorded')||0)+1));
     const statusSummary=[...statuses].map(([name,count])=>count+' '+name).join(' · ');
     const missing=entry.assets.filter(r=>!r.serial).length,duplicates=entry.assets.filter(r=>index.serials.get(AssetGroups.serialKey(r.serial))?.length>1).length;
-    return `<details class="asset-group" data-group-index="${i}"><summary><span class="asset-group-chevron" aria-hidden="true">›</span><span class="asset-group-copy"><small>${isSet?'Equipment set':entry.kind==='unmarked'?'Product details incomplete':'Same model'}</small><b>${esc(title)}</b><span>${entry.assets.length<entry.total?entry.assets.length+' of '+entry.total+' loaded':entry.assets.length} ${isSet?'components':'units'} · ${esc(locations)}${missing?' · '+missing+' without serial':''}</span><span>${esc(statusSummary)}</span>${entry.kind==='unmarked'?'<em>Grouped for display; exact model is unconfirmed.</em>':''}${duplicates?'<em>Repeated serials need review</em>':''}</span><span class="asset-group-count">${entry.assets.length}</span></summary><div class="asset-group-content"></div></details>`;
+    return `<details class="asset-group" data-group-index="${i}"><summary><span class="asset-group-chevron" aria-hidden="true">›</span><span class="asset-group-copy"><small>${isSet?'Equipment set':entry.kind==='similar-name'?'Similar assets':entry.kind==='unmarked'?'Product details incomplete':'Same model'}</small><b>${esc(title)}</b><span>${entry.assets.length<entry.total?entry.assets.length+' of '+entry.total:entry.assets.length} ${isSet?'components':'units'} · ${esc(locations)}${missing?' · '+missing+' without serial':''}</span><span>${esc(statusSummary)}</span>${['unmarked','similar-name'].includes(entry.kind)?'<span>Exact model unconfirmed</span>':''}${duplicates?'<em>Repeated serials need review</em>':''}</span><span class="asset-group-count">${entry.assets.length}</span></summary><div class="asset-group-content"></div></details>`;
   }
   function renderAssets(){
     const box=$('assetList'), header=$('assetListHeader');
-    // The register always lists assets; identical models are a note on the row and in details.
-    state.assetGrouping=false;$('assetGroupToggle').checked=false;
-    document.querySelector('.asset-group-tools').classList.add('hidden');
+    $('assetGroupToggle').checked=state.assetGrouping;
+    $('addAssetGroupBtn').classList.toggle('hidden',!!workflows?.enabled());
     paintPendingRegister();
     if(!state.assets.length){ header.innerHTML='';$('assetScopeCount').textContent='0 loaded physical items'; box.innerHTML='<div class="empty-state">No assets found.</div>'; return; }
     const q=$('assetSearch').value.trim().toLowerCase();
@@ -1228,13 +1227,16 @@
     });
     const fold=simpleLinksEnabled()?AssetGroups.foldPeripherals(rows,index):{rows,threads:new Map(),matched:new Map(),attached:0};
     state.assetThreads=fold;
-    const entries=AssetGroups.project(fold.rows,index,{grouped:false}),visible=entries.slice(0,state.groupPageLimit);
+    const entries=AssetGroups.project(fold.rows,index,{grouped:state.assetGrouping,similarNames:true}),visible=entries.slice(0,state.groupPageLimit);
     const listMode=state.assetView!=='grid',hasGroups=entries.some(e=>e.kind!=='asset');
     box.className=(listMode?'asset-list mode-list':'asset-list mode-grid')+(state.assetGrouping?' grouped-register':'');
     header.classList.toggle('hidden',!listMode||hasGroups);
     const heading=listMode&&!hasGroups?assetHeaderHtml():'';
     if(header._markup!==heading){header.innerHTML=heading;header._markup=heading;}
-    $('assetScopeCount').textContent=entries.length+' asset'+(entries.length===1?'':'s')+(fold.attached?' · '+fold.attached+' attached':'');
+    const physical=AssetGroups.uniqueAssets(rows).length;
+    $('assetScopeCount').textContent=physical+' matching physical '+(physical===1?'item':'items')+
+      (hasGroups?' · '+entries.length+' display '+(entries.length===1?'row':'rows'):'')+
+      (fold.attached?' · '+fold.attached+' attached':'');
     if(!state.assetGrouping&&rows.length){
       const previous=new Map(Array.from(box.children).filter(n=>n.dataset.asset).map(n=>[n.dataset.asset,n]));
       const anchor=Array.from(previous.values()).find(n=>{const r=n.getBoundingClientRect();return r.bottom>0&&r.top<innerHeight;}),top=anchor?.getBoundingClientRect().top;
@@ -1264,7 +1266,7 @@
       let autoExpanded=!!(q&&rows.length<=25&&!state.groupOpen.has(entry.key));
       const paint=()=>{
         const limit=state.groupUnitLimits.get(entry.key)||25,body=details.querySelector('.asset-group-content');
-        body.innerHTML=`<div class="group-actions">${isAuthenticated()&&!workflows?.enabled()?(entry.kind==='set'?'<button data-group-add class="btn light sm">Add new</button><button data-group-link class="btn light sm">Link existing</button><button data-group-rename class="btn light sm">Rename</button>':'<button data-group-add class="btn light sm">Add units</button>'):''}</div>`+entry.assets.slice(0,limit).map(a=>groupUnitHtml(a,index)).join('');
+        body.innerHTML=`<div class="group-actions">${isAuthenticated()&&!workflows?.enabled()&&entry.kind!=='similar-name'?(entry.kind==='set'?'<button data-group-add class="btn light sm">Add new</button><button data-group-link class="btn light sm">Link existing</button><button data-group-rename class="btn light sm">Rename</button>':'<button data-group-add class="btn light sm">Add units</button>'):''}</div>`+entry.assets.slice(0,limit).map(a=>groupUnitHtml(a,index)).join('');
         bindUnits(body);
         body.querySelector('[data-group-add]')?.addEventListener('click',()=>openGroupEntry(entry.kind==='set'?{mode:'set',set:{id:first.set_id,name:first.set_name},units:[{source:'new'}]}:{mode:'same',template:AssetGroups.template(first)}));
         body.querySelector('[data-group-link]')?.addEventListener('click',()=>openGroupEntry({mode:'attach',set:{id:first.set_id,name:first.set_name},units:[{source:'existing'}]}));

@@ -751,6 +751,37 @@ test('browser regressions on mobile and desktop',async t=>{
         assert.equal(await page.locator('#assetDrawer').evaluate(el=>el.classList.contains('open')),false);assert.equal(await page.locator('#localWorkBar').isVisible(),false);
       }finally{await context.close();}
     });
+    await t.test('grouped register folds similarly named HDDs with missing models on mobile',async()=>{
+      const drives=[
+        stock('DRIVE-1',{asset_name:'Seagate HDD',category:'HDD',category_name:'HDD',brand:'Seagate',model:'',serial:'SEA-1',specifications:'Capacity: 1 TB'}),
+        stock('DRIVE-2',{asset_name:'SEAGATE HDD',category:'HDD',category_name:'HDD',brand:'Seagate',model:'',serial:'SEA-2',specifications:'Capacity: 2 TB'}),
+        stock('DRIVE-3',{asset_name:'WD HDD',category:'HDD',category_name:'HDD',brand:'WD',model:'',serial:'WD-1'})
+      ];
+      const {page,context,errors}=await start({links:true,queue:true,unified:true,assets:drives});
+      try{
+        await page.locator('[data-mobile-route="assets"]').click();
+        const grouping=page.getByLabel('Group similar assets');
+        await grouping.check();
+        const group=page.locator('.asset-group').filter({hasText:/Seagate HDD/i});
+        await group.locator('summary').waitFor();
+        assert.match(await group.locator('summary').textContent(),/Exact model unconfirmed/);
+        assert.match(await page.locator('#assetScopeCount').textContent(),/3 matching physical items · 2 display rows/);
+        await group.locator('summary').click();
+        await group.locator('.group-unit').last().waitFor();
+        assert.equal(await group.locator('.group-unit').count(),2);
+        await page.locator('#assetSearch').fill('SEA-2');
+        await group.locator('[data-asset="DRIVE-2"]').click();
+        await page.locator('#assetDrawer.open #drawerId').filter({hasText:'DRIVE-2'}).waitFor({state:'attached'});
+        await page.locator('#closeDrawerBtn').click();
+        await page.locator('#assetSearch').fill('');
+        await page.locator('#assetGridViewBtn').click();
+        assert(await group.isVisible());
+        await grouping.uncheck();
+        assert.equal(await page.locator('#assetList .asset-grid-card').count(),3);
+        await checkNoOverflow(page);
+        assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
     await t.test('grouped register renders each physical unit once and searches inside collapsed sets',async()=>{
       const assets=[stock('JCP-AS-0001',{serial:'MON-001'}),stock('JCP-AS-0002',{serial:'MON-002'}),stock('JCP-AS-0003'),stock('JCP-PC-0001',{category:'Desktop PC',model:'PC-1',set_id:'SET-EXAMPLE00000001',set_name:'Marketing station'}),stock('JCP-KB-0001',{category:'Keyboard',brand:'',model:'',set_id:'SET-EXAMPLE00000001',set_name:'Marketing station'})];
       const {page,context,errors}=await start({assets});
@@ -759,8 +790,8 @@ test('browser regressions on mobile and desktop',async t=>{
         assert.equal(await page.locator('.asset-group').count(),2);assert.equal(await page.locator('.group-unit').count(),0);
         assert.match(await page.locator('#assetScopeCount').textContent(),/5 matching physical items · 2 display rows/);
         await page.locator('#assetSearch').fill('MON-002');await page.locator('.group-unit').waitFor();
-        assert.equal(await page.locator('.group-unit').count(),1);assert.match(await page.locator('.asset-group summary').textContent(),/1 of 3 loaded/);
-        await page.locator('.group-unit [data-asset]').click();await page.locator('#drawerId').filter({hasText:'JCP-AS-0002'}).waitFor();await page.locator('#closeDrawerBtn').click();
+        assert.equal(await page.locator('.group-unit').count(),1);assert.match(await page.locator('.asset-group summary').textContent(),/1 of 3 units/);
+        await page.locator('.group-unit [data-asset]').click();await page.locator('#assetDrawer.open #drawerId').filter({hasText:'JCP-AS-0002'}).waitFor({state:'attached'});await page.locator('#closeDrawerBtn').click();
         await page.locator('#assetSearch').fill('');await page.locator('#assetGroupToggle').uncheck();
         assert.equal(await page.locator('.asset-group').count(),0);assert.equal(await page.locator('#assetList [data-asset]').count(),5);
         await page.locator('#assetGridViewBtn').click();await page.waitForFunction(()=>document.querySelectorAll('#assetList .asset-grid-card').length===5);

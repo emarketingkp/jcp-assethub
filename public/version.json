@@ -1,8 +1,8 @@
 {
-  "version": "2.10.5",
-  "build": "2.10.5-photo-access-2",
+  "version": "2.10.6",
+  "build": "2.10.6-register-grouping-1",
   "released": "2026-11-13",
   "status": "released",
-  "name": "Photo access and save recovery",
-  "notes": "Copy photos when picked, report an unreadable photo once with a one-tap remove, retry connection failures automatically and show plain error messages."
+  "name": "Asset register grouping",
+  "notes": "Restore the Assets grouping switch and group similarly named items with incomplete model details for display."
 }

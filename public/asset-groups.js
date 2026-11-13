@@ -13,6 +13,14 @@
     return JSON.stringify([normalized(category),normalized(a.brand),normalized(a.model),normalized(sharedSpecifications(a.specifications))]);
   }
   function unmarkedKey(a){const category=a.category_name||a.category||a.category_id;return known(category)&&!modelKey(a)?JSON.stringify([normalized(category),known(a.brand)?normalized(a.brand):'',known(a.model)?normalized(a.model):'',normalized(sharedSpecifications(a.specifications))]):'';}
+  // The register can fold labelled items with incomplete product information.
+  // Keep this separate from exact-model matching and new-unit templates.
+  function registerNameKey(asset){
+    const category=asset.category_name||asset.category||asset.category_id;
+    if(modelKey(asset)||!known(category)||!known(asset.asset_name))return '';
+    return JSON.stringify([normalized(category),normalized(asset.asset_name),
+      known(asset.brand)?normalized(asset.brand):'',known(asset.model)?normalized(asset.model):'']);
+  }
   function uniqueAssets(assets){
     const byId=new Map();
     for(const asset of assets||[]){
@@ -37,12 +45,17 @@
     for(const asset of all){if(asset.parent_asset_id){const main=byId.get(asset.parent_asset_id);searchText.set(asset.asset_id,searchText.get(asset.asset_id)+' '+[asset.parent_asset_id,main?.asset_name,main?.brand,main?.model,main?.category_name].filter(Boolean).join(' ').toLowerCase());}}
     return {all,byId,searchText,keys,serials,sets,models,unmarked,modelTotals,unmarkedTotals};
   }
-  function project(rows,index,{grouped=true,productOnly=false}={}){
-    const entries=[],byGroup=new Map();
+  function project(rows,index,{grouped=true,productOnly=false,similarNames=false}={}){
+    const entries=[],byGroup=new Map(),nameTotals=new Map();
+    if(grouped&&similarNames)for(const asset of index.all){
+      if(asset.set_id&&!productOnly)continue;
+      const key=registerNameKey(asset);
+      if(key)nameTotals.set(key,(nameTotals.get(key)||0)+1);
+    }
     for(const asset of uniqueAssets(rows)){
       let kind='asset',key=asset.asset_id;
       if(grouped&&asset.set_id&&!productOnly){kind='set';key=asset.set_id;}
-      else if(grouped){const cached=index.byId.get(asset.asset_id)===asset?index.keys.get(asset.asset_id):null,model=cached?cached.model:modelKey(asset),unknown=cached?cached.unmarked:unmarkedKey(asset);if(model){kind='model';key=model;}else if(unknown){kind='unmarked';key=unknown;}}
+      else if(grouped){const cached=index.byId.get(asset.asset_id)===asset?index.keys.get(asset.asset_id):null,model=cached?cached.model:modelKey(asset),unknown=cached?cached.unmarked:unmarkedKey(asset);const name=similarNames&&!model?registerNameKey(asset):'';if(model){kind='model';key=model;}else if(nameTotals.get(name)>1){kind='similar-name';key=name;}else if(unknown){kind='unmarked';key=unknown;}}
       const id=kind+':'+key;
       if(!byGroup.has(id)){const entry={key:id,kind,assets:[],total:0};byGroup.set(id,entry);entries.push(entry);}
       byGroup.get(id).assets.push(asset);
@@ -52,6 +65,7 @@
       if(entry.kind==='set')entry.total=index.sets.get(first.set_id)?.length||entry.assets.length;
       else if(entry.kind==='model')entry.total=productOnly?(index.models.get(entry.key.slice(6))?.length||0):index.modelTotals.get(entry.key.slice(6))||0;
       else if(entry.kind==='unmarked')entry.total=productOnly?(index.unmarked.get(entry.key.slice(9))?.length||0):index.unmarkedTotals.get(entry.key.slice(9))||0;
+      else if(entry.kind==='similar-name')entry.total=nameTotals.get(entry.key.slice('similar-name:'.length));
       else entry.total=1;
       if(['model','unmarked'].includes(entry.kind)&&entry.assets.length===1&&entry.total===1)entry.kind='asset';
     }

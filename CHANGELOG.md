@@ -1,3 +1,8 @@
+# 2.10.6 — asset register grouping (2026-11-13)
+
+- Restore the Assets grouping switch in list and grid views.
+- Group consistently named assets with incomplete model details for display, keeping each unit individually searchable and accessible.
+
 # 2.10.5 — photo access and save recovery (2026-11-13)
 
 - Keep Save from submitting until selected photos finish opening. A failed copy asks the user to choose again or explicitly continue with the current photos.

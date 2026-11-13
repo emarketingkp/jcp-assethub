@@ -17,6 +17,22 @@ test('model revisions, specs, capacities and unmarked models are not guessed int
   const rows=[a('A'),a('B',{model:'M10'}),a('C',{specifications:'Size: 27 inch'}),a('D',{model:''}),a('E',{model:''}),a('F',{brand:'Unknown'}),a('G',{brand:'Unknown'})];
   const entries=G.project(rows,G.buildIndex(rows));assert.equal(entries.length,5);assert.equal(entries.filter(e=>e.kind==='unmarked').length,2);
 });
+test('the register can group similarly named incomplete products without changing exact-model matching',()=>{
+  const drives=[
+    a('A',{category:'HDD',asset_name:'Seagate HDD',brand:'Seagate',model:'',specifications:'Capacity: 1 TB'}),
+    a('B',{category:'HDD',asset_name:'SEAGATE  HDD',brand:'seagate',model:'',specifications:'Capacity: 2 TB'}),
+    a('C',{category:'HDD',asset_name:'Seagate HDD',brand:'Seagate',model:'ST2000'}),
+    a('D',{category:'External storage',asset_name:'Seagate HDD',brand:'Seagate',model:''}),
+  ];
+  const index=G.buildIndex(drives);
+  const entries=G.project(drives,index,{similarNames:true});
+  assert.deepEqual(entries.map(entry=>[entry.kind,entry.assets.map(asset=>asset.asset_id)]),[
+    ['similar-name',['A','B']],['asset',['C']],['asset',['D']]
+  ]);
+  assert.deepEqual(G.project([drives[1]],index,{similarNames:true}).map(e=>[e.assets.length,e.total]),[[1,2]]);
+  assert.equal(G.project(drives,index).length,4);
+  assert.equal(G.modelSiblings(drives[0],index),0);
+});
 test('repeated JCP summaries render once, but repeated serials keep both records for review',()=>{
   const rows=[a('A',{serial:'001-ABC'}),a('A',{serial:'001-ABC'}),a('B',{serial:'001ABC'}),a('C',{status:'Merged'})],index=G.buildIndex(rows);
   assert.equal(index.all.length,2);assert.deepEqual(index.serials.get('001ABC'),['A','B']);assert.equal(G.project(rows,index)[0].assets.length,2);
