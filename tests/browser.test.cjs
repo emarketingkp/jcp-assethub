@@ -26,6 +26,7 @@ test('browser regressions on mobile and desktop',async t=>{
   async function start(options={},viewport={width:390,height:844}){
     const context=await browser.newContext({viewport,serviceWorkers:'block'});
     const backend=createHarness(options);
+    await context.exposeFunction('__assetDeleteBridge',(params,user)=>({deleted_asset_id:backend.context.deleteAsset_(params,user)}));
     await context.exposeFunction('__assetBatchBridge',params=>({result:backend.request(params),assets:backend.read('Assets')}));
     await context.exposeFunction('__assetOperationBridge',(params,user)=>({result:JSON.parse(JSON.stringify(backend.context.saveAssetOperation_(params,user))),assets:backend.read('Assets')}));
     await context.exposeFunction('__assetReportBridge',params=>{backend.context.Session={getScriptTimeZone:()=> 'UTC'};backend.context.Utilities.formatDate=d=>d.toISOString().slice(0,10);return JSON.parse(JSON.stringify(backend.context.buildReport_(params)));});
@@ -89,6 +90,48 @@ test('browser regressions on mobile and desktop',async t=>{
   }
   if(process.env.BROWSER_SCENARIO){const run=t.test.bind(t),pattern=new RegExp(process.env.BROWSER_SCENARIO,'i');t.test=(name,...args)=>pattern.test(name)?run(name,...args):Promise.resolve();}
   try{
+    await t.test('Admin asset deletion confirms the selected record and removes it from the register',async()=>{
+      const {page,context,backend,errors}=await start({role:'ADMIN',deleteAsset:true,links:true,queue:true,unified:true,assets:[stock('TRIAL'),stock('KEEP')]});
+      try{
+        await page.locator('#adminToggle').click();
+        await page.locator('[data-mobile-route="assets"]').click();
+        await page.locator('[data-asset="TRIAL"]').click();
+        await page.locator('#deleteAssetDrawer').waitFor({state:'attached'});
+        await page.locator('#detailLoadStatus').waitFor({state:'hidden'});
+        const openDelete=async()=>{
+          await page.locator('#assetDrawer').getByRole('button',{name:'More actions'}).click();
+          await page.locator('#deleteAssetDrawer').click();
+          await page.getByRole('heading',{name:'Delete this asset?'}).waitFor();
+        };
+        await openDelete();
+        await page.locator('#cancelDeleteAsset').click();
+        await page.locator('#modalWrap').waitFor({state:'hidden'});
+        assert.equal(backend.read('Assets').find(row=>row.asset_id==='TRIAL').status,'Active');
+        await openDelete();
+        await page.evaluate(()=>{const post=AssetAPI.post;AssetAPI.post=(action,...args)=>{
+          if(action==='deleteAsset'){AssetAPI.post=post;return Promise.reject(new Error('Deletion service unavailable'));}
+          return post(action,...args);
+        };});
+        await page.locator('#confirmDeleteAsset').click();
+        await page.locator('#modalNotifications [role="alert"]').filter({hasText:'Deletion service unavailable'}).waitFor();
+        assert.equal(backend.read('Assets').find(row=>row.asset_id==='TRIAL').status,'Active');
+        await page.locator('#confirmDeleteAsset').click();
+        await page.getByText('Asset deleted.',{exact:true}).waitFor();
+        await page.locator('[data-asset="TRIAL"]').waitFor({state:'detached'});
+        assert(await page.locator('[data-asset="KEEP"]').isVisible());
+        assert.equal(backend.read('Assets').find(row=>row.asset_id==='TRIAL').status,'Deleted');
+        assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('Staff cannot see the Admin asset deletion action',async()=>{
+      const {page,context}=await start({deleteAsset:true,links:true,queue:true,unified:true,assets:[stock('TRIAL')]});
+      try{
+        await page.locator('[data-mobile-route="assets"]').click();
+        await page.locator('[data-asset="TRIAL"]').click();
+        await page.locator('#assetDrawer').getByRole('button',{name:'More actions'}).waitFor();
+        assert.equal(await page.locator('#deleteAssetDrawer').count(),0);
+      }finally{await context.close();}
+    });
     await t.test('Registration recovery: lookup and review errors stay inside the active scan dialog',async()=>{
       const {page,context,errors}=await start({links:true,queue:true,unified:true,assets:[stock('TARGET')]});
       try{

@@ -74,7 +74,7 @@ function batchSerials_(payload,rows,ownIds) {
     if(u.existing_asset_id)return;
     const key=normalizeIdentifier_(u.serial);if(!key)return;
     if(seen.has(key))throw new Error('DUPLICATE_SERIAL: Different units cannot share a serial. Put shared model/part codes in specifications instead.');seen.add(key);
-    const duplicate=rows.find(r=>!ownIds.has(String(r.asset_id))&&normalizeIdentifier_(r.serial)===key);
+    const duplicate=rows.find(r=>!ownIds.has(String(r.asset_id))&&r.status!=='Deleted'&&normalizeIdentifier_(r.serial)===key);
     if(duplicate)throw new Error('DUPLICATE_SERIAL: '+u.serial+' already belongs to '+duplicate.asset_id+'. Choose the existing item.');
     if(reservedAssetOperations_().some(r=>!ownIds.has(r.asset_id)&&normalizeIdentifier_(r.serial)===key))throw new Error('DUPLICATE_SERIAL: A pending save reserved this serial. Reconcile that save first.');
   });
@@ -94,19 +94,19 @@ function resolveBatchProducts_(p) {
 
 function validateBatchMembers_(p,rows,plan,resuming) {
   const chosen=new Set(p.units.filter(u=>u.existing_asset_id).map(u=>u.existing_asset_id));
-  const setMembers=rows.filter(r=>r.set_id===plan.set_id&&r.status!=='Merged');
+  const setMembers=rows.filter(r=>r.set_id===plan.set_id&&assetInRegister_(r));
   if(p.parent_asset_id){
-    const parent=rows.find(r=>r.asset_id===p.parent_asset_id&&r.status!=='Merged'&&r.status!=='Retired');
+    const parent=rows.find(r=>r.asset_id===p.parent_asset_id&&assetInRegister_(r)&&r.status!=='Retired');
     if(!parent||parent.set_id!==plan.set_id&&!chosen.has(parent.asset_id))throw new Error('PARENT_NOT_READY: Choose a confirmed member of this set.');
     for(const id of chosen){if(id===p.parent_asset_id)continue;let ancestor=parent,seen=new Set();while(ancestor){if(ancestor.asset_id===id||seen.has(ancestor.asset_id))throw new Error('Linked assets cannot form a cycle.');seen.add(ancestor.asset_id);ancestor=rows.find(r=>r.asset_id===ancestor.parent_asset_id);}}
   }
-  if(p.mode==='detach'&&rows.some(r=>chosen.has(r.parent_asset_id)&&!chosen.has(r.asset_id)&&r.status!=='Merged'))throw new Error('Remove linked components before removing their parent from the set.');
+  if(p.mode==='detach'&&rows.some(r=>chosen.has(r.parent_asset_id)&&!chosen.has(r.asset_id)&&assetInRegister_(r)))throw new Error('Remove linked components before removing their parent from the set.');
   if(p.mode==='rename'&&(setMembers.length!==chosen.size||setMembers.some(r=>!chosen.has(String(r.asset_id)))))throw new Error('Set membership changed. Reload and review every component before renaming.');
   p.units.forEach(u=>{
     if(!u.existing_asset_id)return;
     assertNoPendingAssetOperation_(u.existing_asset_id);
     const r=rows.find(a=>String(a.asset_id)===u.existing_asset_id);
-    if(!r||r.status==='Merged'||(!['detach','rename'].includes(p.mode)&&r.status==='Retired'))throw new Error('Existing item unavailable: '+u.existing_asset_id);
+    if(!r||!assetInRegister_(r)||(!['detach','rename'].includes(p.mode)&&r.status==='Retired'))throw new Error('Existing item unavailable: '+u.existing_asset_id);
     const desired=p.mode==='detach'?'':plan.set_id;
     const applied=resuming&&String(r.set_id||'')===desired&&String(r.set_name||'')===(desired?plan.set_name:'');
     if(!applied&&String(r.updated_at||'')!==u.expected_updated_at)throw new Error('ITEM_CHANGED: '+r.asset_id+' changed since review. Reload before grouping.');
@@ -118,7 +118,7 @@ function validateBatchMembers_(p,rows,plan,resuming) {
 }
 
 function batchPlan_(p,rows,ledgerRows) {
-  const now=new Date().toISOString(),setMembers=p.set_id?rows.filter(r=>r.set_id===p.set_id&&r.status!=='Merged'):[];
+  const now=new Date().toISOString(),setMembers=p.set_id?rows.filter(r=>r.set_id===p.set_id&&assetInRegister_(r)):[];
   if(p.set_id&&!setMembers.length)throw new Error('Set no longer exists. Reload before continuing.');
   let setId=p.set_id,setName=p.set_name;
   if(p.mode!=='same'&&p.mode!=='detach'){
@@ -128,7 +128,7 @@ function batchPlan_(p,rows,ledgerRows) {
       if(p.set_name&&p.set_name!==setName)throw new Error('Set name changed. Reload it before adding items.');
     }
     if(!setName)throw new Error('Set name is required.');
-    if(rows.some(r=>r.status!=='Merged'&&r.set_id&&r.set_id!==setId&&clean_(r.set_name).toLowerCase()===setName.toLowerCase()))throw new Error('An equipment set with this name already exists. Choose that set instead of creating a second one.');
+    if(rows.some(r=>assetInRegister_(r)&&r.set_id&&r.set_id!==setId&&clean_(r.set_name).toLowerCase()===setName.toLowerCase()))throw new Error('An equipment set with this name already exists. Choose that set instead of creating a second one.');
   }
   const products=resolveBatchProducts_(p),used=new Set(rows.map(r=>String(r.asset_id)));
   ledgerRows.filter(r=>r.state!=='complete').forEach(r=>{let existing;try{existing=JSON.parse(r.plan_json);}catch(_){throw new Error('Retry ledger contains invalid data. Ask an administrator to inspect it.');}(existing.ids||[]).forEach(id=>used.add(id));});
@@ -169,7 +169,7 @@ function writeSetColumns_(ids,patch) {
 
 function batchResult_(requestId,plan) {
   const rows=listObjects_(SHEETS.ASSETS),categories=objectMap_(listObjects_(SHEETS.CATEGORIES),'category_id'),sites=objectMap_(listObjects_(SHEETS.SITES),'site_id'),areas=objectMap_(listObjects_(SHEETS.AREAS),'area_id');
-  return {request_id:requestId,set_id:plan.set_id,set_name:plan.set_name,assets:plan.ids.map(id=>rows.find(r=>String(r.asset_id)===id)).filter(Boolean).map(r=>decorateAsset_(r,categories,sites,areas,{}))};
+  return {request_id:requestId,set_id:plan.set_id,set_name:plan.set_name,assets:plan.ids.map(id=>rows.find(r=>String(r.asset_id)===id)).filter(r=>r&&r.status!=='Deleted').map(r=>decorateAsset_(r,categories,sites,areas,{}))};
 }
 
 function saveAssetBatch_(params,user) {
@@ -251,7 +251,7 @@ function linkedOperation_(json) {
 function validateMainAsset_(assetId,parentId,rows) {
   if(!parentId)return;
   const parent=rows.find(r=>String(r.asset_id)===parentId);
-  if(!parent||['Merged','Retired'].includes(String(parent.status)))throw new Error('PARENT_NOT_READY: Choose an available main asset.');
+  if(!parent||(!assetInRegister_(parent)||parent.status==='Retired'))throw new Error('PARENT_NOT_READY: Choose an available main asset.');
   let current=parent;const seen=new Set();
   while(current){
     if(String(current.asset_id)===assetId||seen.has(String(current.asset_id)))throw new Error('A main asset link cannot point to itself or create a cycle.');
@@ -269,7 +269,7 @@ function assertNoPendingAssetOperation_(assetId) {
 
 function planLinkedOperation_(op,user,requestId,rows,ledgerRows) {
   const creating=op.kind==='create',existing=creating?null:rows.find(a=>String(a.asset_id)===op.asset_id);
-  if(!creating&&(!existing||existing.status==='Merged'))throw new Error('Asset not found or merged.');
+  if(!creating&&(!existing||!assetInRegister_(existing)))throw new Error('Asset not found or merged.');
   if(existing){
     assertNoPendingAssetOperation_(existing.asset_id);
     if(!op.expected_updated_at||String(existing.updated_at||'')!==op.expected_updated_at)throw new Error('ITEM_CHANGED: This asset changed since review. Reload and compare before saving.');

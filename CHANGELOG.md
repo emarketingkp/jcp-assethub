@@ -1,3 +1,9 @@
+# 2.10.4 — Admin asset deletion (2026-11-13)
+
+- Add Delete asset under More in Admin view, with confirmation and feedback.
+- Hide deleted records from the register, reports and scan matching. Preserve record history and photo files, and allow reuse of the serial with a new asset ID.
+- Deploy updated Code.gs and AssetGroups.gs to enable the option. The existing spreadsheet schema supports deletion.
+
 # 2.10.3 — registration and dialog feedback (2026-11-12)
 
 - Keep validation and sync feedback visible inside the active dialog, including on mobile Scan.

@@ -1,8 +1,8 @@
 {
-  "version": "2.10.3",
-  "build": "2.10.3-registration-feedback-1",
-  "released": "2026-11-12",
+  "version": "2.10.4",
+  "build": "2.10.4-admin-delete-1",
+  "released": "2026-11-13",
   "status": "released",
-  "name": "Registration and dialog feedback",
-  "notes": "Show registration and scan-match errors in the active dialog, keep drafts available, and show confirmed assets in the register immediately."
+  "name": "Admin asset deletion",
+  "notes": "Admins can delete trial assets from the register after the updated Apps Script is deployed."
 }

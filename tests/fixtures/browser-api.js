@@ -23,8 +23,8 @@
   const api={getUrl:()=>'/test-backend',setUrl(){},getToken:()=>token,setToken(value){token=value;if(value)localStorage.setItem('fixture-session',value);else localStorage.removeItem('fixture-session');},getLastTiming:()=>null};
   api.get=async(action,params={})=>{
     state.calls.push({action,params:clone(params)});
-    if(action==='bootstrap')return startupReply(action,{success:true,version:'2.7',features:{asset_groups:options.grouping===false?0:1,sequential_saves:options.queue?1:0,asset_links:options.links?1:0,unified_editor:options.unified?1:0,record_lifecycle:options.lifecycle?1:0},user,references:clone(refs),dashboard:{},authenticated:user.role!=='GUEST',ai_ocr_enabled:!!options.ai});
-    if(action==='sync')return startupReply(action,{sync:{version:'2.7',ai_ocr_enabled:!!options.ai,features:{asset_groups:options.grouping===false?0:1,sequential_saves:options.queue?1:0,asset_links:options.links?1:0,unified_editor:options.unified?1:0,record_lifecycle:options.lifecycle?1:0},user,authenticated:user.role!=='GUEST',assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}});
+    if(action==='bootstrap')return startupReply(action,{success:true,version:'2.7',features:{asset_groups:options.grouping===false?0:1,sequential_saves:options.queue?1:0,asset_links:options.links?1:0,unified_editor:options.unified?1:0,record_lifecycle:options.lifecycle?1:0,asset_delete:options.deleteAsset?1:0},user,references:clone(refs),dashboard:{},authenticated:user.role!=='GUEST',ai_ocr_enabled:!!options.ai});
+    if(action==='sync')return startupReply(action,{sync:{version:'2.7',ai_ocr_enabled:!!options.ai,features:{asset_groups:options.grouping===false?0:1,sequential_saves:options.queue?1:0,asset_links:options.links?1:0,unified_editor:options.unified?1:0,record_lifecycle:options.lifecycle?1:0,asset_delete:options.deleteAsset?1:0},user,authenticated:user.role!=='GUEST',assets:clone(state.assets),references:clone(refs),server_time:new Date().toISOString()}});
     if(action==='suggestMatchesV27'){if(options.matchFail)throw new Error('Matching service unavailable');return {matches:clone(options.matches||[])};}
     if(action==='listAssets')return {assets:clone(state.assets)};
     if(action==='listMaintenance')return {rows:clone(state.maintenance.filter(m=>params.include_archived||!m.archived_at).map(m=>({...m,asset:state.assets.find(x=>x.asset_id===m.asset_id)||null})))};
@@ -53,6 +53,11 @@
     state.calls.push({action,params:clone(params)});
     if(action==='login'){Object.assign(user,{username:params.username,name:params.username,role:params.username==='guest'?'GUEST':'STAFF'});state.expired=false;return {token:'test-session-'+params.username,user:clone(user)};}
     if(action==='logout'){Object.assign(user,{username:'guest',name:'Guest',role:'GUEST'});token='';return {success:true};}
+    if(action==='deleteAsset'){
+      const result=await window.__assetDeleteBridge(params,clone(user));
+      state.assets=state.assets.filter(row=>row.asset_id!==result.deleted_asset_id);
+      return result;
+    }
     if(action==='saveAssetOperation'){
       if(state.expired)throw new Error('SESSION_EXPIRED');
       const reply=await window.__assetOperationBridge(params,clone(user));

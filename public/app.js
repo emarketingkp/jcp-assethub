@@ -16,11 +16,29 @@
     maintenanceSort:{key:'reported_at',dir:'desc'},
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
-  const APP_VERSION = '2.10.3';
-  const BUILD_ID = '2.10.3-registration-feedback-1';
+  const APP_VERSION = '2.10.4';
+  const BUILD_ID = '2.10.4-admin-delete-1';
   // Full-field writes require the additive 2.9 backend setup; older services keep the legacy editor.
   const BACKEND_API_VERSION = '2.10.0';
   let workflows=null;
+  const deletedAssetsByEndpoint=new Map();
+  function deletedAssets(){
+    const endpoint=AssetAPI.getUrl();
+    if(!deletedAssetsByEndpoint.has(endpoint))deletedAssetsByEndpoint.set(endpoint,new Set());
+    return deletedAssetsByEndpoint.get(endpoint);
+  }
+  function removeDeletedAssets(ids){
+    const deleted=deletedAssets();
+    for(const id of ids){
+      if(deleted.has(id))continue;
+      deleted.add(id);
+      invalidateAssetDetail(id);
+      if(state.openAssetId===id)closeDrawer();
+      if(linkedContext?.assetId===id){setLinkedContext(null);renderLinkContext();}
+    }
+    state.assets=removeByIds(state.assets,ids,'asset_id');
+    cacheWrite(CACHE_ASSETS,state.assets);
+  }
   const ASSET_BASE_URL = 'https://assets.jcpmalaysia.com/';
   const CACHE_BOOT = 'jcp_assethub_cache_boot_v1';
   const CACHE_ASSETS = 'jcp_assethub_cache_assets_v1';
@@ -64,7 +82,7 @@
   function detailStoreKey(assetId){return STORE_KEYS.detailPrefix+encodeURIComponent(AssetAPI.getUrl()+'|'+(state.user?.username||state.user?.email||'guest')+'|'+role())+':'+String(assetId||'');}
   function detailMemoryRecord(assetId){return state.assetDetails.get(String(assetId||''))||null;}
   function cacheAssetDetail(asset,{persist=true}={}){
-    if(!asset?.asset_id)return asset;
+    if(!asset?.asset_id||deletedAssets().has(asset.asset_id))return asset;
     const id=String(asset.asset_id);
     state.detailEpochs.set(id,(state.detailEpochs.get(id)||0)+1);
     state.assetDetails.set(id,{data:asset,savedAt:Date.now(),role:role()});
@@ -107,8 +125,10 @@
   function upsertManyByKey(list,rows,key){
     if(!rows.length)return list;
     const positions=new Map((list||[]).map((row,i)=>[String(row?.[key]),i])),out=(list||[]).slice(),added=new Map();
+    const deleted=key==='asset_id'?deletedAssets():null;
     for(const row of rows){
       const id=String(row?.[key]),i=positions.get(id);
+      if(deleted?.has(id))continue;
       if(i!==undefined){if(out[i].updated_at&&row.updated_at&&String(out[i].updated_at)>String(row.updated_at))continue;out[i]={...out[i],...row};}
       else added.set(id,{...added.get(id),...row});
     }
@@ -238,6 +258,7 @@
       }
       const assets=firstAssets.map(a=>{markDetailStaleFromSummary(a);return publicAssetSummary(a);});
       state.assets=upsertManyByKey(state.assets,assets,'asset_id');
+      if(d.deleted_asset_ids?.length)removeDeletedAssets(d.deleted_asset_ids);
       if(d.removed_asset_ids?.length)state.assets=removeByIds(state.assets,d.removed_asset_ids,'asset_id');
       refreshDerivedReferences();
       (d.maintenance||[]).forEach(m=>{
@@ -290,7 +311,7 @@
     return request;
   }
   function optimisticAsset(asset){
-    const safe=publicAssetSummary(asset); if(!safe)return;
+    const safe=publicAssetSummary(asset); if(!safe||deletedAssets().has(safe.asset_id))return;
     state.assets=upsertByKey(state.assets,safe,'asset_id');
     refreshDerivedReferences();
     window.AssetStore?.set?.(STORE_KEYS.assets,state.assets.map(publicAssetSummary));
@@ -1435,6 +1456,7 @@
   async function openAsset(id,{force=false}={}){
     if(workflows?.enabled()&&String(id).startsWith('local:'))return openLocalOperation(queueRows.find(r=>r.id===String(id).slice(6)));
     id=String(id||'').trim(); if(!id)return;
+    if(deletedAssets().has(id))return toast('This asset was deleted from the register.','error');
     const version=++state.drawerVersion,view=currentView();
     const current=()=>version===state.drawerVersion&&state.openAssetId===id&&view();
     stopCamera();AssetDetailView.remember($('drawerBody'));
@@ -1466,6 +1488,13 @@
       if(current()&&$('assetDrawer').classList.contains('open')) await renderDrawer(fresh);
       return fresh;
     }catch(err){
+      if(String(err.message||err).includes('ASSET_DELETED')){
+        removeDeletedAssets([id]);
+        void persistPublicData();
+        if(state.route==='assets')renderAssets();
+        toast('This asset was deleted from the register.','error');
+        return null;
+      }
       if(current()){if(!cached){$('drawerBody').innerHTML=`<div class="empty-state detail-load-error" role="alert"><p>${esc(humanError(err))}</p><button type="button" id="retryAssetDetail" class="btn light">Retry loading</button></div>`;$('retryAssetDetail').onclick=()=>openAsset(id,{force:true});}else AssetDetailView.status($('drawerBody'),'Showing saved details. '+humanError(err),{error:true,retry:()=>openAsset(id,{force:true})});}
       return cached;
     }
@@ -1737,6 +1766,7 @@
     return core;
   }
   function applyLocalAssetResult(asset,row,metadata){
+    if(deletedAssets().has(asset.asset_id))return;
     const previous=detailMemoryRecord(asset.asset_id)?.data;
     if(previous?.updated_at&&asset.updated_at&&String(previous.updated_at)>String(asset.updated_at))return;
     const merged=metadata?asset:{...previous,...Object.fromEntries(['asset_id','updated_at','main_image_id','thumbnail_file_id','image_file_id','images'].filter(k=>asset[k]!==undefined).map(k=>[k,asset[k]]))};
@@ -2100,13 +2130,47 @@
       ...(lifecycle?sources.map(id=>`<button class="btn light sm" role="menuitem" data-unmerge="${esc(id)}">${icon('refresh','sm')}Separate ${esc(id)} again</button>`):[]),
       isAdmin()&&lifecycle&&retired?`<button id="restoreAssetDrawer" class="btn light sm" role="menuitem">${icon('refresh','sm')}Restore asset</button>`:'',
       isAdmin()&&!retired?`<button id="retireAssetDrawer" class="btn light sm danger-text" role="menuitem">${icon('trash','sm')}Retire asset</button>`:'',
-      hasAdminRole()&&!isAdmin()?'<p class="action-menu-hint">Retire, restore and photo deletion appear in Admin view.</p>':''
+      isAdmin()&&state.boot?.features?.asset_delete&&!a._localOperation?`<button type="button" id="deleteAssetDrawer" class="btn light sm danger-text" role="menuitem">${icon('trash','sm')}Delete asset</button>`:'',
+      hasAdminRole()&&!isAdmin()?'<p class="action-menu-hint">Asset deletion and other administrative actions appear in Admin view.</p>':''
     ];
     return `<div class="action-bar"><button id="editAssetDrawer" class="btn blue sm">${icon('edit','sm')}Edit</button><button id="moveAssetDrawer" class="btn light sm">${icon('pin','sm')}Move / assign</button><button id="reportAssetIssue" class="btn light sm">${icon('tools','sm')}Report issue</button>${actionMenuHtml(more,'More actions',{sheet:'More for '+a.asset_id})}</div>`;
+  }
+  function confirmDeleteAsset(asset){
+    const id=asset.asset_id;
+    if(queueRows.some(row=>row.state!=='Saved'&&(row.asset?.asset_id===id||row.params.asset_id===id||row.params.parent_asset_id===id||row.anchor?.asset_id===id))){
+      toast('Finish or review the pending saves for this asset before deleting it.','error',{actions:[{label:'Review saves',onClick:openLinkedPendingSaves}]});
+      return;
+    }
+    openModal('Delete this asset?',`<p class="confirm-body"><b>${esc(assetDisplayName(asset))}</b> (${esc(id)}) will disappear from the register and scan matching. Its record and photos will be retained in storage. You cannot undo this in AssetHub.</p>
+      <div class="modal-actions"><button type="button" id="cancelDeleteAsset" class="btn light">Cancel</button><button type="button" id="confirmDeleteAsset" class="btn danger">Delete asset</button></div>`,()=>{
+      const button=$('confirmDeleteAsset');
+      state.modalRestoreFocus=$('assetDrawer').querySelector('[data-action-more]');
+      $('cancelDeleteAsset').onclick=()=>closeModal();
+      button.onclick=()=>withBusy(button,'Deleting asset…',async()=>{
+        const endpoint=AssetAPI.getUrl();
+        try{
+          const result=await AssetAPI.post('deleteAsset',{asset_id:id,expected_updated_at:asset.updated_at||''});
+          if(endpoint!==AssetAPI.getUrl())return;
+          if(result.deleted_asset_id!==id)throw new Error('The service did not confirm deletion. Retry to check the result.');
+          if(button.isConnected)closeModal();
+          removeDeletedAssets([id]);
+          refreshDerivedReferences();
+          void persistPublicData();
+          if(state.route==='assets')renderAssets();
+          toast('Asset deleted.');
+          scheduleSync('asset-deleted');
+        }catch(err){
+          if(button.isConnected&&String(err.message||err).includes('ITEM_CHANGED')){
+            toast('The asset changed. Refresh its details before deleting it.','error',{actions:[{label:'Refresh details',onClick:()=>{closeModal();openAsset(id,{force:true});}}]});
+          }else toast('Could not delete this asset. '+humanError(err),'error');
+        }
+      });
+    },{size:'sm'});
   }
   function bindDrawerLifecycle(a){
     document.querySelector('[data-sign-in-edit]')?.addEventListener('click',()=>withAccess('STAFF',()=>openAsset(a.asset_id,{force:true})));
     document.querySelector('[data-open-merge-target]')?.addEventListener('click',e=>openNestedAsset(e.currentTarget.dataset.openMergeTarget));
+    $('deleteAssetDrawer')?.addEventListener('click',()=>withAccess('ADMIN',()=>confirmDeleteAsset(a)));
     $('retireAssetDrawer')?.addEventListener('click',()=>withAccess('ADMIN',()=>confirmRetireAsset(a)));
     $('restoreAssetDrawer')?.addEventListener('click',()=>withAccess('ADMIN',async()=>{
       if(await confirmAction({title:'Restore this asset?',body:esc(assetDisplayName(a))+' ('+esc(a.asset_id)+') returns to the register as Active. You can change its status afterwards.',confirmLabel:'Restore'})!==true)return;
@@ -2125,7 +2189,7 @@
     document.addEventListener('click',e=>{if(e.target.closest('[data-close-modal]'))closeModal();});
     const phone=()=>window.matchMedia('(max-width:760px)').matches;
     const backdrop=document.createElement('div');backdrop.className='action-sheet-backdrop';backdrop.hidden=true;document.body.append(backdrop);
-    const closeAll=except=>{document.querySelectorAll('.action-menu:not([hidden])').forEach(m=>{if(m!==except){m.hidden=true;m.style.cssText='';m.previousElementSibling?.setAttribute('aria-expanded','false');}});if(!except)backdrop.hidden=true;};
+    const closeAll=except=>{document.querySelectorAll('.action-menu:not([hidden])').forEach(m=>{if(m!==except){m.hidden=true;m.style.cssText='';m.parentElement.querySelector('[data-action-more]')?.setAttribute('aria-expanded','false');}});if(!except)backdrop.hidden=true;};
     // Fixed coordinates keep the menu visible inside scrolling drawers and dialogs.
     const place=(menu,toggle)=>{
       if(menu.hasAttribute('data-sheet')&&phone()){menu.before(backdrop);backdrop.hidden=false;return;}
@@ -2135,7 +2199,7 @@
       menu.style.left=Math.max(8,Math.min(box.right-width,innerWidth-width-8))+'px';
       menu.style.top=Math.max(8,below?box.bottom+gap:box.top-height-gap)+'px';
     };
-    document.addEventListener('click',e=>{const toggle=e.target.closest('[data-action-more]');if(!toggle){closeAll();return;}const menu=toggle.nextElementSibling;const open=menu.hidden;closeAll(open?menu:undefined);menu.hidden=!open;toggle.setAttribute('aria-expanded',String(open));if(open){place(menu,toggle);menu.querySelector('button')?.focus();}else{menu.style.cssText='';backdrop.hidden=true;}});
+    document.addEventListener('click',e=>{const toggle=e.target.closest('[data-action-more]');if(!toggle){closeAll();return;}const menu=toggle.parentElement.querySelector(':scope > .action-menu');if(!menu)return;const open=menu.hidden;closeAll(open?menu:undefined);menu.hidden=!open;toggle.setAttribute('aria-expanded',String(open));if(open){place(menu,toggle);menu.querySelector('button')?.focus({preventScroll:true});}else{menu.style.cssText='';backdrop.hidden=true;}});
     document.addEventListener('scroll',e=>{if(!e.target.closest?.('.action-menu'))document.querySelectorAll('.action-menu:not([hidden]):not([data-sheet])').forEach(()=>closeAll());},true);
     document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.querySelector('.action-menu:not([hidden])')){e.stopPropagation();closeAll();}},true);
   }

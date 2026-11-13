@@ -247,15 +247,15 @@ function doPost(e) {
     if (action === 'saveAssetBatch') return postReply_(p, {success:true, result:saveAssetBatch_(p,user), user:user});
     if (action === 'interpretOcr') return postReply_(p, {success:true, result:interpretOcrFields_(p.text,p.base_fields_json,user),user:user});
     if (action === 'interpretOcrUniversal') return postReply_(p, {success:true, result:interpretUniversalOcr_(p.text,p.base_fields_json,p.source_image,user),user:user});
-    if (action === 'createMaintenance') return postReply_(p, {success:true, row:createMaintenance_(p, user), user:user});
-    if (action === 'updateMaintenance') return postReply_(p, {success:true, row:updateMaintenance_(p, user), user:user});
-    if (action === 'startAudit') return postReply_(p, {success:true, row:startAudit_(p, user), user:user});
+    if (action === 'createMaintenance') return postReply_(p, {success:true, row:withAssetWriteLock_(()=>createMaintenance_(p, user)), user:user});
+    if (action === 'updateMaintenance') return postReply_(p, {success:true, row:withAssetWriteLock_(()=>updateMaintenance_(p, user)), user:user});
+    if (action === 'startAudit') return postReply_(p, {success:true, row:withAssetWriteLock_(()=>startAudit_(p, user)), user:user});
     if (action === 'verifyAuditAsset') return postReply_(p, {success:true, row:verifyAuditAsset_(p, user), user:user});
     if (action === 'cancelAudit') return postReply_(p, {success:true, row:cancelAudit_(p, user), user:user});
     if (action === 'renameAudit') return postReply_(p, {success:true, row:renameAudit_(p, user), user:user});
     if (action === 'resetAuditEntry') return postReply_(p, {success:true, row:resetAuditEntry_(p, user), user:user});
     if (action === 'archiveMaintenance') return postReply_(p, {success:true, row:archiveMaintenance_(p, user, true), user:user});
-    if (action === 'restoreMaintenance') return postReply_(p, {success:true, row:archiveMaintenance_(p, user, false), user:user});
+    if (action === 'restoreMaintenance') return postReply_(p, {success:true, row:withAssetWriteLock_(()=>archiveMaintenance_(p, user, false)), user:user});
     if (action === 'completeAudit') return postReply_(p, {success:true, row:completeAudit_(p.audit_id, user), user:user});
     if (action === 'updateAsset') return postReply_(p, {success:true, asset:withAssetWriteLock_(()=>updateAsset_(p, user)), user:user});
     if (action === 'setMainImage') return postReply_(p,{success:true,asset:withAssetWriteLock_(()=>setMainImage_(p,user)),user:user});
@@ -265,6 +265,7 @@ function doPost(e) {
 
     // Destructive/configuration actions require Admin.
     requireRole_(user, 'ADMIN');
+    if (action === 'deleteAsset') return postReply_(p, {success:true, deleted_asset_id:withAssetWriteLock_(()=>deleteAsset_(p, user)), user:user});
     if (action === 'restoreAsset') return postReply_(p, {success:true, asset:withAssetWriteLock_(()=>restoreAsset_(p, user)), user:user});
     if (action === 'retireAsset') return postReply_(p, {success:true, asset:withAssetWriteLock_(()=>retireAsset_(p.asset_id, user)), user:user});
     if (action === 'deleteImage') return postReply_(p, {success:true, deleted:withAssetWriteLock_(()=>deleteImage_(p.image_id, user)), user:user});
@@ -287,6 +288,11 @@ function doPost(e) {
   }
 }
 
+function assetFeatures_() {
+  const grouping = typeof groupingFeatures_ === 'function' ? groupingFeatures_() : {asset_groups:0};
+  return Object.assign({},grouping,{asset_delete:1});
+}
+
 function bootstrapPayload_(token) {
   const user = optionalUser_(token);
   const authenticated = String(user.role || '').toUpperCase() !== 'GUEST';
@@ -299,7 +305,7 @@ function bootstrapPayload_(token) {
     guest_can_add:true,
     authenticated:authenticated,
     version:APP_VERSION,
-    features:typeof groupingFeatures_==='function'?groupingFeatures_():{asset_groups:0},
+    features:assetFeatures_(),
     ai_ocr_enabled:!!String(SCRIPT_PROPERTIES.getProperty('GROQ_API_KEY')||'').trim(),
     user:user,
     references:Object.assign({}, base.references, {users:users})
@@ -318,7 +324,7 @@ function bootstrapBase_() {
   const areas = activeOnly_(listObjects_(SHEETS.AREAS));
   const categories = activeOnly_(listObjects_(SHEETS.CATEGORIES));
   const customFields = activeOnly_(listObjects_(SHEETS.CUSTOM_FIELDS)).sort((a,b)=>num_(a.sort_order)-num_(b.sort_order));
-  const rawAssets = listObjects_(SHEETS.ASSETS);
+  const rawAssets = listObjects_(SHEETS.ASSETS).filter(r=>r.status!=='Deleted');
   const maintenance = listObjects_(SHEETS.MAINTENANCE);
   const audits = listObjects_(SHEETS.AUDITS);
   const activity = tailObjects_(SHEETS.ACTIVITY,25).reverse();
@@ -401,16 +407,14 @@ function syncChanges_(p, user) {
   const mainImages = mainImageMap_();
 
   let changedAssets = rawAssets
-    .filter(r=>String(r.status)!=='Merged' && newer(r.updated_at || r.created_at))
+    .filter(r=>assetInRegister_(r) && newer(r.updated_at || r.created_at))
     .map(r=>decorateAsset_(r,catMap,siteMap,areaMap,mainImages));
   let assetCursor='';
   if(!sinceMs&&p.summary_page_size){
     const page=assetSummaryPage_({page_size:p.summary_page_size});
     changedAssets=page.assets;assetCursor=page.next_cursor;
   }
-  const removedAssetIds = rawAssets
-    .filter(r=>String(r.status)==='Merged' && newer(r.updated_at || r.retired_at))
-    .map(r=>r.asset_id);
+  const removedAssets = rawAssets.filter(r=>!assetInRegister_(r) && newer(r.updated_at || r.retired_at));
 
   const changedActivity = listObjects_(SHEETS.ACTIVITY).filter(r=>newer(r.timestamp)).slice(-200);
   const forceRelatedRefresh = changedActivity.some(r=>['MERGE_ASSET','MERGED_INTO'].includes(String(r.action)));
@@ -432,9 +436,9 @@ function syncChanges_(p, user) {
     const users = adminUsers.map(safeUser_);
     references = {
       sites:sites,areas:areas,categories:categories,custom_fields:customFields,
-      brands:unique_(rawAssets.map(a=>a.brand).filter(Boolean)).sort(),
-      assignees:unique_(rawAssets.map(a=>a.assigned_to).filter(Boolean)).sort(),
-      locations:unique_(rawAssets.map(a=>a.exact_location).filter(Boolean)).sort(),users:users
+      brands:unique_(rawAssets.filter(assetInRegister_).map(a=>a.brand).filter(Boolean)).sort(),
+      assignees:unique_(rawAssets.filter(assetInRegister_).map(a=>a.assigned_to).filter(Boolean)).sort(),
+      locations:unique_(rawAssets.filter(assetInRegister_).map(a=>a.exact_location).filter(Boolean)).sort(),users:users
     };
   }
 
@@ -443,12 +447,13 @@ function syncChanges_(p, user) {
     server_time:serverTime,
     version:APP_VERSION,
     ai_ocr_enabled:!!String(SCRIPT_PROPERTIES.getProperty('GROQ_API_KEY')||'').trim(),
-    features:typeof groupingFeatures_==='function'?groupingFeatures_():{asset_groups:0},
+    features:assetFeatures_(),
     authenticated:String(user && user.role || '').toUpperCase()!=='GUEST',
     write_auth_required:AUTH_REQUIRED,
     assets:changedAssets,
     asset_cursor:assetCursor,
-    removed_asset_ids:removedAssetIds,
+    removed_asset_ids:removedAssets.map(r=>r.asset_id),
+    deleted_asset_ids:rawAssets.filter(r=>r.status==='Deleted').map(r=>r.asset_id),
     maintenance:maintenance,
     activity:changedActivity,
     audits:audits,
@@ -460,16 +465,21 @@ function syncChanges_(p, user) {
 }
 
 // Stable key pagination includes every summary field used by the existing register.
+function assetInRegister_(asset) {
+  return !['Merged','Deleted'].includes(String(asset.status));
+}
+
 function assetSummaryPage_(p){
   const size=Math.min(250,Math.max(1,Number(p.page_size)||200));
-  const rows=listObjects_(SHEETS.ASSETS).filter(r=>r.status!=='Merged'&&String(r.asset_id)>String(p.after||'')).sort((a,b)=>String(a.asset_id)<String(b.asset_id)?-1:1);
+  const rows=listObjects_(SHEETS.ASSETS).filter(r=>assetInRegister_(r)&&String(r.asset_id)>String(p.after||'')).sort((a,b)=>String(a.asset_id)<String(b.asset_id)?-1:1);
   const cats=objectMap_(listObjects_(SHEETS.CATEGORIES),'category_id'),sites=objectMap_(listObjects_(SHEETS.SITES),'site_id'),areas=objectMap_(listObjects_(SHEETS.AREAS),'area_id'),images=mainImageMap_();
   return {success:true,assets:rows.slice(0,size).map(r=>decorateAsset_(r,cats,sites,areas,images)),next_cursor:rows.length>size?String(rows[size-1].asset_id):''};
 }
 function assetDetailsBatch_(p,user){
   let ids;try{ids=JSON.parse(p.ids_json);}catch(_){throw new Error('Invalid asset IDs.');}
   if(!Array.isArray(ids)||ids.length>12||ids.some(id=>typeof id!=='string'||id.length>80))throw new Error('Use up to 12 asset IDs.');
-  return {success:true,assets:ids.map(id=>{const a=getAssetBundle_(id,user);delete a.images;return a;})};
+  const deleted = new Set(listObjects_(SHEETS.ASSETS).filter(r=>r.status==='Deleted').map(r=>r.asset_id));
+  return {success:true,assets:ids.filter(id=>!deleted.has(id)).map(id=>{const a=getAssetBundle_(id,user);delete a.images;return a;})};
 }
 
 function listAssets_(p) {
@@ -484,7 +494,7 @@ function listAssets_(p) {
   const byId=objectMap_(rows,'asset_id');
 
   return rows
-    .filter(r => String(r.status) !== 'Merged')
+    .filter(assetInRegister_)
     .filter(r => includeRetired || String(r.status) !== 'Retired')
     .map(r => decorateAsset_(r, catMap, siteMap, areaMap, mainImages))
     .filter(r => !q || [r.asset_id,r.asset_name,r.category_name,r.brand,r.model,r.serial,r.site_name,r.area_name,r.assigned_to,r.status,r.parent_asset_id,(byId[r.parent_asset_id]||{}).asset_name,(byId[r.parent_asset_id]||{}).brand,(byId[r.parent_asset_id]||{}).model]
@@ -496,6 +506,7 @@ function listAssets_(p) {
 function getAssetBundle_(assetId, user) {
   if (!assetId) throw new Error('asset_id is required.');
   const raw = findByKey_(SHEETS.ASSETS,'asset_id',assetId);
+  if (raw?.status==='Deleted') throw new Error('ASSET_DELETED: This asset was deleted from the register.');
   if (!raw) throw new Error('Asset not found: ' + assetId);
   const asset = decorateAsset_(
     raw,
@@ -569,7 +580,7 @@ function updateAsset_(p, user) {
   const assetId = clean_(p.asset_id);
   if (!assetId) throw new Error('asset_id is required.');
   const existing = findByKey_(SHEETS.ASSETS,'asset_id',assetId);
-  if (!existing) throw new Error('Asset not found.');
+  if (!existing||existing.status==='Deleted') throw new Error('Asset not found.');
   assertNoPendingAssetOperation_(assetId);
   const category = resolveCategory_(p.category_id || (clean_(p.category)===clean_(existing.category)?existing.category_id:''), p.category || existing.category, user);
   const site = findByKey_(SHEETS.SITES,'site_id',p.site_id || existing.site_id);
@@ -605,9 +616,45 @@ function updateAsset_(p, user) {
   return getAssetBundle_(assetId,user);
 }
 
+// Keep the row as a tombstone so printed IDs and completed save requests cannot be reused.
+function deleteAsset_(p, user) {
+  requireRole_(user,'ADMIN');
+  const row = findByKey_(SHEETS.ASSETS,'asset_id',clean_(p.asset_id));
+  if (!row) throw new Error('Asset not found.');
+  const id = row.asset_id;
+  if (row.status==='Deleted') {
+    invalidateDataCache_();
+    return id;
+  }
+  if (row.status==='Merged') throw new Error('Separate this merged record before deleting it.');
+  if (String(row.updated_at||'')!==String(p.expected_updated_at||'')) {
+    throw new Error('ITEM_CHANGED: This asset changed after you opened it. Refresh its details and try again.');
+  }
+  if (reservedAssetOperations_().some(r=>r.asset_id===id)) {
+    throw new Error('Finish or reconcile the pending save for this asset before deleting it.');
+  }
+  const related = listObjects_(SHEETS.ASSETS).some(r=>assetInRegister_(r)&&r.parent_asset_id===id
+    || r.status==='Merged'&&r.source_ref==='MERGED_INTO:'+id);
+  if (related) throw new Error('Unlink its linked assets or separate any merged records before deleting this asset.');
+  if (listObjects_(SHEETS.MAINTENANCE).some(r=>r.asset_id===id&&!r.archived_at&&!['Completed','Cancelled'].includes(String(r.status)))) {
+    throw new Error('Close or archive the open maintenance tickets for this asset before deleting it.');
+  }
+  const activeAudits = new Set(listObjects_(SHEETS.AUDITS).filter(r=>r.status==='In Progress').map(r=>r.audit_id));
+  if (activeAudits.size&&listObjects_(SHEETS.AUDIT_ENTRIES).some(r=>r.asset_id===id&&activeAudits.has(r.audit_id))) {
+    throw new Error('Finish the active audit for this asset before deleting it.');
+  }
+  const stamp = new Date(Math.max(Date.now(),Date.parse(row.updated_at||'')+1||0)).toISOString();
+  const patch = {status:'Deleted',updated_at:stamp,updated_by:actorKey_(user)};
+  try { updateByKey_(SHEETS.ASSETS,'asset_id',id,patch); }
+  finally { invalidateDataCache_(); }
+  try { log_(user,'DELETE_ASSET',id,'Asset deleted from the register',null,patch); }
+  catch (err) { console.warn('Asset deletion activity could not be logged',String(err.message||err)); }
+  return id;
+}
+
 function retireAsset_(assetId, user) {
   const row = findByKey_(SHEETS.ASSETS,'asset_id',assetId);
-  if (!row) throw new Error('Asset not found.');
+  if (!row||row.status==='Deleted') throw new Error('Asset not found.');
   assertNoPendingAssetOperation_(assetId);
   const now = new Date().toISOString();
   updateByKey_(SHEETS.ASSETS,'asset_id',assetId,{status:'Retired',retired_at:now,updated_at:now,updated_by:actorKey_(user)});
@@ -667,7 +714,7 @@ function matchIdentifier_(value) {
 
   // Identifier matching is intentionally lightweight: it does not read AssetImages.
   // This keeps scanner lookups responsive even when the image library grows.
-  const rows = listObjects_(SHEETS.ASSETS).filter(r=>String(r.status)!=='Merged');
+  const rows = listObjects_(SHEETS.ASSETS).filter(assetInRegister_);
   const catMap = objectMap_(listObjects_(SHEETS.CATEGORIES), 'category_id');
   const siteMap = objectMap_(listObjects_(SHEETS.SITES), 'site_id');
   const areaMap = objectMap_(listObjects_(SHEETS.AREAS), 'area_id');
@@ -703,7 +750,7 @@ function suggestAssetMatches_(p) {
   const brand=clean_(p.brand), model=clean_(p.model), category=clean_(p.category), serial=clean_(p.serial);
   const siteId=clean_(p.site_id), areaId=clean_(p.area_id), specs=clean_(p.specifications);
   const serialNorm=normalizeIdentifier_(serial);
-  const rows=listObjects_(SHEETS.ASSETS).filter(r=>String(r.status)!=='Merged');
+  const rows=listObjects_(SHEETS.ASSETS).filter(assetInRegister_);
   const catMap=objectMap_(listObjects_(SHEETS.CATEGORIES),'category_id');
   const siteMap=objectMap_(listObjects_(SHEETS.SITES),'site_id');
   const areaMap=objectMap_(listObjects_(SHEETS.AREAS),'area_id');
@@ -791,7 +838,7 @@ function reconcileAsset_(p,user) {
   const assetId=clean_(p.asset_id);
   if(!assetId) throw new Error('asset_id is required.');
   const existing=findByKey_(SHEETS.ASSETS,'asset_id',assetId);
-  if(!existing || String(existing.status)==='Merged') throw new Error('Existing asset not found.');
+  if(!existing || !assetInRegister_(existing)) throw new Error('Existing asset not found.');
   assertNoPendingAssetOperation_(assetId);
   const incoming=parseJsonObject_(p.incoming_json);
   const choices=parseJsonObject_(p.choices_json);
@@ -841,9 +888,9 @@ function mergeAssets_(p,user) {
   const target=findByKey_(SHEETS.ASSETS,'asset_id',targetId);
   if(!source || !target) throw new Error('One of the selected assets does not exist.');
   assertNoPendingAssetOperation_(sourceId);assertNoPendingAssetOperation_(targetId);
-  if(source.parent_asset_id||listObjects_(SHEETS.ASSETS).some(a=>a.parent_asset_id===sourceId&&a.status!=='Merged'))throw new Error('ASSET_LINK_CONFLICT: Review and remove or change the source asset main/child references before merging. No links were changed.');
+  if(source.parent_asset_id||listObjects_(SHEETS.ASSETS).some(a=>a.parent_asset_id===sourceId&&assetInRegister_(a)))throw new Error('ASSET_LINK_CONFLICT: Review and remove or change the source asset main/child references before merging. No links were changed.');
   if(source.set_id&&source.set_id!==target.set_id)throw new Error('SET_MEMBERSHIP_CONFLICT: Remove the source item from its equipment set before merging into a different set or ungrouped record.');
-  if(String(source.status)==='Merged' || String(target.status)==='Merged') throw new Error('A merged record cannot be merged again.');
+  if(!assetInRegister_(source)||!assetInRegister_(target)) throw new Error('A merged or deleted record cannot be merged.');
 
   const choices=parseJsonObject_(p.choices_json);
   const patch={updated_at:new Date().toISOString(),updated_by:actorKey_(user)};
@@ -859,7 +906,7 @@ function mergeAssets_(p,user) {
 
   if(patch.serial!==undefined && clean_(patch.serial)) {
     const norm=normalizeIdentifier_(patch.serial);
-    const dupe=listObjects_(SHEETS.ASSETS).find(r=>String(r.asset_id)!==sourceId && String(r.asset_id)!==targetId && String(r.status)!=='Merged' && normalizeIdentifier_(r.serial)===norm);
+    const dupe=listObjects_(SHEETS.ASSETS).find(r=>String(r.asset_id)!==sourceId && String(r.asset_id)!==targetId && assetInRegister_(r) && normalizeIdentifier_(r.serial)===norm);
     if(dupe) throw new Error('DUPLICATE_SERIAL: Serial '+patch.serial+' is already registered to '+dupe.asset_id+'.');
   }
 
@@ -916,7 +963,7 @@ function unmergeAsset_(p,user) {
   if(!undo.target_patch) throw new Error('UNMERGE_UNAVAILABLE: This merge was made before undo was supported. Restore the record manually.');
   const targetId=undo.target_asset_id;
   const target=findByKey_(SHEETS.ASSETS,'asset_id',targetId);
-  if(!target) throw new Error('The merge target no longer exists.');
+  if(!target||target.status==='Deleted') throw new Error('The merge target no longer exists.');
   assertNoPendingAssetOperation_(sourceId);assertNoPendingAssetOperation_(targetId);
   const now=new Date().toISOString();
   // Only revert target fields that still hold the merged value, so later edits survive.
@@ -924,7 +971,7 @@ function unmergeAsset_(p,user) {
   Object.keys(undo.target_patch).forEach(k=>{if(!['updated_at','updated_by'].includes(k)&&String(target[k])===String(undo.target_patch[k]))targetPatch[k]=undo.target_before[k];});
   if(clean_(before.serial)){
     const norm=normalizeIdentifier_(before.serial),targetKeepsSerial=targetPatch.serial===undefined;
-    const dupe=listObjects_(SHEETS.ASSETS).find(r=>String(r.asset_id)!==sourceId&&(targetKeepsSerial||String(r.asset_id)!==targetId)&&normalizeIdentifier_(r.serial)===norm);
+    const dupe=listObjects_(SHEETS.ASSETS).find(r=>String(r.asset_id)!==sourceId&&(targetKeepsSerial||String(r.asset_id)!==targetId)&&r.status!=='Deleted'&&normalizeIdentifier_(r.serial)===norm);
     if(dupe) throw new Error('DUPLICATE_SERIAL: Serial '+before.serial+' is now registered to '+dupe.asset_id+'. Change that serial before separating these records.');
   }
   updateByKey_(SHEETS.ASSETS,'asset_id',targetId,targetPatch);
@@ -943,7 +990,7 @@ function assertUniqueSerial_(serial, excludeAssetId) {
   const normalized = normalizeIdentifier_(serial);
   if (!normalized) return;
   const duplicate = listObjects_(SHEETS.ASSETS).find(r=>
-    String(r.asset_id) !== String(excludeAssetId || '') && normalizeIdentifier_(r.serial) === normalized
+    String(r.asset_id) !== String(excludeAssetId || '') && r.status!=='Deleted' && normalizeIdentifier_(r.serial) === normalized
   );
   if (duplicate) throw new Error('DUPLICATE_SERIAL: Serial ' + clean_(serial) + ' is already registered to ' + duplicate.asset_id + '.');
   if(reservedAssetOperations_().some(r=>r.asset_id!==String(excludeAssetId||'')&&normalizeIdentifier_(r.serial)===normalized))throw new Error('DUPLICATE_SERIAL: A pending save already reserved this serial. Reconcile that save before registering it again.');
@@ -1033,6 +1080,7 @@ function uploadQueuedImage_(p,user) {
     if(previous){
       if(previous.asset_id!==p.assetId||String(previous.file_name).indexOf(marker)<0)throw new Error('REQUEST_REUSED: Photo operation changed.');
       const asset=findByKey_(SHEETS.ASSETS,'asset_id',p.assetId);
+      if (!asset||asset.status==='Deleted') throw new Error('Asset not found.');
       // Only repair an unfinished image touch. A completed replay must not undo later edits/main-photo selection.
       if(asset&&(!asset.updated_at||String(asset.updated_at)<String(previous.uploaded_at))){
         const touch={updated_at:previous.uploaded_at,updated_by:actorKey_(user)};
@@ -1048,7 +1096,8 @@ function uploadQueuedImage_(p,user) {
 function uploadImage_(p, user, queued) {
   p=Object.assign({},p,{_queueStamp:queued&&queued.stamp||'',_queueImageId:queued&&queued.id||''});
   if (!p.assetId) throw new Error('assetId is required.');
-  if (!findByKey_(SHEETS.ASSETS,'asset_id',p.assetId)) throw new Error('Asset not found.');
+  const asset = findByKey_(SHEETS.ASSETS,'asset_id',p.assetId);
+  if (!asset||asset.status==='Deleted') throw new Error('Asset not found.');
   if (!p.base64Data) throw new Error('Image data is required.');
 
   const folder = getOrCreateAssetFolder_(p.assetId);
@@ -1091,7 +1140,7 @@ function setMainImage_(p,user) {
   const assetId=clean_(p.asset_id),imageId=clean_(p.image_id);
   const asset=findByKey_(SHEETS.ASSETS,'asset_id',assetId);
   const image=findByKey_(SHEETS.ASSET_IMAGES,'image_id',imageId);
-  if(!asset || !image || String(image.asset_id)!==String(assetId) || !truthy_(image.active)) throw new Error('Active image not found for this asset.');
+  if(!asset || asset.status==='Deleted' || !image || String(image.asset_id)!==String(assetId) || !truthy_(image.active)) throw new Error('Active image not found for this asset.');
   const old=asset.main_image_id||'';
   updateByKey_(SHEETS.ASSETS,'asset_id',assetId,{main_image_id:imageId,updated_at:new Date().toISOString(),updated_by:actorKey_(user)});
   log_(user,'SET_MAIN_IMAGE',assetId,'Main photo changed', {main_image_id:old},{main_image_id:imageId});
@@ -1135,7 +1184,8 @@ function deleteImage_(imageId, user) {
 function getImageData_(fileId) {
   if (!fileId) throw new Error('file_id is required.');
   // Only photos registered to an asset may be streamed; this route is public.
-  const known = listObjects_(SHEETS.ASSET_IMAGES).some(r=>truthy_(r.active) && (String(r.drive_file_id)===String(fileId) || String(r.thumbnail_file_id)===String(fileId)));
+  const assets = new Set(listObjects_(SHEETS.ASSETS).filter(r=>r.status!=='Deleted').map(r=>r.asset_id));
+  const known = listObjects_(SHEETS.ASSET_IMAGES).some(r=>assets.has(r.asset_id) && truthy_(r.active) && (String(r.drive_file_id)===String(fileId) || String(r.thumbnail_file_id)===String(fileId)));
   if (!known) throw new Error('Image not found.');
   const file = DriveApp.getFileById(fileId);
   const blob = file.getBlob();
@@ -1485,7 +1535,8 @@ function sanitizeSerial_(value) {
 
 function createMaintenance_(p, user) {
   if (!p.asset_id || !p.issue) throw new Error('Asset and issue are required.');
-  if (!findByKey_(SHEETS.ASSETS,'asset_id',p.asset_id)) throw new Error('Asset not found.');
+  const asset = findByKey_(SHEETS.ASSETS,'asset_id',p.asset_id);
+  if (!asset||asset.status==='Deleted') throw new Error('Asset not found.');
   const now = new Date().toISOString();
   const row = {
     maintenance_id:'MNT-'+shortId_(), asset_id:p.asset_id, issue:clean_(p.issue),
@@ -1514,7 +1565,7 @@ function updateMaintenance_(p, user) {
   if ((has('issue') && clean_(p.issue)!==clean_(existing.issue)) || (has('asset_id') && clean_(p.asset_id)!==clean_(existing.asset_id))) {
     if (String(existing.status)!=='Open') throw new Error('The issue and asset can only be changed while the ticket is Open.');
     if (has('issue')) { if (!clean_(p.issue)) throw new Error('Issue is required.'); patch.issue=clean_(p.issue); }
-    if (has('asset_id')) { if (!findByKey_(SHEETS.ASSETS,'asset_id',p.asset_id)) throw new Error('Asset not found.'); patch.asset_id=clean_(p.asset_id); }
+    if (has('asset_id')) { const asset=findByKey_(SHEETS.ASSETS,'asset_id',p.asset_id); if (!asset||asset.status==='Deleted') throw new Error('Asset not found.'); patch.asset_id=clean_(p.asset_id); }
   }
   updateByKey_(SHEETS.MAINTENANCE,'maintenance_id',id,patch);
   const updated = Object.assign({},existing,patch);
@@ -1527,6 +1578,9 @@ function archiveMaintenance_(p, user, archive) {
   const id = clean_(p.maintenance_id);
   const existing = findByKey_(SHEETS.MAINTENANCE,'maintenance_id',id);
   if (!existing) throw new Error('Maintenance record not found.');
+  if (!archive&&findByKey_(SHEETS.ASSETS,'asset_id',existing.asset_id)?.status==='Deleted') {
+    throw new Error('This ticket belongs to a deleted asset.');
+  }
   const now = new Date().toISOString();
   const patch = {archived_at:archive ? now : '', updated_at:now};
   updateByKey_(SHEETS.MAINTENANCE,'maintenance_id',id,patch);
@@ -1548,7 +1602,7 @@ function startAudit_(p, user) {
   if (!p.site_id) throw new Error('Site is required.');
   const now = new Date().toISOString();
   const expected = listObjects_(SHEETS.ASSETS).filter(x=>
-    !['Retired','Merged'].includes(String(x.status)) &&
+    assetInRegister_(x)&&x.status!=='Retired' &&
     String(x.site_id)===String(p.site_id) &&
     (!p.area_id || String(x.area_id)===String(p.area_id)));
   const row = {audit_id:'AUD-'+shortId_(),site_id:p.site_id,area_id:clean_(p.area_id),name:clean_(p.name)||'Physical Audit',started_at:now,started_by:actorKey_(user),status:'In Progress',completed_at:''};
@@ -1594,7 +1648,7 @@ function auditProgress_(audit, allAssets, allEntries) {
   // A legacy V1.9 audit has no Pending rows. Count its original verified entries
   // against the currently registered scope as a cautious compatibility fallback.
   const hasSnapshot=entries.some(e=>String(e.entry_id).startsWith('SNP-'));
-  const scoped=allAssets.filter(x=>!['Retired','Merged'].includes(String(x.status))&&String(x.site_id)===String(audit.site_id)&&(!audit.area_id||String(x.area_id)===String(audit.area_id)));
+  const scoped=allAssets.filter(x=>assetInRegister_(x)&&x.status!=='Retired'&&String(x.site_id)===String(audit.site_id)&&(!audit.area_id||String(x.area_id)===String(audit.area_id)));
   const expectedIds=hasSnapshot ? new Set(snapshots.filter(e=>e.result!=='Unexpected').map(e=>String(e.asset_id))) : new Set(scoped.map(x=>String(x.asset_id)));
   const checkedIds=new Set(entries.filter(e=>e.result!=='Pending' && e.checked_at && expectedIds.has(String(e.asset_id))).map(e=>String(e.asset_id)));
   const pendingCount=[...expectedIds].filter(id=>!checkedIds.has(id)).length;
@@ -1681,7 +1735,7 @@ function getAuditRoster_(auditId, user) {
   const hasSnapshot=entries.some(e=>String(e.entry_id).startsWith('SNP-'));
   const expected=hasSnapshot
     ? entries.filter(e=>String(e.entry_id).startsWith('SNP-'))
-    : assets.filter(x=>!['Retired','Merged'].includes(String(x.status))&&String(x.site_id)===String(audit.site_id)&&(!audit.area_id||String(x.area_id)===String(audit.area_id))).map(x=>({asset_id:x.asset_id,result:'Pending',entry_id:''}));
+    : assets.filter(x=>assetInRegister_(x)&&x.status!=='Retired'&&String(x.site_id)===String(audit.site_id)&&(!audit.area_id||String(x.area_id)===String(audit.area_id))).map(x=>({asset_id:x.asset_id,result:'Pending',entry_id:''}));
   const entryMap=objectMap_(entries,'asset_id');
   const expectedIds=new Set(expected.map(x=>String(x.asset_id)));
   const additional=entries.filter(e=>!expectedIds.has(String(e.asset_id)));
@@ -3844,7 +3898,7 @@ function suggestUniversalMatches_(p){
   const accepted=['imei','imei2','mac','service_tag','part_number','asset_id'];
   const valid=ids.filter(i=>i&&accepted.includes(i.type)&&norm(i.value).length>=6).slice(0,15);
   if(!valid.length)return base;
-  const raw=listObjects_(SHEETS.ASSETS).filter(r=>String(r.status)!=='Merged');
+  const raw=listObjects_(SHEETS.ASSETS).filter(assetInRegister_);
   const cat=objectMap_(listObjects_(SHEETS.CATEGORIES),'category_id');
   const sites=objectMap_(listObjects_(SHEETS.SITES),'site_id');
   const areas=objectMap_(listObjects_(SHEETS.AREAS),'area_id');

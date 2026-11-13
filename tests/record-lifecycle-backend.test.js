@@ -16,6 +16,44 @@ test('a retired asset can be restored by an Admin, and legacy routes cannot reti
   assert(h.read('ActivityLog').some(r=>r.action==='RESTORE_ASSET'));
 });
 
+test('Admin deletion removes a trial from inventory and scan matching while reserving its ID',()=>{
+  const h=setup(),asset=h.create({serial:'TRIAL-001'}),keep=h.create({serial:'KEEP-001'});
+  const params={asset_id:asset.asset_id,expected_updated_at:asset.updated_at};
+  assert.equal(h.context.assetFeatures_().asset_delete,1);
+  assert.throws(()=>h.context.deleteAsset_(params,staff),/PERMISSION_DENIED/);
+  assert.throws(()=>h.context.deleteAsset_({...params,expected_updated_at:'stale'},admin),/ITEM_CHANGED/);
+  h.seed('AssetImages',[{asset_id:asset.asset_id,image_id:'TRIAL-IMAGE',drive_file_id:'TRIAL-FILE',active:true}]);
+  assert.equal(h.context.deleteAsset_(params,admin),asset.asset_id);
+  assert.equal(h.context.deleteAsset_(params,admin),asset.asset_id);
+  assert.equal(h.read('ActivityLog').filter(row=>row.action==='DELETE_ASSET').length,1);
+  assert.equal(h.read('Assets').find(row=>row.asset_id===asset.asset_id).status,'Deleted');
+  assert.equal(h.read('AssetImages').length,1);
+  assert.throws(()=>h.context.getImageData_('TRIAL-FILE'),/Image not found/);
+  assert.throws(()=>h.context.getAssetBundle_(asset.asset_id,admin),/ASSET_DELETED/);
+  assert.throws(()=>h.context.retireAsset_(asset.asset_id,admin),/Asset not found/);
+  assert.equal(h.context.matchIdentifier_(asset.asset_id).found,false);
+  assert.equal(h.context.matchIdentifier_('TRIAL-001').found,false);
+  assert.deepEqual(call(h.context.listAssets_,{include_retired:true}).map(row=>row.asset_id),[keep.asset_id]);
+  const synced=call(h.context.syncChanges_,{since:asset.updated_at},admin);
+  assert(synced.removed_asset_ids.includes(asset.asset_id));
+  assert(synced.deleted_asset_ids.includes(asset.asset_id));
+  assert(synced.assets.every(row=>row.asset_id!==asset.asset_id));
+  const replacement=h.create({serial:'TRIAL-001'});
+  assert.notEqual(replacement.asset_id,asset.asset_id);
+  assert.equal(h.context.matchIdentifier_('TRIAL-001').asset.asset_id,replacement.asset_id);
+});
+
+test('deletion leaves linked assets and active maintenance intact',()=>{
+  const h=setup(),parent=h.create(),child=h.create({parent_asset_id:parent.asset_id}),other=h.create();
+  const remove=asset=>h.context.deleteAsset_({asset_id:asset.asset_id,expected_updated_at:asset.updated_at},admin);
+  assert.throws(()=>remove(parent),/Unlink its linked assets/);
+  h.context.createMaintenance_({asset_id:other.asset_id,issue:'Check screen'},staff);
+  assert.throws(()=>remove(other),/open maintenance tickets/);
+  assert.equal(remove(child),child.asset_id);
+  assert.equal(remove(parent),parent.asset_id);
+  assert.equal(h.read('Assets').find(row=>row.asset_id===other.asset_id).status,'Active');
+});
+
 test('unmerge restores the source, moves its history back and reverts only untouched target fields',()=>{
   const h=setup(),source=h.create({serial:'SRC-1',exact_location:'Desk 4'}),target=h.create({brand:'Dell'});
   h.seed('Maintenance',[{maintenance_id:'MNT-1',asset_id:source.asset_id,issue:'Flicker',status:'Open'}]);
