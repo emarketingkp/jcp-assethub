@@ -17,7 +17,7 @@
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
   const APP_VERSION = '2.10.5';
-  const BUILD_ID = '2.10.5-photo-access-1';
+  const BUILD_ID = '2.10.5-photo-access-2';
   // Full-field writes require the additive 2.9 backend setup; older services keep the legacy editor.
   const BACKEND_API_VERSION = '2.10.0';
   let workflows=null;
@@ -425,8 +425,8 @@
       [/QuotaExceeded|quota has been exceeded|storage.*full/i,'This phone has no space left for AssetHub. Discard old drafts under Assets › On this device or free up phone storage.'],
       [/Failed to fetch|NetworkError|Load failed|network request failed|ERR_INTERNET|net::/i,'No connection to the AssetHub server. Your work is kept on this device and will send when you are back online.'],
       [/Invalid backend response/i,'The server sent an unexpected reply. The Apps Script deployment may need updating or sharing with "Anyone".'],
-      [/Lock timeout|too many times|Exceeded maximum execution time|Service (?:Spreadsheets|Drive) failed|Service invoked/i,'The spreadsheet was busy. AssetHub will try again shortly.'],
-      [/HTTP 5\d\d|Bad Gateway|Service Unavailable/i,'The server is temporarily unavailable. AssetHub will try again shortly.'],
+      [/Lock timeout|too many times|Exceeded maximum execution time|Service (?:Spreadsheets|Drive) failed|Service invoked/i,'The spreadsheet was busy. Try again shortly.'],
+      [/HTTP 5\d\d|Bad Gateway|Service Unavailable/i,'The server is temporarily unavailable. Try again shortly.'],
       [/backing store|Database (?:deleted|connection)|InvalidStateError|UnknownError|IndexedDB/i,"The phone's app storage had a problem. Close and reopen AssetHub; items already saved on this device are kept."]
     ];
     for(const [pattern,msg] of plain) if(pattern.test(raw)){console.warn('AssetHub error:',raw);return msg;}
@@ -828,8 +828,7 @@
       if(window.matchMedia('(max-width:760px)').matches && state.cameraStream) captureMobileFrame();
       else {if(state.cameraStream)stopCamera(); $('scannerCameraFile')?.click();}
     });
-    $('scannerCameraFile').addEventListener('change',async e=>{ let f=e.target.files?.[0]; if(!f)return; try{f=await AssetImage.ownCopy(f);showScannerPhotoPreview(f);setScannerStage('processing');await processScanFile(f);}catch(err){toast(humanError(err),'error');}finally{e.target.value='';} });
-    $('scannerFile').addEventListener('change',async e=>{ let f=e.target.files?.[0]; if(!f)return; try{f=await AssetImage.ownCopy(f);showScannerPhotoPreview(f);setScannerStage('processing');await processScanFile(f);}catch(err){toast(humanError(err),'error');}finally{e.target.value='';} });
+    ['scannerCameraFile','scannerFile'].forEach(id=>$(id).addEventListener('change',copyScannerPhoto));
   }
 
   function toggleSidebar(){
@@ -1684,6 +1683,7 @@
       const picker=AssetPhotoPicker.mount($('replacePhotoPicker'),{multiple:false,maxFiles:1,preview:!!workflows?.enabled(),onError:message=>toast(message,'error')});
       state.modalCleanup=()=>picker.dispose();
       $('replaceImageSubmit').addEventListener('click',async()=>{
+        if(!AssetPhotoPicker.canSave($('modalBody'),m=>toast(m,'error')))return;
         const file=picker.items[0]?.file; if(!file)return toast('Choose an image first.','error');
         const btn=$('replaceImageSubmit');
         await withBusy(btn,'Replacing...',async()=>{
@@ -2392,6 +2392,7 @@
       $('retireAssetBtn')?.addEventListener('click',()=>withAccess('ADMIN',async()=>{ if(simpleLinksEnabled())return confirmRetireAsset(asset);if(!confirm(`Retire ${asset.asset_id}?`))return; try{const r=await AssetAPI.post('retireAsset',{asset_id:asset.asset_id});cacheAssetDetail(r.asset);toast('Asset retired.');closeModal();closeDrawer();scheduleSync('retire');}catch(err){toast(humanError(err),'error');} }));
       form.addEventListener('submit',async e=>{
         e.preventDefault();
+        if(!AssetPhotoPicker.canSave(form,m=>toast(m,'error')))return;
         if(simpleLinksEnabled()){if(locallySaved)return;await withBusy(form.querySelector('[type="submit"]'),'Saving on device…',async()=>{try{await saveAssetFormInBackground(asset,form,photos,linkage,operationId);locallySaved=true;}catch(err){if(!err.handled)toast('Draft was not saved. Keep this form open. '+humanError(err),'error');}});return;}
         const fd=new FormData(form); const custom={}; form.querySelectorAll('[data-custom]').forEach(el=>custom[el.dataset.custom]=el.value);
         const params=Object.fromEntries(fd.entries()); params.custom_json=JSON.stringify(custom); if(asset.asset_id)params.asset_id=asset.asset_id;
@@ -2476,6 +2477,7 @@
       const picker=AssetPhotoPicker.mount($('detailPhotoPicker'),{preview:!!workflows?.enabled(),onError:message=>toast(message,'error')});
       state.modalCleanup=()=>picker.dispose();
       $('uploadImageSubmit').addEventListener('click',async()=>{
+        if(!AssetPhotoPicker.canSave($('modalBody'),m=>toast(m,'error')))return;
         const pending=picker.items.filter(item=>!item.uploaded);
         if(!pending.length)return toast('Take a photo or choose from your gallery first.','error');
         const btn=$('uploadImageSubmit'),imageType=$('imageType');
@@ -3374,6 +3376,7 @@
     resetScannerResult();
   }
   function resetScannerResult({restartCamera=true}={}){
+    scannerPhotoCopy=null;
     state.scannerVersion++;state.scanUpdateTarget=null;$('scanTargetBanner')?.remove();clearTimeout(universalMatchTimer);
     $('scanMatchingUnits')?._dispose?.();
     $('scanResult').innerHTML='<div class="empty-state compact">Ready for another scan.</div>';
@@ -3388,6 +3391,31 @@
   }
 
   function normalizeCodeValue(value){return String(value||'').toUpperCase().replace(/[^A-Z0-9]/g,'');}
+  let scannerPhotoCopy=null;
+  async function copyScannerPhoto(event){
+    const input=event.currentTarget,file=input.files?.[0];
+    if(!file||scannerPhotoCopy)return;
+    const current=currentView(),copy=AssetImage.ownCopy(file);
+    scannerPhotoCopy=copy;
+    $('scanHint').textContent='Opening selected photo…';
+    setScannerBusy(true);
+    if(state.recognitionSession)showUniversalRecognition();
+    let owned;
+    try{owned=await copy;}
+    catch(err){
+      if(current()){
+        $('scanHint').textContent='Take or choose the photo again.';
+        toast(humanError(err),'error');
+      }
+    }finally{
+      if(scannerPhotoCopy===copy){scannerPhotoCopy=null;input.value='';setScannerBusy(false);}
+    }
+    if(!current())return;
+    if(!owned){if(state.recognitionSession)showUniversalRecognition();return;}
+    showScannerPhotoPreview(owned);setScannerStage('processing');
+    try{await processScanFile(owned);}
+    catch(err){if(current())toast(humanError(err),'error');}
+  }
   function setScannerBusy(busy){
     ['startCameraBtn','captureBtn'].forEach(id=>{const b=$(id);if(b)b.disabled=busy;});
     ['scannerFile','scannerCameraFile'].forEach(id=>{const input=$(id);if(input)input.disabled=busy;});
@@ -3513,7 +3541,7 @@
       replacement?.focus({preventScroll:true});replacement?.setSelectionRange(...selection);
     }
     if(attrFocus)document.querySelector(`[data-attr-row="${attrFocus.row}"] [data-attr-${attrFocus.field}]`)?.focus({preventScroll:true});
-    const blocked=running||unresolved;
+    const blocked=running||unresolved||!!scannerPhotoCopy;
     ['v27Create','v27UpdateTarget','v27FindMatch'].forEach(id=>{const el=$(id);if(el)el.disabled=blocked;});
     const getIncoming=()=>{
       // Save any typed values, even when a button is clicked before the field loses focus.
@@ -3531,6 +3559,7 @@
     $('v27UpdateTarget')?.addEventListener('click',()=>withAccess('STAFF',()=>openScanReconcile(pendingTarget,getIncoming(),recognitionPhotos())));
     $('v27FindMatch')?.addEventListener('click',()=>withAccess('STAFF',()=>withBusy($('v27FindMatch'),'Opening match…',()=>openScanMatchPicker(getIncoming(),recognitionPhotos()))));
     $$('[data-v27-match]').forEach(btn=>btn.addEventListener('click',()=>{
+      if(scannerPhotoCopy)return;
       const m=session.matches[Number(btn.dataset.v27Match)];if(m)withAccess('STAFF',()=>openScanReconcile(m.asset,getIncoming(),recognitionPhotos()));
     }));
   }

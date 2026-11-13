@@ -113,7 +113,7 @@ test('browser regressions on mobile and desktop',async t=>{
           return post(action,...args);
         };});
         await page.locator('#confirmDeleteAsset').click();
-        await page.locator('#modalNotifications [role="alert"]').filter({hasText:'Deletion service unavailable'}).waitFor();
+        await page.locator('#modalNotifications [role="alert"]').filter({hasText:'The server is temporarily unavailable. Try again shortly.'}).waitFor();
         assert.equal(backend.read('Assets').find(row=>row.asset_id==='TRIAL').status,'Active');
         await page.locator('#confirmDeleteAsset').click();
         await page.getByText('Asset deleted.',{exact:true}).waitFor();
@@ -186,6 +186,58 @@ test('browser regressions on mobile and desktop',async t=>{
         await page.locator('#assetList [data-asset]').filter({hasText:'Guest test asset'}).waitFor({state:'attached'});
         assert.equal(backend.read('Assets').length,1);
         assert.deepEqual(errors,[]);
+      }finally{await context.close();}
+    });
+    await t.test('Photo copy recovery: Save waits for photos on the first and matching units',async()=>{
+      const {page,context,backend}=await start({links:true,queue:true,unified:true});
+      try{
+        await page.evaluate(()=>{const copy=AssetImage.ownCopies;AssetImage.ownCopies=async files=>{
+          await new Promise(resolve=>{window.__releasePhotoCopy=resolve;});
+          return copy(files);
+        };});
+        await page.locator('[data-mobile-route="assets"]').click();
+        await page.locator('#addAssetBtn').click();
+        await page.locator('#assetForm [name="category"]').fill('Printer');
+        await page.locator('#assetSite').selectOption('SITE-TEST');
+        await page.locator('#assetArea').fill('Test Area');
+        await page.locator('#addMatchingUnit').click();
+        const submit=page.locator('#assetForm button[type="submit"]');
+        for(const [selector,name] of [['#assetPhotoPicker','first.png'],['[data-unit-photos="0"]','second.png']]){
+          const picker=page.locator(selector);
+          await picker.locator('input[multiple]').setInputFiles(image(name));
+          await picker.getByText('Opening selected photos…').waitFor({state:'attached'});
+          await submit.click();
+          await page.locator('#modalNotifications').getByText('Wait for the selected photos to finish opening, then save again.').waitFor();
+          assert.equal(backend.read('Assets').length,0);
+          await page.evaluate(()=>window.__releasePhotoCopy());
+          await picker.getByText(name,{exact:true}).waitFor({state:'attached'});
+        }
+        await submit.click();
+        await page.waitForFunction(()=>window.__mock.assets.length===2&&window.__mock.uploadAttempts===2);
+        assert.equal(backend.read('Assets').length,2);
+      }finally{await context.close();}
+    });
+    await t.test('Photo copy recovery: failed photos require acknowledgement before registration',async()=>{
+      const {page,context,backend}=await start({links:true,queue:true,unified:true});
+      try{
+        await page.evaluate(()=>{AssetImage.ownCopies=async()=>{throw new Error('PHOTO_UNREADABLE: Choose the image again.');};});
+        await page.locator('[data-mobile-route="assets"]').click();
+        await page.locator('#addAssetBtn').click();
+        await page.locator('#assetForm [name="asset_name"]').fill('Test printer');
+        await page.locator('#assetForm [name="category"]').fill('Printer');
+        await page.locator('#assetSite').selectOption('SITE-TEST');
+        await page.locator('#assetArea').fill('Test Area');
+        await page.locator('#assetPhotoPicker input[multiple]').setInputFiles(image('failed.png'));
+        const submit=page.locator('#assetForm button[type="submit"]');
+        const continueButton=page.getByRole('button',{name:'Continue with current photos'});
+        await continueButton.waitFor();
+        await submit.click();
+        await page.locator('#modalNotifications').getByText('Choose the photo again or tap Continue with current photos before saving.').waitFor();
+        assert.equal(backend.read('Assets').length,0);
+        assert.equal(await page.locator('#assetForm [name="asset_name"]').inputValue(),'Test printer');
+        await continueButton.click();
+        await submit.click();
+        await page.waitForFunction(()=>window.__mock.assets.length===1);
       }finally{await context.close();}
     });
     await t.test('Registration recovery: another entry can save while an earlier photo is uploading',async()=>{

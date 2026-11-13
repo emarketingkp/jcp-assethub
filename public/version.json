@@ -1,8 +1,8 @@
 {
   "version": "2.10.5",
-  "build": "2.10.5-photo-access-1",
-  "released": null,
-  "status": "preview",
+  "build": "2.10.5-photo-access-2",
+  "released": "2026-11-13",
+  "status": "released",
   "name": "Photo access and save recovery",
   "notes": "Copy photos when picked, report an unreadable photo once with a one-tap remove, retry connection failures automatically and show plain error messages."
 }

@@ -1,4 +1,6 @@
-# 2.10.5 — photo access and save recovery (preview)
+# 2.10.5 — photo access and save recovery (2026-11-13)
+
+- Keep Save from submitting until selected photos finish opening. A failed copy asks the user to choose again or explicitly continue with the current photos.
 
 - Copy each photo into the app the moment it is taken or chosen (asset photos, scanner, linked-asset photo, tag photos and audit photos). Android only grants brief access to a picked file, so reading it later when storing a draft or saving failed with "The requested file could not be read".
 - Show a plain message if the phone refuses to share a photo, and use the same message in every save path.

@@ -4,17 +4,36 @@
   if(typeof module==='object'&&module.exports)module.exports=api;
   if(root)root.AssetPhotoPicker=api;
 })(typeof window==='undefined'?null:window,function(){
+  function copyInProgress(host){
+    return !!host?.querySelector('[data-photo-copying]');
+  }
+  function canSave(host,onError){
+    if(copyInProgress(host)){
+      onError('Wait for the selected photos to finish opening, then save again.');
+      return false;
+    }
+    const failed=host?.querySelector('[data-photo-copy-failed]');
+    if(failed){
+      onError('Choose the photo again or tap Continue with current photos before saving.');
+      failed.querySelector('[data-dismiss-photo-error]')?.focus();
+      return false;
+    }
+    return true;
+  }
   function mount(container,{initial=[],multiple=true,maxFiles=12,onError=()=>{},preview=false,onChange=()=>{}}={}){
-    const items=[];let busy=false,disposed=false;
+    const items=[];let busy=false,disposed=false,copying=false,copyError='';
     container.classList.add('photo-picker');
-    container.innerHTML='<div class="photo-picker-actions"><button type="button" class="btn light" data-photo-camera>Take photo</button><button type="button" class="btn light" data-photo-gallery>Choose from gallery</button></div><input type="file" accept="image/*" capture="environment" hidden data-photo-camera-input><input type="file" accept="image/*" hidden data-photo-gallery-input><p class="photo-picker-status" aria-live="polite"></p><div class="photo-picker-previews"></div>';
+    container.innerHTML='<div class="photo-picker-actions"><button type="button" class="btn light" data-photo-camera>Take photo</button><button type="button" class="btn light" data-photo-gallery>Choose from gallery</button></div><input type="file" accept="image/*" capture="environment" hidden data-photo-camera-input><input type="file" accept="image/*" hidden data-photo-gallery-input><p class="photo-picker-status" aria-live="polite"></p><button type="button" class="btn light sm" data-dismiss-photo-error hidden>Continue with current photos</button><div class="photo-picker-previews"></div>';
     const camera=container.querySelector('[data-photo-camera-input]'),gallery=container.querySelector('[data-photo-gallery-input]');
     gallery.multiple=multiple;
     function render(){
       if(disposed)return;
       if(preview&&items.length&&!items.some(p=>p.main))items[0].main=true;
       const pending=items.filter(i=>!i.uploaded).length;
-      container.querySelector('.photo-picker-status').textContent=items.length?`${items.length} photo${items.length===1?'':'s'} selected${items.some(i=>i.uploaded)?` · ${pending} pending upload`:''}`:'No photos selected.';
+      container.toggleAttribute('data-photo-copying',copying);
+      container.toggleAttribute('data-photo-copy-failed',!!copyError);
+      container.querySelector('[data-dismiss-photo-error]').hidden=!copyError||copying;
+      container.querySelector('.photo-picker-status').textContent=copying?'Opening selected photos…':copyError|| (items.length?`${items.length} photo${items.length===1?'':'s'} selected${items.some(i=>i.uploaded)?` · ${pending} pending upload`:''}`:'No photos selected.');
       const previews=container.querySelector('.photo-picker-previews');previews.replaceChildren();
       for(const item of items){
         const row=document.createElement('div');row.className='photo-picker-preview';
@@ -28,7 +47,7 @@
           const main=document.createElement('button');main.type='button';main.className='photo-main-button';main.textContent=item.main?'★ Main':'☆';main.title='Set as main image';main.setAttribute('aria-label','Set '+item.file.name+' as main image');main.onclick=()=>{items.forEach(p=>p.main=p===item);render();onChange();};row.prepend(main);
         }
       }
-      container.querySelectorAll('.photo-picker-actions button,input').forEach(el=>{el.disabled=busy;});
+      container.querySelectorAll('.photo-picker-actions button,input').forEach(el=>{el.disabled=busy||copying;});
     }
     function add(files,type='other'){
       if(busy||disposed)return;
@@ -42,7 +61,21 @@
       render();onChange();
     }
     // Copy the photos before clearing the input; the original file handles can expire.
-    const take=async input=>{const files=Array.from(input.files||[]);try{add(await AssetImage.ownCopies(files));}catch(err){onError(String(err.message||err).replace(/^PHOTO_UNREADABLE: /,''));}finally{input.value='';}};
+    const take=async input=>{
+      const files=Array.from(input.files||[]);
+      if(!files.length||busy||copying||disposed)return;
+      copying=true;
+      copyError='';
+      render();
+      try{add(await AssetImage.ownCopies(files));}
+      catch(err){
+        if(!disposed){
+          copyError=String(err.message||err).replace(/^PHOTO_UNREADABLE: /,'');
+          onError(copyError);
+        }
+      }finally{input.value='';copying=false;render();}
+    };
+    container.querySelector('[data-dismiss-photo-error]').onclick=()=>{copyError='';render();};
     camera.addEventListener('change',()=>void take(camera));
     gallery.addEventListener('change',()=>void take(gallery));
     container.querySelector('[data-photo-camera]').addEventListener('click',()=>camera.click());
@@ -52,5 +85,5 @@
     function removeUnreadable(){for(const item of items.filter(i=>i.unreadable)){items.splice(items.indexOf(item),1);URL.revokeObjectURL(item.url);}render();onChange();}
     return {items,add,refresh:render,removeUnreadable,setBusy(value){busy=value;render();},markUploaded(item){item.uploaded=true;render();},dispose(){disposed=true;for(const item of items)URL.revokeObjectURL(item.url);}};
   }
-  return {mount};
+  return {mount,canSave,copyInProgress};
 });
