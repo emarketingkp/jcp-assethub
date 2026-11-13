@@ -123,3 +123,16 @@ test('a failed item can be reopened for editing, keeping its data and clearing t
   const open=await h.q.reopen('r');assert.equal(open.payload,undefined);assert.equal(open.params.serial,'R');assert.match(open.error,/NOT_STARTED/);
   const saved=await h.q.revise('r',params('R2'),[],null);assert.equal(saved.params.serial,'R2');
 });
+test('a save that failed on a dropped connection retries by itself after a short wait; other errors wait for the person',async()=>{
+  const h=setup();
+  await h.q.enqueue({id:'22222222-2222-4222-8222-222222222222',params:params('NET')});await h.q.enqueue({id:'33333333-3333-4333-8333-333333333333',params:params('BAD')});
+  for(const [id,error,failedAt] of [['22222222-2222-4222-8222-222222222222','Failed to fetch',Date.now()-60000],['33333333-3333-4333-8333-333333333333','DUPLICATE_SERIAL: taken',0]]){const row=h.data.get(id);Object.assign(row,{state:'Retry',error,failedAt,attempts:1});h.data.set(id,row);}
+  h.setOnline(true);await h.q.pump();
+  const rows=await h.q.rows();
+  assert.equal(rows.find(r=>r.id==='22222222-2222-4222-8222-222222222222').state,'Saved');assert.equal(rows.find(r=>r.id==='33333333-3333-4333-8333-333333333333').state,'Retry');
+});
+test('a fresh connection failure waits before retrying',async()=>{
+  const h=setup();await h.q.enqueue({id:'22222222-2222-4222-8222-222222222222',params:params('NET2')});
+  const row=h.data.get('22222222-2222-4222-8222-222222222222');Object.assign(row,{state:'Retry',error:'Failed to fetch',failedAt:Date.now(),attempts:1});h.data.set('22222222-2222-4222-8222-222222222222',row);
+  h.setOnline(true);await h.q.pump();assert.equal((await h.q.rows())[0].state,'Retry');
+});

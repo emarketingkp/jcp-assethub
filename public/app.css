@@ -814,3 +814,8 @@ body #toast.toast-stack[data-inline] .toast-item{box-shadow:none}
 
 body > .save-failure-notice{top:calc(65px + env(safe-area-inset-top));bottom:auto}
 .dialog-notifications .save-failure-notice[data-inline]{position:static;max-width:none;margin:8px 12px;box-shadow:none;flex-wrap:wrap}
+
+/* A photo the phone stopped sharing is marked where it is shown */
+.photo-unreadable{color:var(--red);font-weight:600}
+.photo-picker-preview.unreadable{outline:2px solid var(--red);outline-offset:2px;border-radius:10px}
+.photo-picker-preview.unreadable span{color:var(--red);font-weight:600}

@@ -1,4 +1,4 @@
-const CACHE = 'jcp-assethub-v2.10.4-admin-delete-1';
+const CACHE = 'jcp-assethub-v2.10.5-photo-access-1';
 const CORE = [
   './','./index.html','./app.css','./asset-detail-view.css','./asset-detail-view.js','./store.js','./api-config.js','./api.js','./image.js','./code-scanner.js','./recognition-v27.js','./app.js',
   './manifest.webmanifest','./assets/icon-192.png','./assets/icon-512.png',

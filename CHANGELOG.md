@@ -1,3 +1,13 @@
+# 2.10.5 — photo access and save recovery (preview)
+
+- Copy each photo into the app the moment it is taken or chosen (asset photos, scanner, linked-asset photo, tag photos and audit photos). Android only grants brief access to a picked file, so reading it later when storing a draft or saving failed with "The requested file could not be read".
+- Show a plain message if the phone refuses to share a photo, and use the same message in every save path.
+- Saves that fail on a dropped or slow connection now retry by themselves (after 30 seconds, then longer gaps up to 10 minutes) instead of waiting in Needs attention for a tap. Other failures still wait for the person.
+- Plain-language messages for full phone storage, no connection, an unexpected server reply, a busy spreadsheet, a temporarily unavailable server and phone app-storage faults. The technical text is kept in the browser console.
+- Any failure no screen handled now shows a message instead of failing silently.
+- No more lock-ups when a photo can't be read: the problem is reported once instead of on every tap, the unreadable photo is marked in red, and one button removes it while keeping everything typed. Saving checks photos first and points at the one to fix.
+- Frontend only; no Apps Script changes beyond 2.10.4. Physical Android device behaviour remains to be confirmed.
+
 # 2.10.4 — Admin asset deletion (2026-11-13)
 
 - Add Delete asset under More in Admin view, with confirmation and feedback.

@@ -69,7 +69,7 @@ window.AssetReview = {
           if(c.returnToInterruptedTask(id))return;
           const restore=c.hasModalReturn();c.closeModal();if(restore)return;
           c.resetScannerResult({restartCamera:false});c.openLocalOperation(saved);
-        } catch(err) {c.toast('Changes were not saved. '+err.message,'error');}
+        } catch(err) {c.toast('Changes were not saved. '+(c.humanError?c.humanError(err):err.message),'error');}
         finally {button.disabled=false;}
       };
     },{size:'lg',stack:true});

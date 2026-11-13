@@ -55,9 +55,16 @@
         return old.find(r=>r.id===d.id)||{...d,scope,protocol,batchOrder,params:structuredClone(d.params),evidence:structuredClone(d.evidence||null),guestKey,photos:(d.photos||[]).map((p,i)=>({...p,id:d.id+'-photo-'+i})),parent:d.parent||'',anchor:d.anchor||null,created:Date.now(),state:'Saving details',asset:null,error:''};
       });await storage.putMany(group);notify(await rows());void pump();return group;
     }
+    const retryDelay=attempts=>Math.min(10*60*1000,30*1000*2**Math.max(0,(attempts||1)-1));
+    async function reviveTransient(){
+      let changed=false;
+      for(const r of await rows())if(r.state==='Retry'&&transientError(r.error)&&Date.now()-(r.failedAt||0)>=retryDelay(r.attempts)){r.state=r.asset?'Uploading photos':'Saving details';r.error='';await storage.put(r);changed=true;}
+      if(changed)notify(await rows());
+    }
     async function pump(){
       if(running||paused||!active()||!online())return;running=true;
       try{supported();await coordinate(async()=>{
+        await reviveTransient();
         while(active()&&online()){
           const all=await rows();
           // Always drain ready metadata before even one background image.
@@ -132,13 +139,13 @@
               row.state=row.photos.every(p=>p.uploaded)?'Saved':'Uploading photos';await persist(row);
               if(active())onAsset(row.asset,row,false);
             }
-          }catch(err){row.state='Retry';row.error=String(err.message||err);await persist(row);
+          }catch(err){row.state='Retry';row.error=String(err.message||err);row.attempts=(row.attempts||0)+1;row.failedAt=Date.now();await persist(row);
             // Only a lost session pauses the whole queue; a permission error blocks just this row.
             if(authError(row.error)){paused=true;if(active())onAuthRequired(row.error);break;}}
         }
       });}catch(err){notify(null,String(err.message||err));}finally{running=false;if(active()){try{notify(await rows());}catch{}}}
     }
-    async function retry(id){paused=false;const row=(await rows()).find(r=>r.id===id);if(!row)return;row.state=row.asset?'Uploading photos':'Saving details';row.error='';await persist(row);void pump();}
+    async function retry(id){paused=false;const row=(await rows()).find(r=>r.id===id);if(!row)return;row.state=row.asset?'Uploading photos':'Saving details';row.error='';row.attempts=0;await persist(row);void pump();}
     // Opens a failed item for editing. If the server did apply the earlier request, resending
     // changed data under the same request ID is refused rather than duplicated.
     async function reopen(id){const row=(await rows()).find(r=>r.id===id);if(!row||row.asset)throw new Error('This item is already saved.');delete row.payload;delete row.action;row.state='Retry';row.error='OPERATION_NOT_STARTED: Reopened for editing.';await persist(row);return row;}

@@ -16,8 +16,8 @@
     maintenanceSort:{key:'reported_at',dir:'desc'},
     maintenanceFilters:{status:'',type:'',assigned:'',dateField:'reported_at',dateFrom:'',dateTo:''}
   };
-  const APP_VERSION = '2.10.4';
-  const BUILD_ID = '2.10.4-admin-delete-1';
+  const APP_VERSION = '2.10.5';
+  const BUILD_ID = '2.10.5-photo-access-1';
   // Full-field writes require the additive 2.9 backend setup; older services keep the legacy editor.
   const BACKEND_API_VERSION = '2.10.0';
   let workflows=null;
@@ -396,6 +396,7 @@
   }
   function humanError(err){
     const raw=String(err?.message||err||'Unknown error');
+    if(/PHOTO_UNREADABLE|NotReadableError|could not be read, typically due to permission/i.test(raw))return 'A photo could not be read from the phone. Take or choose it again; your other details are kept.';
     const map={
       'EDITOR_NOT_READY':'The registration service needs its spreadsheet setup updated. Your draft is kept on this device.',
       'LINKS_NOT_READY':'The asset service needs an update before background saves can start. Your draft is kept.',
@@ -420,8 +421,24 @@
       REQUEST_TIMEOUT:'Apps Script took too long to respond. Cached data remains usable; try Sync Now again.'
     };
     for(const [key,msg] of Object.entries(map)) if(raw.includes(key)) return msg;
+    const plain=[
+      [/QuotaExceeded|quota has been exceeded|storage.*full/i,'This phone has no space left for AssetHub. Discard old drafts under Assets › On this device or free up phone storage.'],
+      [/Failed to fetch|NetworkError|Load failed|network request failed|ERR_INTERNET|net::/i,'No connection to the AssetHub server. Your work is kept on this device and will send when you are back online.'],
+      [/Invalid backend response/i,'The server sent an unexpected reply. The Apps Script deployment may need updating or sharing with "Anyone".'],
+      [/Lock timeout|too many times|Exceeded maximum execution time|Service (?:Spreadsheets|Drive) failed|Service invoked/i,'The spreadsheet was busy. AssetHub will try again shortly.'],
+      [/HTTP 5\d\d|Bad Gateway|Service Unavailable/i,'The server is temporarily unavailable. AssetHub will try again shortly.'],
+      [/backing store|Database (?:deleted|connection)|InvalidStateError|UnknownError|IndexedDB/i,"The phone's app storage had a problem. Close and reopen AssetHub; items already saved on this device are kept."]
+    ];
+    for(const [pattern,msg] of plain) if(pattern.test(raw)){console.warn('AssetHub error:',raw);return msg;}
     return raw;
   }
+  // Safety net: a failure no screen handled still tells the person something, in plain words.
+  window.addEventListener('unhandledrejection',event=>{
+    const err=event.reason,name=String(err?.name||'');
+    if(name==='AbortError')return;
+    console.error('Unhandled AssetHub error:',err);
+    toast(humanError(err),'error');
+  });
   function setButtonBusy(btn,busy,label='Working...'){
     if(!btn)return;
     if(busy){
@@ -643,7 +660,7 @@
   }
 
   async function init(){
-    workflows=AssetWorkflows.create({state,esc,icon,isAuthenticated,isAdmin,scope:()=>queueScope,queue:()=>saveQueue,rows:()=>queueRows,toast,stopCamera,resumeScannerCamera,openModal,closeModal,hasModalReturn:()=>modalStack.length>0,returnToInterruptedTask,openAsset,openAssetForm,setRoute,renderDrawer,scanEntry,mainAssetFields,bindMainAssetFields,linkedAssetFields,customFieldsHtml,recognitionEvidence,resetScannerResult,showUniversalRecognition,showRegistrationSaved,setLinkedContext,openLocalOperation,restoreScanDraft,openPending:openLinkedPendingSaves,confirmAction,openNestedAsset,openLinkedCaptureChoices,renderLinkContext,renderScanTarget,setDraftCount:n=>{draftCount=n;paintLocalWorkEntry();}});
+    workflows=AssetWorkflows.create({state,esc,icon,isAuthenticated,isAdmin,scope:()=>queueScope,queue:()=>saveQueue,rows:()=>queueRows,toast,stopCamera,resumeScannerCamera,openModal,closeModal,hasModalReturn:()=>modalStack.length>0,returnToInterruptedTask,openAsset,openAssetForm,setRoute,renderDrawer,scanEntry,mainAssetFields,bindMainAssetFields,linkedAssetFields,customFieldsHtml,recognitionEvidence,resetScannerResult,showUniversalRecognition,showRegistrationSaved,setLinkedContext,openLocalOperation,restoreScanDraft,openPending:openLinkedPendingSaves,confirmAction,humanError,removeUnreadableScanPhotos,openNestedAsset,openLinkedCaptureChoices,renderLinkContext,renderScanTarget,setDraftCount:n=>{draftCount=n;paintLocalWorkEntry();}});
     void window.AssetInput?.ready();
     bindStaticEvents();
     applyReportDatePreset(false);
@@ -811,8 +828,8 @@
       if(window.matchMedia('(max-width:760px)').matches && state.cameraStream) captureMobileFrame();
       else {if(state.cameraStream)stopCamera(); $('scannerCameraFile')?.click();}
     });
-    $('scannerCameraFile').addEventListener('change',async e=>{ const f=e.target.files?.[0]; if(!f)return; try{showScannerPhotoPreview(f);setScannerStage('processing');await processScanFile(f);}catch(err){toast(humanError(err),'error');}finally{e.target.value='';} });
-    $('scannerFile').addEventListener('change',async e=>{ const f=e.target.files?.[0]; if(!f)return; try{showScannerPhotoPreview(f);setScannerStage('processing');await processScanFile(f);}catch(err){toast(humanError(err),'error');}finally{e.target.value='';} });
+    $('scannerCameraFile').addEventListener('change',async e=>{ let f=e.target.files?.[0]; if(!f)return; try{f=await AssetImage.ownCopy(f);showScannerPhotoPreview(f);setScannerStage('processing');await processScanFile(f);}catch(err){toast(humanError(err),'error');}finally{e.target.value='';} });
+    $('scannerFile').addEventListener('change',async e=>{ let f=e.target.files?.[0]; if(!f)return; try{f=await AssetImage.ownCopy(f);showScannerPhotoPreview(f);setScannerStage('processing');await processScanFile(f);}catch(err){toast(humanError(err),'error');}finally{e.target.value='';} });
   }
 
   function toggleSidebar(){
@@ -1901,7 +1918,7 @@
   function pendingItemHtml(r){
     const main=r.parent&&queueRows.find(p=>p.id===r.parent),waiting=!!r.parent&&!main?.asset;
     const photos=r.photos||[],sent=photos.filter(p=>p.uploaded).length;
-    const reason=waiting?'Waiting for its main asset to save first.':r.state==='Retry'?humanError(r.error):!navigator.onLine?'Offline. It will sync when you reconnect.':r.state==='Uploading photos'?'Uploading photos.':r.state==='Waiting for photo'?'Waiting for its photo to upload.':'Sending details.';
+    const reason=waiting?'Waiting for its main asset to save first.':r.state==='Retry'&&AssetSaveQueue.transientError(r.error)?humanError(r.error)+' Retrying automatically.':r.state==='Retry'?humanError(r.error):!navigator.onLine?'Offline. It will sync when you reconnect.':r.state==='Uploading photos'?'Uploading photos.':r.state==='Waiting for photo'?'Waiting for its photo to upload.':'Sending details.';
     return `<article class="pending-save-item${r.state==='Retry'?' attention':''}"><div class="panel-head"><div><b>${esc(assetDisplayName(r.params))}</b><small>${esc(r.params.serial||'No serial recorded')}${r.asset?' · '+esc(r.asset.asset_id):''}</small></div><span class="pending-status">${esc(r.state==='Retry'?'Needs attention':waiting?'Waiting':r.state)}</span></div><div class="pending-save-progress"><span>Details</span><b>${r.asset?'Saved':'Not saved yet'}</b><span>Photos</span><b>${photos.length?sent+' of '+photos.length+' uploaded':'None'}</b></div><p class="${r.state==='Retry'?'pending-save-error':'input-hint'}">${esc(reason)}</p><div class="actions">${pendingItemActions(r,waiting,main)}</div></article>`;
   }
   function paintLinkedPendingItems(){
@@ -1984,7 +2001,7 @@
     openModal('Add linked asset',`<div class="linked-capture-choices"><p>Link the next asset to <b>${esc(main.name)}</b>.</p><button type="button" id="linkedAssetOcr" class="btn blue"><span>Scan label with OCR<small>Read the device label, then review the result.</small></span></button><button type="button" id="linkedAssetPhoto" class="btn light"><span>Take asset photo<small>No label needed. Continue to manual entry.</small></span></button><input type="file" id="linkedAssetPhotoFile" accept="image/*" capture="environment" hidden></div>`,()=>{
       $('linkedAssetOcr').onclick=()=>beginScanner({context});
       $('linkedAssetPhoto').onclick=()=>$('linkedAssetPhotoFile').click();
-      $('linkedAssetPhotoFile').onchange=e=>{const file=e.target.files?.[0];if(!file)return;closeModal();openAssetForm({...context.placement,custom_fields:Object.entries(context.custom||{}).map(([field_id,value])=>({field_id,value})),_mainContext:context,_photoOnly:true,_assetPhotos:[{file,type:'main'}]});};
+      $('linkedAssetPhotoFile').onchange=async e=>{let file=e.target.files?.[0];if(!file)return;try{file=await AssetImage.ownCopy(file);}catch(err){toast(humanError(err),'error');return;}closeModal();openAssetForm({...context.placement,custom_fields:Object.entries(context.custom||{}).map(([field_id,value])=>({field_id,value})),_mainContext:context,_photoOnly:true,_assetPhotos:[{file,type:'main'}]});};
     },{size:'sm'});
   }
   function initialMainChoice(asset={}){
@@ -2016,7 +2033,7 @@
     function results(){const q=query.value.trim().toLowerCase();$(prefix+'MainResults').innerHTML=state.assets.filter(a=>!['Retired','Merged'].includes(a.status)&&[a.asset_id,assetDisplayName(a),a.serial].join(' ').toLowerCase().includes(q)).slice(0,20).map(a=>`<button type="button" class="main-asset-result" data-select-main="${esc(a.asset_id)}" ${invalid(a.asset_id)?'disabled':''}><b>${esc(assetDisplayName(a))}</b><small>${esc(a.asset_id)} · ${esc(a.serial||'No serial')}${invalid(a.asset_id)?' · Would create a loop':''}</small></button>`).join('')||'<p>No matching asset. Try another ID or serial.</p>';$(prefix+'MainResults').querySelectorAll('[data-select-main]').forEach(b=>b.onclick=()=>choose(state.assets.find(a=>a.asset_id===b.dataset.selectMain)));}
     host.querySelectorAll(`[name="${prefix}MainMode"]`).forEach(r=>r.onchange=()=>{choice={mode:r.value};changed();pick.classList.toggle('hidden',r.value!=='link');if(r.value==='link'){results();query.focus();}});
     query.oninput=results;$(prefix+'MainScan').onclick=()=>$(prefix+'MainTagPhoto').click();
-    $(prefix+'MainTagPhoto').onchange=async e=>{const file=e.target.files?.[0];if(!file)return;const button=$(prefix+'MainScan');await withBusy(button,'Reading…',async()=>{try{const codes=await AssetCode.scanAll(file);if(!current())return;const values=new Set(codes.flatMap(c=>[c.assetId,c.value].filter(Boolean)));let matches=state.assets.filter(a=>values.has(a.asset_id)||a.serial&&values.has(a.serial));if(matches.length!==1&&navigator.onLine){const found=await Promise.all(codes.map(c=>AssetAPI.get('matchIdentifier',{value:c.value}).catch(()=>null)));matches=[...new Map(found.filter(r=>r?.match?.found).map(r=>[r.match.asset.asset_id,r.match.asset])).values()];}if(!current())return;if(matches.length!==1)throw new Error('No unique asset matches this tag. Search and choose the correct record.');optimisticAsset(matches[0]);choose(matches[0]);}catch(err){if(current())$(prefix+'MainError').textContent=humanError(err);}finally{e.target.value='';}});};
+    $(prefix+'MainTagPhoto').onchange=async e=>{let file=e.target.files?.[0];if(!file)return;try{file=await AssetImage.ownCopy(file);}catch(err){toast(humanError(err),'error');return;}const button=$(prefix+'MainScan');await withBusy(button,'Reading…',async()=>{try{const codes=await AssetCode.scanAll(file);if(!current())return;const values=new Set(codes.flatMap(c=>[c.assetId,c.value].filter(Boolean)));let matches=state.assets.filter(a=>values.has(a.asset_id)||a.serial&&values.has(a.serial));if(matches.length!==1&&navigator.onLine){const found=await Promise.all(codes.map(c=>AssetAPI.get('matchIdentifier',{value:c.value}).catch(()=>null)));matches=[...new Map(found.filter(r=>r?.match?.found).map(r=>[r.match.asset.asset_id,r.match.asset])).values()];}if(!current())return;if(matches.length!==1)throw new Error('No unique asset matches this tag. Search and choose the correct record.');optimisticAsset(matches[0]);choose(matches[0]);}catch(err){if(current())$(prefix+'MainError').textContent=humanError(err);}finally{e.target.value='';}});};
     paint();return {value:()=>choice,link:()=>{
       if(choice.mode!=='link')return {parent_asset_id:''};
       const context=choice.context;if(!context)return {error:'Choose a main asset or select On its own.'};
@@ -2305,7 +2322,7 @@
     starts.onchange=()=>{if(starts.checked){selected=null;choice.value='';if(!name.value)name.value=[a.brand,a.model,'set'].filter(Boolean).join(' ');}describe();};
     $('removeLinkedAsset').onclick=()=>{selected=null;removed=true;starts.checked=false;choice.value='';name.value='';describe();};
     $('scanLinkedTag').onclick=()=>$('linkedTagPhoto').click();
-    $('linkedTagPhoto').onchange=async e=>{const file=e.target.files?.[0];if(!file)return;try{const codes=await AssetCode.scanAll(file);const ids=new Set(codes.map(c=>c.assetId||c.value));const matches=state.assets.filter(r=>ids.has(r.asset_id)||r.serial&&ids.has(r.serial));if(matches.length!==1)throw new Error('No unique cached asset matches this tag. Search and select the correct asset.');selected=matches[0];search.value=selected.asset_id;update();choice.value=selected.asset_id;choice.onchange();}catch(err){toast(humanError(err),'error');}finally{e.target.value='';}};
+    $('linkedTagPhoto').onchange=async e=>{let file=e.target.files?.[0];if(!file)return;try{file=await AssetImage.ownCopy(file);}catch(err){toast(humanError(err),'error');return;}try{const codes=await AssetCode.scanAll(file);const ids=new Set(codes.map(c=>c.assetId||c.value));const matches=state.assets.filter(r=>ids.has(r.asset_id)||r.serial&&ids.has(r.serial));if(matches.length!==1)throw new Error('No unique cached asset matches this tag. Search and select the correct asset.');selected=matches[0];search.value=selected.asset_id;update();choice.value=selected.asset_id;choice.onchange();}catch(err){toast(humanError(err),'error');}finally{e.target.value='';}};
     update();describe();
     return {enabled:()=>!!saveQueue,value:()=>{
       if(a._setContext&&!removed)return {parent:a._setContext.parent,setName:a._setContext.setName,setId:a._setContext.setId};
@@ -2375,7 +2392,7 @@
       $('retireAssetBtn')?.addEventListener('click',()=>withAccess('ADMIN',async()=>{ if(simpleLinksEnabled())return confirmRetireAsset(asset);if(!confirm(`Retire ${asset.asset_id}?`))return; try{const r=await AssetAPI.post('retireAsset',{asset_id:asset.asset_id});cacheAssetDetail(r.asset);toast('Asset retired.');closeModal();closeDrawer();scheduleSync('retire');}catch(err){toast(humanError(err),'error');} }));
       form.addEventListener('submit',async e=>{
         e.preventDefault();
-        if(simpleLinksEnabled()){if(locallySaved)return;await withBusy(form.querySelector('[type="submit"]'),'Saving on device…',async()=>{try{await saveAssetFormInBackground(asset,form,photos,linkage,operationId);locallySaved=true;}catch(err){toast('Draft was not saved. Keep this form open. '+humanError(err),'error');}});return;}
+        if(simpleLinksEnabled()){if(locallySaved)return;await withBusy(form.querySelector('[type="submit"]'),'Saving on device…',async()=>{try{await saveAssetFormInBackground(asset,form,photos,linkage,operationId);locallySaved=true;}catch(err){if(!err.handled)toast('Draft was not saved. Keep this form open. '+humanError(err),'error');}});return;}
         const fd=new FormData(form); const custom={}; form.querySelectorAll('[data-custom]').forEach(el=>custom[el.dataset.custom]=el.value);
         const params=Object.fromEntries(fd.entries()); params.custom_json=JSON.stringify(custom); if(asset.asset_id)params.asset_id=asset.asset_id;
         const submit=form.querySelector('[type="submit"]');
@@ -2396,7 +2413,7 @@
               closeModal();closeDrawer();
               if(fromScan)resetScannerResult({restartCamera:false});
               if(context)openSetOverview();else{setRoute('assets');toast('Saved on this device. Use the pending count to follow details and photos.');}
-            }catch(err){toast('Draft was not saved. Keep this form open. '+humanError(err),'error');}
+            }catch(err){if(!err.handled)toast('Draft was not saved. Keep this form open. '+humanError(err),'error');}
           });return;
         }
         await withBusy(submit,asset.asset_id?'Saving...':'Creating...',async()=>{
@@ -2913,7 +2930,7 @@
           }catch(err){feedback.textContent=humanError(err);feedback.classList.add('conflict');}
         });
       };
-      ['auditCameraFile','auditGalleryFile'].forEach(id=>$(id).addEventListener('change',async e=>{const f=e.target.files?.[0];e.target.value='';await scan(f);}));
+      ['auditCameraFile','auditGalleryFile'].forEach(id=>$(id).addEventListener('change',async e=>{let f=e.target.files?.[0];if(!f)return;try{f=await AssetImage.ownCopy(f);}catch(err){toast(humanError(err),'error');return;}finally{e.target.value='';}await scan(f);}));
       $('auditVerifyBtn').addEventListener('click',async()=>{if(feedback.classList.contains('conflict')&&await confirmAction({title:'Record a mismatch?',body:'This asset may not be expected here. Recording it does not move it; you can move it afterwards.',confirmLabel:'Record mismatch'})!==true)return;await withBusy($('auditVerifyBtn'),'Verifying…',async()=>verifyAudit(auditId,input.value,$('auditNote').value,{keepOpen:true}));});
       $('auditNotFoundBtn').addEventListener('click',async()=>{const selected=findSelected(input.value.trim());if(!selected?.expected)return toast('Select an expected asset to mark Not Found.','error');if(await confirmAction({title:'Mark as Not Found?',body:'The selected asset will be recorded as not found in this audit. You can change the result later.',confirmLabel:'Mark Not Found'})!==true)return;await withBusy($('auditNotFoundBtn'),'Recording…',async()=>verifyAudit(auditId,input.value,$('auditNote').value,{keepOpen:true,result:'Not Found'}));});
       $('auditCompleteBtn').addEventListener('click',async()=>{await completeAudit(auditId,$('auditCompleteBtn'));});
@@ -3338,6 +3355,14 @@
   }
 
   // A deliberate "Discard scan": confirm when the person edited anything, and drop its draft.
+  // Removes photos the phone stopped sharing, keeping everything the person typed.
+  function removeUnreadableScanPhotos(session){
+    if(state.recognitionSession!==session)return;
+    for(const p of session.photos.filter(x=>x.unreadable)){p.codeAbort?.abort();try{URL.revokeObjectURL(p.url);}catch(_){}}
+    session.photos=session.photos.filter(x=>!x.unreadable);session.matches=[];session._draftError=null;
+    showUniversalRecognition();if(session.photos.length){updateUniversalMatches();workflows?.persistScan(session);}
+    toast(session.photos.length?'Photo removed. Your details are kept.':'Photo removed. Add a new photo to continue; your details are kept.');
+  }
   async function discardScan(){
     const session=state.recognitionSession;
     if(session&&!session.locallySaved&&session.photos?.length){
@@ -3414,7 +3439,7 @@
     const hasPhotos=session.photos.length>0;
     const running=session.photos.some(x=>x.processing);
     const unresolved=proposal.hasUnresolved;
-    const photoHtml=session.photos.map((x,i)=>`<div class="v27-photo"><img src="${esc(x.url)}" alt="Source photo ${i+1}"><div><b>Image ${i+1}${workflows?.enabled()&&x.main?' · ★ Main':''}</b><small>${esc(x.processing?'Processing…':x.error?'Needs review':x.ai?'AI + OCR':x.observation?'OCR':'No OCR text')}</small></div><button type="button" class="v27-remove" data-remove-image="${esc(x.id)}" title="Remove this source" ${running?'disabled':''}>×</button></div>`).join('');
+    const photoHtml=session.photos.map((x,i)=>`<div class="v27-photo"><img src="${esc(x.url)}" alt="Source photo ${i+1}"><div><b>Image ${i+1}${workflows?.enabled()&&x.main?' · ★ Main':''}</b><small${x.unreadable?' class="photo-unreadable"':''}>${esc(x.unreadable?'Can’t be read. Remove it and take it again':x.processing?'Processing…':x.error?'Needs review':x.ai?'AI + OCR':x.observation?'OCR':'No OCR text')}</small></div><button type="button" class="v27-remove" data-remove-image="${esc(x.id)}" title="Remove this source" ${running?'disabled':''}>×</button></div>`).join('');
     const core=[...(workflows?.enabled()?[['asset_name','Asset name']]:[]),['category','Category'],['brand','Brand'],['model','Model'],['serial','Serial number']].map(([k,label])=>{
       const original=proposal.fields[k];
       return `<label class="v27-edit-field"><span>${label}</span><input data-universal-field="${k}" value="${esc(incoming[k]||'')}" placeholder="Not detected — enter manually"><small>${Object.hasOwn(session.overrides,k)?'Manual entry':original?.evidence?`Image ${esc(original.source_image.split('_')[1]||'?')} · ${esc(original.status)} · ${esc(original.evidence.slice(0,95))}`:'Not detected; manual confirmation required'}</small></label>`;
