@@ -7,9 +7,14 @@
   function dialog(label,onClose=()=>{}){
     const d=document.createElement('dialog');d.className='asset-media-dialog';d.setAttribute('aria-label',label);
     let disposed=false;
-    const dispose=()=>{if(disposed)return;disposed=true;onClose();d.remove();};
+    const dispose=()=>{if(disposed)return;disposed=true;for(const notice of d.querySelectorAll('.dialog-notifications>[data-inline]'))document.body.append(notice);d.remove();document.dispatchEvent(new Event('asset-dialog-change'));onClose();};
     d.addEventListener('close',dispose);d.addEventListener('cancel',dispose);
-    document.body.append(d);return {element:d,open:()=>d.showModal(),close:()=>{if(d.open)d.close();else dispose();},alive:()=>!disposed};
+    const notices=document.createElement('div');notices.className='dialog-notifications';
+    document.body.append(d);return {element:d,open:()=>{
+      d.firstElementChild.after(notices);
+      d.showModal();
+      document.dispatchEvent(new Event('asset-dialog-change'));
+    },close:()=>{if(d.open)d.close();else dispose();},alive:()=>!disposed};
   }
   function serial({onRead,active=()=>true,onOpen=()=>{},onClose=()=>{}}){
     onOpen();let stream,timer,reading=false;const abort=new AbortController();
@@ -38,9 +43,9 @@
   }
   function preview({items,index=0,onMain=null,onRemove=null,onReplace=null,active=()=>true}){
     let at=index,generation=0;const view=dialog('Image preview'),d=view.element;
-    d.innerHTML='<div class="asset-media-head"><div><b>Image preview</b><small class="preview-caption"></small></div><button type="button" class="iconbtn" aria-label="Close image preview">×</button></div><div class="asset-preview-frame"><img alt="Asset photograph"><span role="status"></span></div><div class="asset-media-actions"><button class="btn light" data-previous aria-label="Previous image">‹</button><button class="btn light" data-main>☆ Set as main</button><button class="btn light" data-replace>Replace</button><button class="btn light" data-remove>Remove</button><button class="btn light" data-next aria-label="Next image">›</button></div>';
+    d.innerHTML='<div class="asset-media-head"><div><b>Image preview</b><small class="preview-caption"></small></div><button type="button" class="iconbtn" aria-label="Close image preview">×</button></div><div class="asset-preview-frame"><img alt="Asset photograph"><span role="status"></span></div><div class="asset-media-actions"><button class="btn light" data-previous aria-label="Previous image">‹</button><button class="btn light" data-main>Set main</button><button class="btn light" data-replace>Replace</button><button class="btn light" data-remove>Remove</button><button class="btn light" data-next aria-label="Next image">›</button></div>';
     const image=d.querySelector('img'),message=d.querySelector('[role=status]'),main=d.querySelector('[data-main]'),remove=d.querySelector('[data-remove]');
-    const paint=async()=>{if(!active()||!items.length){view.close();return;}const ticket=++generation;at=Math.min(at,items.length-1);const item=items[at];image.removeAttribute('src');message.textContent='Loading image…';d.querySelector('.preview-caption').textContent=(at+1)+' of '+items.length+' · '+(item.caption||'Asset photo');main.hidden=!onMain;main.textContent=item.main?'★ Main image':'☆ Set as main';main.disabled=!!item.main||item.mainDisabled;remove.hidden=!onRemove||item.removable===false;d.querySelector('[data-replace]').hidden=!onReplace||item.replaceable===false;d.querySelector('[data-previous]').disabled=at===0;d.querySelector('[data-next]').disabled=at===items.length-1;
+    const paint=async()=>{if(!active()||!items.length){view.close();return;}const ticket=++generation;at=Math.min(at,items.length-1);const item=items[at];image.removeAttribute('src');message.textContent='Loading image…';d.querySelector('.preview-caption').textContent=(at+1)+' of '+items.length+' · '+(item.caption||'Asset photo');main.hidden=!onMain;main.textContent=item.main?'★ Main image':'Set main';main.disabled=!!item.main||item.mainDisabled;remove.hidden=!onRemove||item.removable===false;d.querySelector('[data-replace]').hidden=!onReplace||item.replaceable===false;d.querySelector('[data-previous]').disabled=at===0;d.querySelector('[data-next]').disabled=at===items.length-1;
       try{const src=item.src||await item.load();if(!view.alive()||ticket!==generation||!active())return;image.src=src;message.textContent='';}catch{if(view.alive()&&ticket===generation)message.textContent='Image unavailable. Close and retry when connected.';}
     };
     d.querySelector('.iconbtn').onclick=view.close;d.querySelector('[data-previous]').onclick=()=>{at--;void paint();};d.querySelector('[data-next]').onclick=()=>{at++;void paint();};

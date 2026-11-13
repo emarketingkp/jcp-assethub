@@ -1,0 +1,32 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const path=require('node:path');
+const local=require('../public/local-storage.js');
+test('photo persistence uses owned bytes and restores named files without losing nested metadata',async()=>{
+  const file=new File(['camera photo'],'label.jpg',{type:'image/jpeg',lastModified:1234});
+  const row={id:'draft',photos:[{file,type:'serial_label',main:true}],extras:[{photos:[{file}]}],values:{serial:'0001'}};
+  const encoded=await local.encode(row);
+  assert(encoded.photos[0].file.bytes instanceof ArrayBuffer);
+  assert(!(encoded.photos[0].file instanceof Blob));
+  const restored=local.decode(structuredClone(encoded));
+  assert.equal(await restored.photos[0].file.text(),'camera photo');
+  assert.equal(restored.photos[0].file.name,'label.jpg');
+  assert.equal(restored.photos[0].file.lastModified,1234);
+  assert.equal(restored.photos[0].file.type,'image/jpeg');
+  assert.equal(restored.photos[0].main,true);
+  assert.equal(await restored.extras[0].photos[0].file.text(),'camera photo');
+  assert.equal(restored.values.serial,'0001');
+  assert.equal(row.photos[0].file,file);
+});
+test('old Blob drafts remain readable and failed photo reads can be retried',async()=>{
+  const old={photos:[{file:new Blob(['old'])}]};
+  assert.equal(await local.decode(old).photos[0].file.text(),'old');
+  let reads=0;
+  const file=new Blob(['retry']);
+  file.arrayBuffer=async()=>{if(++reads===1)throw new Error('Unreadable photo');return new TextEncoder().encode('retry').buffer;};
+  await assert.rejects(local.encode({file}),/Unreadable/);
+  const stored=await local.encode({file});
+  await local.encode({file});
+  assert.equal(reads,2);
+  assert.equal(await local.decode(stored).file.text(),'retry');
+});

@@ -1,8 +1,8 @@
-const CACHE = 'jcp-assethub-v2.9.0-unified-assets-1';
+const CACHE = 'jcp-assethub-v2.10.5-photo-access-1';
 const CORE = [
-  './','./index.html','./app.css','./store.js','./api-config.js','./api.js','./image.js','./code-scanner.js','./recognition-v27.js','./app.js',
+  './','./index.html','./app.css','./asset-detail-view.css','./asset-detail-view.js','./store.js','./api-config.js','./api.js','./image.js','./code-scanner.js','./recognition-v27.js','./app.js',
   './manifest.webmanifest','./assets/icon-192.png','./assets/icon-512.png',
-  './asset-review.js','./asset-workflows.js','./asset-editor.js','./asset-media.js','./asset-drafts.js','./save-queue.js','./photo-picker.js','./input-assist.js','./data/input-knowledge.json','./asset-groups.js','./group-entry.js','./connection-status.js','./assets/connection-check.png'
+  './autosuggest.js','./asset-review.js','./asset-workflows.js','./asset-editor.js','./asset-media.js','./local-storage.js','./asset-drafts.js','./save-queue.js','./photo-picker.js','./input-assist.js','./data/input-knowledge.json','./asset-groups.js','./group-entry.js','./connection-status.js','./assets/connection-check.png'
 ];
 
 self.addEventListener('install', event => {

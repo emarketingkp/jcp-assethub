@@ -96,5 +96,22 @@
     return new File([blob], name, {type:'image/jpeg'});
   }
 
-  window.AssetImage = {fileToDataUrl,resize,blobToBase64,prepareForStorage,prepareForOcr,videoFrameToFile,canCaptureStill,captureStill};
+  // Android grants access to a picked or captured photo only briefly. Copy its bytes into
+  // memory at once, so drafts, the save queue and uploads can still read it later.
+  async function ownCopy(file){
+    if(!file||file._owned)return file;
+    try{
+      const copy=new File([await file.arrayBuffer()],file.name||'photo.jpg',{type:file.type||'image/jpeg',lastModified:file.lastModified||Date.now()});
+      copy._owned=true;return copy;
+    }catch(err){
+      throw new Error('PHOTO_UNREADABLE: The phone did not let AssetHub read this photo. Take or choose it again.');
+    }
+  }
+  // Indexes of photos the phone no longer lets the app read.
+  async function unreadablePhotos(files){
+    const checks=await Promise.all(Array.from(files||[]).map(async(file,i)=>{if(!file||file._owned)return -1;try{await file.slice(0,16).arrayBuffer();return -1;}catch{return i;}}));
+    return new Set(checks.filter(i=>i>=0));
+  }
+  async function ownCopies(files){return Promise.all(Array.from(files||[]).map(ownCopy));}
+  window.AssetImage = {ownCopy,ownCopies,unreadablePhotos,fileToDataUrl,resize,blobToBase64,prepareForStorage,prepareForOcr,videoFrameToFile,canCaptureStill,captureStill};
 })();

@@ -57,6 +57,21 @@
     }
     return entries;
   }
+  // Peripherals live under their main asset. A child only folds when its main asset is a
+  // live register row; orphans keep their own row. A matching child brings its main asset in.
+  function foldPeripherals(rows,index){
+    const threads=new Map(),hostOf=a=>{if(!a.parent_asset_id||a.status==='Merged')return null;const main=index.byId.get(a.parent_asset_id);return main&&!['Retired','Merged'].includes(main.status)?main:null;};
+    for(const asset of index.all){const main=hostOf(asset);if(main){if(!threads.has(main.asset_id))threads.set(main.asset_id,[]);threads.get(main.asset_id).push(asset);}}
+    const out=[],seen=new Set(),matched=new Map();let attached=0;
+    for(const asset of uniqueAssets(rows)){
+      const main=hostOf(asset),row=main||asset;
+      if(main){attached++;if(!matched.has(main.asset_id))matched.set(main.asset_id,new Set());matched.get(main.asset_id).add(asset.asset_id);}
+      if(!seen.has(row.asset_id)){seen.add(row.asset_id);out.push(row);}
+    }
+    return {rows:out,threads,matched,attached};
+  }
+  // "1 of 4" position among identical models, for a small note on the row.
+  function modelSiblings(asset,index){const key=index.keys.get(asset.asset_id)?.model;return key?(index.models.get(key)||[]).filter(a=>a.status!=='Merged').length:0;}
   function template(a){
     // Whitelist shared product details. No serial, IDs, photos, assignment or history.
     return {category:a.category_name||a.category||'',category_id:a.category_id||'',brand:known(a.brand)?text(a.brand):'',model:known(a.model)?text(a.model):'',specifications:sharedSpecifications(a.specifications)};
@@ -86,5 +101,5 @@
     if(serial&&other&&serial!==other)return 'different_unit';
     return 'similar';
   }
-  return {modelKey,unmarkedKey,sharedSpecifications,uniqueAssets,buildIndex,project,template,duplicateSerials,parseSerialList,serialKey,matchKind};
+  return {modelKey,unmarkedKey,sharedSpecifications,uniqueAssets,buildIndex,project,foldPeripherals,modelSiblings,template,duplicateSerials,parseSerialList,serialKey,matchKind};
 });

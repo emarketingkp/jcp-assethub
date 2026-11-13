@@ -1,8 +1,8 @@
 {
-  "version": "2.9.0",
-  "build": "2.9.0-unified-assets-1",
+  "version": "2.10.5",
+  "build": "2.10.5-photo-access-1",
   "released": null,
   "status": "preview",
-  "name": "Complete asset workflows",
-  "notes": "Complete shared editor, optional asset names, contextual reusable choices, scoped drafts, serial popup and compact main-image previews. Generic matching units remain distinct from linked assets. Requires updated Code.gs and AssetGroups.gs plus additive setupAssetGrouping. Not deployed."
+  "name": "Photo access and save recovery",
+  "notes": "Copy photos when picked, report an unreadable photo once with a one-tap remove, retry connection failures automatically and show plain error messages."
 }

@@ -1,5 +1,5 @@
 /* Durable scoped operations. Sign-in tokens are read at send time, never stored here. Guest proof grants access only to its own new-asset onboarding. */
-(function(root,factory){const api=factory();if(typeof module==='object'&&module.exports)module.exports=api;if(root)root.AssetSaveQueue=api;})(typeof window!=='undefined'?window:null,()=>{
+(function(root,factory){const api=factory(typeof module==='object'&&module.exports?require('./local-storage.js'):root.AssetLocalStorage);if(typeof module==='object'&&module.exports)module.exports=api;if(root)root.AssetSaveQueue=api;})(typeof window!=='undefined'?window:null,(local)=>{
   function database(){
     let opened;
     const open=()=>opened||(opened=new Promise((resolve,reject)=>{
@@ -12,7 +12,7 @@
       const tx=db.transaction('operations',mode),req=action(tx.objectStore('operations'));
       tx.oncomplete=()=>resolve(req.result);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('Local save aborted'));
     });}
-    return {put:r=>transaction('readwrite',s=>s.put(r)),putMany:rows=>transaction('readwrite',s=>{for(const row of rows)s.put(row);return {}; }),all:()=>transaction('readonly',s=>s.getAll())};
+    return {put:async r=>{const stored=await local.encode(r);return transaction('readwrite',s=>s.put(stored));},putMany:async rows=>{const stored=await local.encode(rows);return transaction('readwrite',s=>{for(const row of stored)s.put(row);return {}; });},all:async()=>local.decode(await transaction('readonly',s=>s.getAll())),removeMany:ids=>transaction('readwrite',s=>{for(const id of ids)s.delete(id);return {};})};
   }
   function create({storage=database(),scope,api,online=()=>navigator.onLine,photosAllowed=()=>true,onChange=()=>{},onAsset=()=>{},onAuthRequired=()=>{},guestKey='',legacyScope='',legacyScopes=[],protocol=1,coordinationScope=scope,active=()=>true,prepare=async file=>{
     const {full,thumb}=await AssetImage.prepareForStorage(file);
@@ -55,9 +55,16 @@
         return old.find(r=>r.id===d.id)||{...d,scope,protocol,batchOrder,params:structuredClone(d.params),evidence:structuredClone(d.evidence||null),guestKey,photos:(d.photos||[]).map((p,i)=>({...p,id:d.id+'-photo-'+i})),parent:d.parent||'',anchor:d.anchor||null,created:Date.now(),state:'Saving details',asset:null,error:''};
       });await storage.putMany(group);notify(await rows());void pump();return group;
     }
+    const retryDelay=attempts=>Math.min(10*60*1000,30*1000*2**Math.max(0,(attempts||1)-1));
+    async function reviveTransient(){
+      let changed=false;
+      for(const r of await rows())if(r.state==='Retry'&&transientError(r.error)&&Date.now()-(r.failedAt||0)>=retryDelay(r.attempts)){r.state=r.asset?'Uploading photos':'Saving details';r.error='';await storage.put(r);changed=true;}
+      if(changed)notify(await rows());
+    }
     async function pump(){
       if(running||paused||!active()||!online())return;running=true;
       try{supported();await coordinate(async()=>{
+        await reviveTransient();
         while(active()&&online()){
           const all=await rows();
           // Always drain ready metadata before even one background image.
@@ -132,11 +139,34 @@
               row.state=row.photos.every(p=>p.uploaded)?'Saved':'Uploading photos';await persist(row);
               if(active())onAsset(row.asset,row,false);
             }
-          }catch(err){row.state='Retry';row.error=String(err.message||err);await persist(row);if(/AUTH|SESSION|sign.in|permission|USER_DISABLED/i.test(row.error)){paused=true;if(/AUTH|SESSION|sign.in|USER_DISABLED/i.test(row.error)&&active())onAuthRequired(row.error);break;}}
+          }catch(err){row.state='Retry';row.error=String(err.message||err);row.attempts=(row.attempts||0)+1;row.failedAt=Date.now();await persist(row);
+            // Only a lost session pauses the whole queue; a permission error blocks just this row.
+            if(authError(row.error)){paused=true;if(active())onAuthRequired(row.error);break;}}
         }
       });}catch(err){notify(null,String(err.message||err));}finally{running=false;if(active()){try{notify(await rows());}catch{}}}
     }
-    async function retry(id){paused=false;const row=(await rows()).find(r=>r.id===id);if(!row)return;row.state=row.asset?'Uploading photos':'Saving details';row.error='';await persist(row);void pump();}
+    async function retry(id){paused=false;const row=(await rows()).find(r=>r.id===id);if(!row)return;row.state=row.asset?'Uploading photos':'Saving details';row.error='';row.attempts=0;await persist(row);void pump();}
+    // Opens a failed item for editing. If the server did apply the earlier request, resending
+    // changed data under the same request ID is refused rather than duplicated.
+    async function reopen(id){const row=(await rows()).find(r=>r.id===id);if(!row||row.asset)throw new Error('This item is already saved.');delete row.payload;delete row.action;row.state='Retry';row.error='OPERATION_NOT_STARTED: Reopened for editing.';await persist(row);return row;}
+    // Rows that depend on this one (linked children, main-photo choices) go with it.
+    const dependents=(id,all)=>{const out=new Set([id]);let grew=true;while(grew){grew=false;for(const r of all)if(!out.has(r.id)&&(out.has(r.parent)||out.has(r.photoParent))){out.add(r.id);grew=true;}}return [...out];};
+    // A row is "sent" when its exact request may already have reached the server without a confirmed reply.
+    const sentUnconfirmed=r=>!!r.payload&&!r.asset&&!/(?:BATCH|OPERATION)_NOT_STARTED:/.test(r.error||'');
+    async function remove(id,{force=false}={}){
+      const all=await rows(),row=all.find(r=>r.id===id);if(!row)return [];
+      const ids=dependents(id,all),risky=ids.map(x=>all.find(r=>r.id===x)).filter(sentUnconfirmed);
+      if(risky.length&&!force)throw new Error('SENT_UNCONFIRMED: This change may already be saved on the server. Check the asset register before discarding.');
+      if(!storage.removeMany)throw new Error('This browser cannot remove pending items.');
+      await storage.removeMany(ids);notify(await rows());void pump();return ids;
+    }
+    // Keep the saved asset and drop the photos that could not upload.
+    async function finishWithoutPhotos(id){const row=(await rows()).find(r=>r.id===id);if(!row?.asset)throw new Error('Only a saved asset can skip its remaining photos.');row.photos=row.photos.filter(p=>p.uploaded);row.state='Saved';row.error='';await persist(row);void pump();return row;}
+    async function discardPhoto(id,photoId){const row=(await rows()).find(r=>r.id===id);if(!row)return null;const photo=row.photos.find(p=>p.id===photoId);if(!photo||photo.uploaded)throw new Error('This photo has already uploaded.');row.photos=row.photos.filter(p=>p.id!==photoId);if(row.asset&&row.photos.every(p=>p.uploaded)){row.state='Saved';row.error='';}await persist(row);void pump();return row;}
+    // A child waiting on a failed main asset can still be saved on its own.
+    async function unlink(id){const row=(await rows()).find(r=>r.id===id);if(!row||row.asset||row.payload)throw new Error('This item has already been sent.');row.parent='';row.anchor=null;row.setName='';row.setId='';if(row.state==='Retry'){row.state='Saving details';row.error='';}await persist(row);void pump();return row;}
+    // Confirmed rows are kept briefly so open screens can resolve them, then dropped with their blobs.
+    async function prune(maxAge=24*60*60*1000){if(!storage.removeMany)return;const all=await rows(),cutoff=Date.now()-maxAge,old=all.filter(r=>r.state==='Saved'&&r.created<cutoff&&!all.some(c=>c.state!=='Saved'&&(c.parent===r.id||c.photoParent===r.id)));if(old.length){await storage.removeMany(old.map(r=>r.id));notify(await rows());}}
     async function enqueuePhotos({id,asset,photos}){
       supported();
       const existing=(await rows()).find(r=>r.id===id);if(existing)return existing;
@@ -153,12 +183,16 @@
     }
     async function revise(id,params,photos,link,evidence){
       const row=(await rows()).find(r=>r.id===id);
-      if(!row||row.asset||!/(?:BATCH|OPERATION)_NOT_STARTED:/.test(row.error))throw new Error('Reconcile this operation before changing its draft.');
+      // Editable while the server has certainly not applied it: never sent, or explicitly not started.
+      if(!row||row.asset||row.payload&&!/(?:BATCH|OPERATION)_NOT_STARTED:/.test(row.error))throw new Error('Reconcile this operation before changing its draft.');
       row.protocol=protocol;if(link?.kind)row.kind=link.kind;
       if(link)Object.assign(row,{parent:link.parent||'',setName:link.setName||'',setId:link.setId||'',anchor:link.anchor||null});
       row.params=structuredClone(params);if(evidence!==undefined)row.evidence=structuredClone(evidence);row.photos=photos.map((p,i)=>({...p,id:id+'-photo-'+i}));delete row.payload;delete row.action;row.error='';row.state='Saving details';await persist(row);void pump();return row;
     }
-    return {enqueue,enqueueMany,enqueuePhotos,enqueueMain,rows,pump,retry,revise,migrateLegacy,scope};
+    return {enqueue,enqueueMany,enqueuePhotos,enqueueMain,rows,pump,retry,revise,reopen,remove,finishWithoutPhotos,discardPhoto,unlink,prune,sentUnconfirmed,migrateLegacy,scope};
   }
-  return {create};
+  const authError=message=>/AUTH_REQUIRED|SESSION_EXPIRED|USER_DISABLED|sign.in/i.test(String(message||''));
+  // Errors worth retrying unchanged; anything else needs review or discarding.
+  const transientError=message=>/network|fetch|timed? ?out|timeout|offline|LOCK_TIMEOUT|lock|temporar|too many|rate|quota|5\d\d|unavailable|Service invoked/i.test(String(message||''))&&!/NOT_STARTED|DUPLICATE|ITEM_CHANGED|PERMISSION|CONFLICT|REUSED|not found|NOT_READY/i.test(String(message||''));
+  return {create,authError,transientError};
 });

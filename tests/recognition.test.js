@@ -26,3 +26,8 @@ assert(!ai.identifiers.some(x=>x.value==='999999'));
 assert(ai.attributes.some(x=>x.key==='ssd'));
 assert.equal(R.consolidate([]).sourceCount,0);
 console.log('PASS: universal recognition tests (multiple photos, typed IDs, evidence, conflicts, overrides, fallback)');
+
+// Specification lines convert to editable rows and back without losing plain lines.
+const specRows=R.parseSpecLines(['RAM: 8 GB','CPU: i5: 12th gen','Made in Malaysia','',''].join(String.fromCharCode(10)));
+assert.deepEqual(specRows,[{label:'RAM',value:'8 GB'},{label:'CPU',value:'i5: 12th gen'},{label:'',value:'Made in Malaysia'}]);
+assert.deepEqual(R.formatSpecLines([...specRows,{label:' ',value:' '}]).split(String.fromCharCode(10)),['RAM: 8 GB','CPU: i5: 12th gen','Made in Malaysia']);

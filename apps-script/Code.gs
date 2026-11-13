@@ -17,12 +17,16 @@ const SCRIPT_PROPERTIES = PropertiesService.getScriptProperties();
 const SPREADSHEET_ID = String(SCRIPT_PROPERTIES.getProperty('SPREADSHEET_ID') || '').trim();
 const DRIVE_FOLDER_ID = String(SCRIPT_PROPERTIES.getProperty('DRIVE_FOLDER_ID') || '').trim();
 const AUTH_REQUIRED = true;
-const APP_VERSION = '2.9.0';
+const APP_VERSION = '2.10.0';
 const SESSION_HOURS = 12;
 const LEGACY_IMPORT_SOURCE = 'JCP DEVICES LIST - SUMMARRY.csv';
 const LEGACY_IMPORT_TOTAL = 83;
 const BOOT_CACHE_SECONDS = 90;
+const DETAIL_LOG_ROWS = 2000;
+const ASSET_STATUSES = ['Active','Spare','Faulty','Under Repair','Missing','Retired'];
+const MAINTENANCE_STATUSES = ['Open','In Progress','Waiting Parts','Completed','Cancelled'];
 
+let _requestStart = 0;
 let _spreadsheetCache = null;
 let _rowCache = {};
 
@@ -62,7 +66,7 @@ const SCHEMA = {
   Sessions: ['session_id','token_hash','email','role','expires_at','created_at','revoked_at'],
   Maintenance: [
     'maintenance_id','asset_id','issue','maintenance_type','status','reported_by','reported_at',
-    'assigned_to','resolution','cost','completed_at','updated_at'
+    'assigned_to','resolution','cost','completed_at','updated_at','archived_at'
   ],
   Audits: ['audit_id','site_id','area_id','name','started_at','started_by','status','completed_at'],
   AuditEntries: ['entry_id','audit_id','asset_id','result','checked_by','checked_at','notes'],
@@ -117,24 +121,28 @@ function setupDatabase() {
     {field_id:'CF-WARRANTY', label:'Warranty Expiry', field_type:'date', required:false, options_json:'', active:true, sort_order:10, created_at:now, updated_at:now}
   ], 'field_id');
 
-  seedDefaultAdmin_();
+  const admin = seedDefaultAdmin_();
   invalidateDataCache_();
-  return 'JCP AssetHub V1.9.0 database is ready.';
+  return 'JCP AssetHub ' + APP_VERSION + ' database is ready.' + (admin ? '' : ' No Admin exists yet: set Script Properties INITIAL_ADMIN_USERNAME and INITIAL_ADMIN_PASSWORD, then run setupDatabase again.');
 }
 
+// The first Admin comes from Script Properties; no credentials live in source code.
 function seedDefaultAdmin_() {
-  const existing = findUserByLogin_('printjc');
-  if (existing) return existing;
+  const existingAdmin = listObjects_(SHEETS.USERS).find(u=>truthy_(u.active) && String(u.role).toUpperCase()==='ADMIN');
+  if (existingAdmin) return existingAdmin;
+  const username = String(SCRIPT_PROPERTIES.getProperty('INITIAL_ADMIN_USERNAME') || '').toLowerCase().trim();
+  const password = String(SCRIPT_PROPERTIES.getProperty('INITIAL_ADMIN_PASSWORD') || '');
+  if (!username || password.length < 8) return null;
   const salt = Utilities.getUuid();
   const now = new Date().toISOString();
   const row = {
     user_id:'USR-' + shortId_(),
-    username:'printjc',
+    username:username,
     email:'',
     name:'JCP Administrator',
     role:'ADMIN',
     active:true,
-    password_hash:hash_(salt + 'kitaprint'),
+    password_hash:hash_(salt + password),
     password_salt:salt,
     created_at:now,
     updated_at:now
@@ -164,6 +172,7 @@ function bootstrapAdmin(email, password, name) {
 }
 
 function doGet(e) {
+  _requestStart = Date.now();
   try {
     const p = (e && e.parameter) || {};
     const action = p.action || 'ping';
@@ -181,13 +190,21 @@ function doGet(e) {
     if (action === 'getAsset') return json_({success:true, asset:getAssetBundle_(p.asset_id, user), user:user});
     if (action === 'assetSummaryPage') return json_(assetSummaryPage_(p));
     if (action === 'assetDetailsBatch') return json_(assetDetailsBatch_(p,user));
-    if (action === 'listMaintenance') return json_({success:true, rows:listMaintenance_(), user:user});
+    if (action === 'listMaintenance') return json_({success:true, rows:listMaintenance_(truthy_(p.include_archived)), user:user});
     if (action === 'listAudits') return json_({success:true, rows:listAudits_(), user:user});
     if (action === 'getAuditRoster') return json_({success:true, roster:getAuditRoster_(p.audit_id, requireUser_(p.token,'STAFF'))});
+    if (action === 'adminReferences') return json_({success:true, references:adminReferences_(p.token)});
     if (action === 'listMovements') return json_({success:true, rows:listObjects_(SHEETS.MOVEMENTS).slice(-300).reverse(), user:user});
-    if (action === 'activity') return json_({success:true, rows:listObjects_(SHEETS.ACTIVITY).slice(-80).reverse(), user:user});
+    if (action === 'activity') return json_({success:true, rows:tailObjects_(SHEETS.ACTIVITY,80).reverse(), user:user});
     if (action === 'getImageData') return json_({success:true, data:getImageData_(p.file_id), user:user});
-    if (action === 'report') return json_({success:true, report:buildReport_(p), user:user});
+    if (action === 'report') {
+      // Activity (usernames, roles) and repair costs are operational detail, not public reading.
+      const signedIn = roleAtLeast_(user,'STAFF');
+      if (!signedIn && String(p.type||'')==='activity') throw new Error('AUTH_REQUIRED: Sign in as Staff to view the activity report.');
+      const report = buildReport_(p);
+      if (!signedIn && report && Array.isArray(report.rows)) { report.rows = report.rows.map(r=>{ const c=Object.assign({},r); delete c.cost; delete c.reported_by; delete c.checked_by; return c; }); if (report.summary) delete report.summary.total_cost; }
+      return json_({success:true, report:report, user:user});
+    }
     return json_({success:false, error:'Unknown GET action: ' + action});
   } catch (err) {
     return json_({success:false, error:String(err.message || err)});
@@ -195,6 +212,7 @@ function doGet(e) {
 }
 
 function doPost(e) {
+  _requestStart = Date.now();
   const p = (e && e.parameter) || {};
   const action = p.action || '';
   try {
@@ -229,18 +247,26 @@ function doPost(e) {
     if (action === 'saveAssetBatch') return postReply_(p, {success:true, result:saveAssetBatch_(p,user), user:user});
     if (action === 'interpretOcr') return postReply_(p, {success:true, result:interpretOcrFields_(p.text,p.base_fields_json,user),user:user});
     if (action === 'interpretOcrUniversal') return postReply_(p, {success:true, result:interpretUniversalOcr_(p.text,p.base_fields_json,p.source_image,user),user:user});
-    if (action === 'createMaintenance') return postReply_(p, {success:true, row:createMaintenance_(p, user), user:user});
-    if (action === 'updateMaintenance') return postReply_(p, {success:true, row:updateMaintenance_(p, user), user:user});
-    if (action === 'startAudit') return postReply_(p, {success:true, row:startAudit_(p, user), user:user});
+    if (action === 'createMaintenance') return postReply_(p, {success:true, row:withAssetWriteLock_(()=>createMaintenance_(p, user)), user:user});
+    if (action === 'updateMaintenance') return postReply_(p, {success:true, row:withAssetWriteLock_(()=>updateMaintenance_(p, user)), user:user});
+    if (action === 'startAudit') return postReply_(p, {success:true, row:withAssetWriteLock_(()=>startAudit_(p, user)), user:user});
     if (action === 'verifyAuditAsset') return postReply_(p, {success:true, row:verifyAuditAsset_(p, user), user:user});
+    if (action === 'cancelAudit') return postReply_(p, {success:true, row:cancelAudit_(p, user), user:user});
+    if (action === 'renameAudit') return postReply_(p, {success:true, row:renameAudit_(p, user), user:user});
+    if (action === 'resetAuditEntry') return postReply_(p, {success:true, row:resetAuditEntry_(p, user), user:user});
+    if (action === 'archiveMaintenance') return postReply_(p, {success:true, row:archiveMaintenance_(p, user, true), user:user});
+    if (action === 'restoreMaintenance') return postReply_(p, {success:true, row:withAssetWriteLock_(()=>archiveMaintenance_(p, user, false)), user:user});
     if (action === 'completeAudit') return postReply_(p, {success:true, row:completeAudit_(p.audit_id, user), user:user});
     if (action === 'updateAsset') return postReply_(p, {success:true, asset:withAssetWriteLock_(()=>updateAsset_(p, user)), user:user});
     if (action === 'setMainImage') return postReply_(p,{success:true,asset:withAssetWriteLock_(()=>setMainImage_(p,user)),user:user});
     if (action === 'reconcileAsset') return postReply_(p, {success:true, asset:withAssetWriteLock_(()=>reconcileAsset_(p, user)), user:user});
+    if (action === 'unmergeAsset') return postReply_(p, {success:true, result:withAssetWriteLock_(()=>unmergeAsset_(p, user)), user:user});
     if (action === 'mergeAssets') return postReply_(p, {success:true, result:withAssetWriteLock_(()=>mergeAssets_(p, user)), user:user});
 
     // Destructive/configuration actions require Admin.
     requireRole_(user, 'ADMIN');
+    if (action === 'deleteAsset') return postReply_(p, {success:true, deleted_asset_id:withAssetWriteLock_(()=>deleteAsset_(p, user)), user:user});
+    if (action === 'restoreAsset') return postReply_(p, {success:true, asset:withAssetWriteLock_(()=>restoreAsset_(p, user)), user:user});
     if (action === 'retireAsset') return postReply_(p, {success:true, asset:withAssetWriteLock_(()=>retireAsset_(p.asset_id, user)), user:user});
     if (action === 'deleteImage') return postReply_(p, {success:true, deleted:withAssetWriteLock_(()=>deleteImage_(p.image_id, user)), user:user});
     if (action === 'replaceImage') return postReply_(p, {success:true, image:withAssetWriteLock_(()=>replaceImage_(p, user)), user:user});
@@ -262,6 +288,11 @@ function doPost(e) {
   }
 }
 
+function assetFeatures_() {
+  const grouping = typeof groupingFeatures_ === 'function' ? groupingFeatures_() : {asset_groups:0};
+  return Object.assign({},grouping,{asset_delete:1});
+}
+
 function bootstrapPayload_(token) {
   const user = optionalUser_(token);
   const authenticated = String(user.role || '').toUpperCase() !== 'GUEST';
@@ -274,7 +305,7 @@ function bootstrapPayload_(token) {
     guest_can_add:true,
     authenticated:authenticated,
     version:APP_VERSION,
-    features:typeof groupingFeatures_==='function'?groupingFeatures_():{asset_groups:0},
+    features:assetFeatures_(),
     ai_ocr_enabled:!!String(SCRIPT_PROPERTIES.getProperty('GROQ_API_KEY')||'').trim(),
     user:user,
     references:Object.assign({}, base.references, {users:users})
@@ -285,7 +316,7 @@ function bootstrapBase_() {
   const cache = CacheService.getScriptCache();
   const cacheKey = 'assethub_boot_base_' + APP_VERSION;
   try {
-    const cached = cache.get(cacheKey);
+    const cached = cacheGetLarge_(cacheKey);
     if (cached) return JSON.parse(cached);
   } catch (_) {}
 
@@ -293,15 +324,15 @@ function bootstrapBase_() {
   const areas = activeOnly_(listObjects_(SHEETS.AREAS));
   const categories = activeOnly_(listObjects_(SHEETS.CATEGORIES));
   const customFields = activeOnly_(listObjects_(SHEETS.CUSTOM_FIELDS)).sort((a,b)=>num_(a.sort_order)-num_(b.sort_order));
-  const rawAssets = listObjects_(SHEETS.ASSETS);
+  const rawAssets = listObjects_(SHEETS.ASSETS).filter(r=>r.status!=='Deleted');
   const maintenance = listObjects_(SHEETS.MAINTENANCE);
   const audits = listObjects_(SHEETS.AUDITS);
-  const activity = listObjects_(SHEETS.ACTIVITY).slice(-25).reverse();
+  const activity = tailObjects_(SHEETS.ACTIVITY,25).reverse();
 
   const brands = unique_(rawAssets.map(a=>a.brand).filter(Boolean)).sort();
   const assignees = unique_(rawAssets.map(a=>a.assigned_to).filter(Boolean)).sort();
   const locations = unique_(rawAssets.map(a=>a.exact_location).filter(Boolean)).sort();
-  const openRepairs = maintenance.filter(r=>!['Completed','Cancelled'].includes(String(r.status)));
+  const openRepairs = maintenance.filter(r=>!r.archived_at&&!['Completed','Cancelled'].includes(String(r.status)));
   const warranty = warrantySummary_(rawAssets, customFields);
   const activeAudits = audits.filter(a=>String(a.status)==='In Progress');
 
@@ -327,8 +358,31 @@ function bootstrapBase_() {
     },
     legacy_import:{source:LEGACY_IMPORT_SOURCE,total:LEGACY_IMPORT_TOTAL,imported:importedLegacy,pending:Math.max(0,LEGACY_IMPORT_TOTAL-importedLegacy)}
   };
-  try { cache.put(cacheKey, JSON.stringify(base), BOOT_CACHE_SECONDS); } catch (_) {}
+  cachePutLarge_(cacheKey, JSON.stringify(base), BOOT_CACHE_SECONDS);
   return base;
+}
+
+// CacheService caps a single value, so large payloads are stored as numbered chunks.
+// The index key is written last and removed first, so a partial set is never read.
+const CACHE_CHUNK_CHARS = 45000;
+function cachePutLarge_(key, text, seconds) {
+  try {
+    const cache = CacheService.getScriptCache(), parts = {};
+    let count = 0;
+    for (let i = 0; i < text.length; i += CACHE_CHUNK_CHARS) parts[key + '_' + (count++)] = text.slice(i, i + CACHE_CHUNK_CHARS);
+    cache.putAll(parts, seconds);
+    cache.put(key + '_count', String(count), seconds);
+  } catch (_) {}
+}
+function cacheGetLarge_(key) {
+  const cache = CacheService.getScriptCache(), count = Number(cache.get(key + '_count') || 0);
+  if (!count) return '';
+  const keys = Array.from({length:count}, (_, i) => key + '_' + i), parts = cache.getAll(keys);
+  if (keys.some(k => parts[k] == null)) return '';
+  return keys.map(k => parts[k]).join('');
+}
+function cacheRemoveLarge_(key) {
+  try { CacheService.getScriptCache().remove(key + '_count'); } catch (_) {}
 }
 
 
@@ -353,16 +407,14 @@ function syncChanges_(p, user) {
   const mainImages = mainImageMap_();
 
   let changedAssets = rawAssets
-    .filter(r=>String(r.status)!=='Merged' && newer(r.updated_at || r.created_at))
+    .filter(r=>assetInRegister_(r) && newer(r.updated_at || r.created_at))
     .map(r=>decorateAsset_(r,catMap,siteMap,areaMap,mainImages));
   let assetCursor='';
   if(!sinceMs&&p.summary_page_size){
     const page=assetSummaryPage_({page_size:p.summary_page_size});
     changedAssets=page.assets;assetCursor=page.next_cursor;
   }
-  const removedAssetIds = rawAssets
-    .filter(r=>String(r.status)==='Merged' && newer(r.updated_at || r.retired_at))
-    .map(r=>r.asset_id);
+  const removedAssets = rawAssets.filter(r=>!assetInRegister_(r) && newer(r.updated_at || r.retired_at));
 
   const changedActivity = listObjects_(SHEETS.ACTIVITY).filter(r=>newer(r.timestamp)).slice(-200);
   const forceRelatedRefresh = changedActivity.some(r=>['MERGE_ASSET','MERGED_INTO'].includes(String(r.action)));
@@ -384,9 +436,9 @@ function syncChanges_(p, user) {
     const users = adminUsers.map(safeUser_);
     references = {
       sites:sites,areas:areas,categories:categories,custom_fields:customFields,
-      brands:unique_(rawAssets.map(a=>a.brand).filter(Boolean)).sort(),
-      assignees:unique_(rawAssets.map(a=>a.assigned_to).filter(Boolean)).sort(),
-      locations:unique_(rawAssets.map(a=>a.exact_location).filter(Boolean)).sort(),users:users
+      brands:unique_(rawAssets.filter(assetInRegister_).map(a=>a.brand).filter(Boolean)).sort(),
+      assignees:unique_(rawAssets.filter(assetInRegister_).map(a=>a.assigned_to).filter(Boolean)).sort(),
+      locations:unique_(rawAssets.filter(assetInRegister_).map(a=>a.exact_location).filter(Boolean)).sort(),users:users
     };
   }
 
@@ -395,12 +447,13 @@ function syncChanges_(p, user) {
     server_time:serverTime,
     version:APP_VERSION,
     ai_ocr_enabled:!!String(SCRIPT_PROPERTIES.getProperty('GROQ_API_KEY')||'').trim(),
-    features:typeof groupingFeatures_==='function'?groupingFeatures_():{asset_groups:0},
+    features:assetFeatures_(),
     authenticated:String(user && user.role || '').toUpperCase()!=='GUEST',
     write_auth_required:AUTH_REQUIRED,
     assets:changedAssets,
     asset_cursor:assetCursor,
-    removed_asset_ids:removedAssetIds,
+    removed_asset_ids:removedAssets.map(r=>r.asset_id),
+    deleted_asset_ids:rawAssets.filter(r=>r.status==='Deleted').map(r=>r.asset_id),
     maintenance:maintenance,
     activity:changedActivity,
     audits:audits,
@@ -412,16 +465,21 @@ function syncChanges_(p, user) {
 }
 
 // Stable key pagination includes every summary field used by the existing register.
+function assetInRegister_(asset) {
+  return !['Merged','Deleted'].includes(String(asset.status));
+}
+
 function assetSummaryPage_(p){
   const size=Math.min(250,Math.max(1,Number(p.page_size)||200));
-  const rows=listObjects_(SHEETS.ASSETS).filter(r=>r.status!=='Merged'&&String(r.asset_id)>String(p.after||'')).sort((a,b)=>String(a.asset_id)<String(b.asset_id)?-1:1);
+  const rows=listObjects_(SHEETS.ASSETS).filter(r=>assetInRegister_(r)&&String(r.asset_id)>String(p.after||'')).sort((a,b)=>String(a.asset_id)<String(b.asset_id)?-1:1);
   const cats=objectMap_(listObjects_(SHEETS.CATEGORIES),'category_id'),sites=objectMap_(listObjects_(SHEETS.SITES),'site_id'),areas=objectMap_(listObjects_(SHEETS.AREAS),'area_id'),images=mainImageMap_();
   return {success:true,assets:rows.slice(0,size).map(r=>decorateAsset_(r,cats,sites,areas,images)),next_cursor:rows.length>size?String(rows[size-1].asset_id):''};
 }
 function assetDetailsBatch_(p,user){
   let ids;try{ids=JSON.parse(p.ids_json);}catch(_){throw new Error('Invalid asset IDs.');}
   if(!Array.isArray(ids)||ids.length>12||ids.some(id=>typeof id!=='string'||id.length>80))throw new Error('Use up to 12 asset IDs.');
-  return {success:true,assets:ids.map(id=>{const a=getAssetBundle_(id,user);delete a.images;return a;})};
+  const deleted = new Set(listObjects_(SHEETS.ASSETS).filter(r=>r.status==='Deleted').map(r=>r.asset_id));
+  return {success:true,assets:ids.filter(id=>!deleted.has(id)).map(id=>{const a=getAssetBundle_(id,user);delete a.images;return a;})};
 }
 
 function listAssets_(p) {
@@ -436,7 +494,7 @@ function listAssets_(p) {
   const byId=objectMap_(rows,'asset_id');
 
   return rows
-    .filter(r => String(r.status) !== 'Merged')
+    .filter(assetInRegister_)
     .filter(r => includeRetired || String(r.status) !== 'Retired')
     .map(r => decorateAsset_(r, catMap, siteMap, areaMap, mainImages))
     .filter(r => !q || [r.asset_id,r.asset_name,r.category_name,r.brand,r.model,r.serial,r.site_name,r.area_name,r.assigned_to,r.status,r.parent_asset_id,(byId[r.parent_asset_id]||{}).asset_name,(byId[r.parent_asset_id]||{}).brand,(byId[r.parent_asset_id]||{}).model]
@@ -448,6 +506,7 @@ function listAssets_(p) {
 function getAssetBundle_(assetId, user) {
   if (!assetId) throw new Error('asset_id is required.');
   const raw = findByKey_(SHEETS.ASSETS,'asset_id',assetId);
+  if (raw?.status==='Deleted') throw new Error('ASSET_DELETED: This asset was deleted from the register.');
   if (!raw) throw new Error('Asset not found: ' + assetId);
   const asset = decorateAsset_(
     raw,
@@ -465,8 +524,9 @@ function getAssetBundle_(assetId, user) {
     options_json:d.options_json,value:valueMap[d.field_id] ? valueMap[d.field_id].value : ''
   }));
   asset.maintenance = listObjects_(SHEETS.MAINTENANCE).filter(r=>String(r.asset_id)===String(assetId)).reverse();
-  asset.movements = listObjects_(SHEETS.MOVEMENTS).filter(r=>String(r.asset_id)===String(assetId)).reverse();
-  asset.activity = listObjects_(SHEETS.ACTIVITY).filter(r=>String(r.asset_id)===String(assetId)).slice(-30).reverse();
+  // These logs only grow; recent rows are enough for the details view.
+  asset.movements = tailObjects_(SHEETS.MOVEMENTS,DETAIL_LOG_ROWS).filter(r=>String(r.asset_id)===String(assetId)).reverse();
+  asset.activity = tailObjects_(SHEETS.ACTIVITY,DETAIL_LOG_ROWS).filter(r=>String(r.asset_id)===String(assetId)).slice(-30).reverse();
   // Private operational data is never sent to Guest clients.
   if (roleAtLeast_(user, 'STAFF')) {
     const privateRow = findByKey_(SHEETS.ASSET_PRIVATE,'asset_id',assetId);
@@ -499,7 +559,7 @@ function createAsset_(p, user) {
       site_id:site.site_id, site:site.name,
       area_id:area ? area.area_id : '', area:area ? area.name : clean_(p.area),
       exact_location:clean_(p.exact_location), assigned_to:clean_(p.assigned_to),
-      status:clean_(p.status) || 'Active', main_image_id:'', drive_folder_id:'',
+      status:assetStatus_(p.status || 'Active', user, true), main_image_id:'', drive_folder_id:'',
       created_at:now, updated_at:now, created_by:actorKey_(user), updated_by:actorKey_(user), retired_at:'', source_ref:''
     };
     appendObject_(SHEETS.ASSETS, obj);
@@ -520,7 +580,7 @@ function updateAsset_(p, user) {
   const assetId = clean_(p.asset_id);
   if (!assetId) throw new Error('asset_id is required.');
   const existing = findByKey_(SHEETS.ASSETS,'asset_id',assetId);
-  if (!existing) throw new Error('Asset not found.');
+  if (!existing||existing.status==='Deleted') throw new Error('Asset not found.');
   assertNoPendingAssetOperation_(assetId);
   const category = resolveCategory_(p.category_id || (clean_(p.category)===clean_(existing.category)?existing.category_id:''), p.category || existing.category, user);
   const site = findByKey_(SHEETS.SITES,'site_id',p.site_id || existing.site_id);
@@ -535,7 +595,7 @@ function updateAsset_(p, user) {
     specifications:clean_(p.specifications), site_id:site.site_id, site:site.name,
     area_id:area ? area.area_id : '', area:area ? area.name : clean_(p.area),
     exact_location:clean_(p.exact_location), assigned_to:clean_(p.assigned_to),
-    status:clean_(p.status || existing.status), updated_at:now, updated_by:actorKey_(user)
+    status:clean_(p.status)&&clean_(p.status)!==clean_(existing.status)?assetStatus_(p.status, user, false):clean_(existing.status), updated_at:now, updated_by:actorKey_(user)
   };
 
   const moved = [existing.site,existing.area,existing.exact_location,existing.assigned_to].join('|') !==
@@ -556,13 +616,73 @@ function updateAsset_(p, user) {
   return getAssetBundle_(assetId,user);
 }
 
+// Keep the row as a tombstone so printed IDs and completed save requests cannot be reused.
+function deleteAsset_(p, user) {
+  requireRole_(user,'ADMIN');
+  const row = findByKey_(SHEETS.ASSETS,'asset_id',clean_(p.asset_id));
+  if (!row) throw new Error('Asset not found.');
+  const id = row.asset_id;
+  if (row.status==='Deleted') {
+    invalidateDataCache_();
+    return id;
+  }
+  if (row.status==='Merged') throw new Error('Separate this merged record before deleting it.');
+  if (String(row.updated_at||'')!==String(p.expected_updated_at||'')) {
+    throw new Error('ITEM_CHANGED: This asset changed after you opened it. Refresh its details and try again.');
+  }
+  if (reservedAssetOperations_().some(r=>r.asset_id===id)) {
+    throw new Error('Finish or reconcile the pending save for this asset before deleting it.');
+  }
+  const related = listObjects_(SHEETS.ASSETS).some(r=>assetInRegister_(r)&&r.parent_asset_id===id
+    || r.status==='Merged'&&r.source_ref==='MERGED_INTO:'+id);
+  if (related) throw new Error('Unlink its linked assets or separate any merged records before deleting this asset.');
+  if (listObjects_(SHEETS.MAINTENANCE).some(r=>r.asset_id===id&&!r.archived_at&&!['Completed','Cancelled'].includes(String(r.status)))) {
+    throw new Error('Close or archive the open maintenance tickets for this asset before deleting it.');
+  }
+  const activeAudits = new Set(listObjects_(SHEETS.AUDITS).filter(r=>r.status==='In Progress').map(r=>r.audit_id));
+  if (activeAudits.size&&listObjects_(SHEETS.AUDIT_ENTRIES).some(r=>r.asset_id===id&&activeAudits.has(r.audit_id))) {
+    throw new Error('Finish the active audit for this asset before deleting it.');
+  }
+  const stamp = new Date(Math.max(Date.now(),Date.parse(row.updated_at||'')+1||0)).toISOString();
+  const patch = {status:'Deleted',updated_at:stamp,updated_by:actorKey_(user)};
+  try { updateByKey_(SHEETS.ASSETS,'asset_id',id,patch); }
+  finally { invalidateDataCache_(); }
+  try { log_(user,'DELETE_ASSET',id,'Asset deleted from the register',null,patch); }
+  catch (err) { console.warn('Asset deletion activity could not be logged',String(err.message||err)); }
+  return id;
+}
+
 function retireAsset_(assetId, user) {
   const row = findByKey_(SHEETS.ASSETS,'asset_id',assetId);
-  if (!row) throw new Error('Asset not found.');
+  if (!row||row.status==='Deleted') throw new Error('Asset not found.');
   assertNoPendingAssetOperation_(assetId);
   const now = new Date().toISOString();
   updateByKey_(SHEETS.ASSETS,'asset_id',assetId,{status:'Retired',retired_at:now,updated_at:now,updated_by:actorKey_(user)});
   log_(user,'RETIRE_ASSET',assetId,'Asset retired',row,{status:'Retired',retired_at:now});
+  invalidateDataCache_();
+  return getAssetBundle_(assetId,user);
+}
+
+// Legacy routes share the status rules of saveAssetOperation: retiring is Admin-only, and nothing is created retired.
+function assetStatus_(value, user, creating) {
+  const status = clean_(value);
+  if (!ASSET_STATUSES.includes(status)) throw new Error('Invalid asset status: ' + status);
+  if (status === 'Retired' && (creating || !roleAtLeast_(user, 'ADMIN'))) throw new Error(creating ? 'An asset cannot be created as Retired.' : 'PERMISSION_DENIED: Only an Admin can retire an asset.');
+  return status;
+}
+
+function restoreAsset_(p, user) {
+  const assetId = clean_(p.asset_id);
+  const row = findByKey_(SHEETS.ASSETS,'asset_id',assetId);
+  if (!row) throw new Error('Asset not found.');
+  if (String(row.status) !== 'Retired') throw new Error('Only a retired asset can be restored.');
+  assertNoPendingAssetOperation_(assetId);
+  const status = clean_(p.status) || 'Active';
+  if (status === 'Retired' || !ASSET_STATUSES.includes(status)) throw new Error('Choose a status for the restored asset.');
+  const now = new Date().toISOString();
+  const patch = {status:status, retired_at:'', updated_at:now, updated_by:actorKey_(user)};
+  updateByKey_(SHEETS.ASSETS,'asset_id',assetId,patch);
+  log_(user,'RESTORE_ASSET',assetId,'Asset restored',row,patch);
   invalidateDataCache_();
   return getAssetBundle_(assetId,user);
 }
@@ -594,7 +714,7 @@ function matchIdentifier_(value) {
 
   // Identifier matching is intentionally lightweight: it does not read AssetImages.
   // This keeps scanner lookups responsive even when the image library grows.
-  const rows = listObjects_(SHEETS.ASSETS).filter(r=>String(r.status)!=='Merged');
+  const rows = listObjects_(SHEETS.ASSETS).filter(assetInRegister_);
   const catMap = objectMap_(listObjects_(SHEETS.CATEGORIES), 'category_id');
   const siteMap = objectMap_(listObjects_(SHEETS.SITES), 'site_id');
   const areaMap = objectMap_(listObjects_(SHEETS.AREAS), 'area_id');
@@ -630,7 +750,7 @@ function suggestAssetMatches_(p) {
   const brand=clean_(p.brand), model=clean_(p.model), category=clean_(p.category), serial=clean_(p.serial);
   const siteId=clean_(p.site_id), areaId=clean_(p.area_id), specs=clean_(p.specifications);
   const serialNorm=normalizeIdentifier_(serial);
-  const rows=listObjects_(SHEETS.ASSETS).filter(r=>String(r.status)!=='Merged');
+  const rows=listObjects_(SHEETS.ASSETS).filter(assetInRegister_);
   const catMap=objectMap_(listObjects_(SHEETS.CATEGORIES),'category_id');
   const siteMap=objectMap_(listObjects_(SHEETS.SITES),'site_id');
   const areaMap=objectMap_(listObjects_(SHEETS.AREAS),'area_id');
@@ -718,7 +838,7 @@ function reconcileAsset_(p,user) {
   const assetId=clean_(p.asset_id);
   if(!assetId) throw new Error('asset_id is required.');
   const existing=findByKey_(SHEETS.ASSETS,'asset_id',assetId);
-  if(!existing || String(existing.status)==='Merged') throw new Error('Existing asset not found.');
+  if(!existing || !assetInRegister_(existing)) throw new Error('Existing asset not found.');
   assertNoPendingAssetOperation_(assetId);
   const incoming=parseJsonObject_(p.incoming_json);
   const choices=parseJsonObject_(p.choices_json);
@@ -756,7 +876,10 @@ function replaceAssetIdInSheet_(sheetName, sourceId, targetId) {
       sheetName===SHEETS.MOVEMENTS ? 'movement_id' : '';
     if(keyField && r[keyField]) updateByKey_(sheetName,keyField,r[keyField],{asset_id:targetId});
   });
+  return rows.map(r=>r[sheetName===SHEETS.MAINTENANCE?'maintenance_id':sheetName===SHEETS.ASSET_IMAGES?'image_id':sheetName===SHEETS.AUDIT_ENTRIES?'entry_id':'movement_id']).filter(Boolean);
 }
+
+const MERGE_MOVED_SHEETS = {maintenance:['Maintenance','maintenance_id'],images:['AssetImages','image_id'],audit_entries:['AuditEntries','entry_id'],movements:['Movements','movement_id']};
 
 function mergeAssets_(p,user) {
   const sourceId=clean_(p.source_asset_id), targetId=clean_(p.target_asset_id);
@@ -765,9 +888,9 @@ function mergeAssets_(p,user) {
   const target=findByKey_(SHEETS.ASSETS,'asset_id',targetId);
   if(!source || !target) throw new Error('One of the selected assets does not exist.');
   assertNoPendingAssetOperation_(sourceId);assertNoPendingAssetOperation_(targetId);
-  if(source.parent_asset_id||listObjects_(SHEETS.ASSETS).some(a=>a.parent_asset_id===sourceId&&a.status!=='Merged'))throw new Error('ASSET_LINK_CONFLICT: Review and remove or change the source asset main/child references before merging. No links were changed.');
+  if(source.parent_asset_id||listObjects_(SHEETS.ASSETS).some(a=>a.parent_asset_id===sourceId&&assetInRegister_(a)))throw new Error('ASSET_LINK_CONFLICT: Review and remove or change the source asset main/child references before merging. No links were changed.');
   if(source.set_id&&source.set_id!==target.set_id)throw new Error('SET_MEMBERSHIP_CONFLICT: Remove the source item from its equipment set before merging into a different set or ungrouped record.');
-  if(String(source.status)==='Merged' || String(target.status)==='Merged') throw new Error('A merged record cannot be merged again.');
+  if(!assetInRegister_(source)||!assetInRegister_(target)) throw new Error('A merged or deleted record cannot be merged.');
 
   const choices=parseJsonObject_(p.choices_json);
   const patch={updated_at:new Date().toISOString(),updated_by:actorKey_(user)};
@@ -783,16 +906,16 @@ function mergeAssets_(p,user) {
 
   if(patch.serial!==undefined && clean_(patch.serial)) {
     const norm=normalizeIdentifier_(patch.serial);
-    const dupe=listObjects_(SHEETS.ASSETS).find(r=>String(r.asset_id)!==sourceId && String(r.asset_id)!==targetId && String(r.status)!=='Merged' && normalizeIdentifier_(r.serial)===norm);
+    const dupe=listObjects_(SHEETS.ASSETS).find(r=>String(r.asset_id)!==sourceId && String(r.asset_id)!==targetId && assetInRegister_(r) && normalizeIdentifier_(r.serial)===norm);
     if(dupe) throw new Error('DUPLICATE_SERIAL: Serial '+patch.serial+' is already registered to '+dupe.asset_id+'.');
   }
 
   updateByKey_(SHEETS.ASSETS,'asset_id',targetId,patch);
 
-  replaceAssetIdInSheet_(SHEETS.MAINTENANCE,sourceId,targetId);
-  replaceAssetIdInSheet_(SHEETS.ASSET_IMAGES,sourceId,targetId);
-  replaceAssetIdInSheet_(SHEETS.AUDIT_ENTRIES,sourceId,targetId);
-  replaceAssetIdInSheet_(SHEETS.MOVEMENTS,sourceId,targetId);
+  // Everything needed to undo the merge is kept in the MERGED_INTO activity row.
+  const undo={target_asset_id:targetId,target_patch:patch,target_before:{},moved:{},custom_added:[],private_patch:[],private_created:false};
+  Object.keys(patch).forEach(k=>undo.target_before[k]=target[k]===undefined?'':target[k]);
+  Object.keys(MERGE_MOVED_SHEETS).forEach(k=>undo.moved[k]=replaceAssetIdInSheet_(MERGE_MOVED_SHEETS[k][0],sourceId,targetId));
 
   const allCustom=listObjects_(SHEETS.CUSTOM_VALUES);
   const sourceCustom=allCustom.filter(r=>String(r.asset_id)===sourceId);
@@ -800,6 +923,7 @@ function mergeAssets_(p,user) {
     const targetExisting=allCustom.find(x=>String(x.asset_id)===targetId && String(x.field_id)===String(r.field_id));
     if(!targetExisting){
       appendObject_(SHEETS.CUSTOM_VALUES,{asset_id:targetId,field_id:r.field_id,value:r.value,updated_at:new Date().toISOString(),updated_by:actorKey_(user)});
+      undo.custom_added.push(String(r.field_id));
     }
   });
 
@@ -812,6 +936,7 @@ function mergeAssets_(p,user) {
     });
     if(Object.keys(privatePatch).length){
       privatePatch.asset_id=targetId; privatePatch.updated_at=new Date().toISOString(); privatePatch.updated_by=actorKey_(user);
+      undo.private_patch=Object.keys(privatePatch).filter(k=>!['asset_id','updated_at','updated_by'].includes(k));undo.private_created=!targetPrivate;
       if(targetPrivate) updateByKey_(SHEETS.ASSET_PRIVATE,'asset_id',targetId,privatePatch);
       else appendObject_(SHEETS.ASSET_PRIVATE,privatePatch);
     }
@@ -822,16 +947,50 @@ function mergeAssets_(p,user) {
     serial:'',status:'Merged',retired_at:now,updated_at:now,updated_by:actorKey_(user),source_ref:'MERGED_INTO:'+targetId
   });
   log_(user,'MERGE_ASSET',targetId,sourceId+' merged into '+targetId,source,Object.assign({},target,patch));
-  log_(user,'MERGED_INTO',sourceId,'Merged into '+targetId,source,{target_asset_id:targetId});
+  log_(user,'MERGED_INTO',sourceId,'Merged into '+targetId,source,undo);
   invalidateDataCache_();
   return {target:getAssetBundle_(targetId,user),source_asset_id:sourceId,target_asset_id:targetId};
+}
+
+// Reverses the latest merge of source_asset_id using the undo record written by mergeAssets_.
+function unmergeAsset_(p,user) {
+  const sourceId=clean_(p.source_asset_id);
+  const source=findByKey_(SHEETS.ASSETS,'asset_id',sourceId);
+  if(!source || String(source.status)!=='Merged') throw new Error('This record is not merged.');
+  const entry=listObjects_(SHEETS.ACTIVITY).filter(r=>r.action==='MERGED_INTO'&&String(r.asset_id)===sourceId).pop();
+  const undo=entry?parseJsonObject_(entry.after_json):{};
+  const before=entry?parseJsonObject_(entry.before_json):{};
+  if(!undo.target_patch) throw new Error('UNMERGE_UNAVAILABLE: This merge was made before undo was supported. Restore the record manually.');
+  const targetId=undo.target_asset_id;
+  const target=findByKey_(SHEETS.ASSETS,'asset_id',targetId);
+  if(!target||target.status==='Deleted') throw new Error('The merge target no longer exists.');
+  assertNoPendingAssetOperation_(sourceId);assertNoPendingAssetOperation_(targetId);
+  const now=new Date().toISOString();
+  // Only revert target fields that still hold the merged value, so later edits survive.
+  const targetPatch={updated_at:now,updated_by:actorKey_(user)};
+  Object.keys(undo.target_patch).forEach(k=>{if(!['updated_at','updated_by'].includes(k)&&String(target[k])===String(undo.target_patch[k]))targetPatch[k]=undo.target_before[k];});
+  if(clean_(before.serial)){
+    const norm=normalizeIdentifier_(before.serial),targetKeepsSerial=targetPatch.serial===undefined;
+    const dupe=listObjects_(SHEETS.ASSETS).find(r=>String(r.asset_id)!==sourceId&&(targetKeepsSerial||String(r.asset_id)!==targetId)&&r.status!=='Deleted'&&normalizeIdentifier_(r.serial)===norm);
+    if(dupe) throw new Error('DUPLICATE_SERIAL: Serial '+before.serial+' is now registered to '+dupe.asset_id+'. Change that serial before separating these records.');
+  }
+  updateByKey_(SHEETS.ASSETS,'asset_id',targetId,targetPatch);
+  Object.keys(MERGE_MOVED_SHEETS).forEach(k=>(undo.moved[k]||[]).forEach(id=>updateByKey_(MERGE_MOVED_SHEETS[k][0],MERGE_MOVED_SHEETS[k][1],id,{asset_id:sourceId})));
+  (undo.custom_added||[]).forEach(fieldId=>updateByComposite_(SHEETS.CUSTOM_VALUES,{asset_id:targetId,field_id:fieldId},{value:'',updated_at:now,updated_by:actorKey_(user)}));
+  if((undo.private_patch||[]).length){const privatePatch={updated_at:now,updated_by:actorKey_(user)};undo.private_patch.forEach(k=>privatePatch[k]='');updateByKey_(SHEETS.ASSET_PRIVATE,'asset_id',targetId,privatePatch);}
+  const restored={serial:clean_(before.serial),status:clean_(before.status)||'Active',retired_at:clean_(before.retired_at),source_ref:clean_(before.source_ref),updated_at:now,updated_by:actorKey_(user)};
+  updateByKey_(SHEETS.ASSETS,'asset_id',sourceId,restored);
+  log_(user,'UNMERGE_ASSET',sourceId,'Separated from '+targetId,source,restored);
+  log_(user,'UNMERGE_ASSET',targetId,sourceId+' separated',target,targetPatch);
+  invalidateDataCache_();
+  return {source:getAssetBundle_(sourceId,user),target:getAssetBundle_(targetId,user)};
 }
 
 function assertUniqueSerial_(serial, excludeAssetId) {
   const normalized = normalizeIdentifier_(serial);
   if (!normalized) return;
   const duplicate = listObjects_(SHEETS.ASSETS).find(r=>
-    String(r.asset_id) !== String(excludeAssetId || '') && normalizeIdentifier_(r.serial) === normalized
+    String(r.asset_id) !== String(excludeAssetId || '') && r.status!=='Deleted' && normalizeIdentifier_(r.serial) === normalized
   );
   if (duplicate) throw new Error('DUPLICATE_SERIAL: Serial ' + clean_(serial) + ' is already registered to ' + duplicate.asset_id + '.');
   if(reservedAssetOperations_().some(r=>r.asset_id!==String(excludeAssetId||'')&&normalizeIdentifier_(r.serial)===normalized))throw new Error('DUPLICATE_SERIAL: A pending save already reserved this serial. Reconcile that save before registering it again.');
@@ -921,6 +1080,7 @@ function uploadQueuedImage_(p,user) {
     if(previous){
       if(previous.asset_id!==p.assetId||String(previous.file_name).indexOf(marker)<0)throw new Error('REQUEST_REUSED: Photo operation changed.');
       const asset=findByKey_(SHEETS.ASSETS,'asset_id',p.assetId);
+      if (!asset||asset.status==='Deleted') throw new Error('Asset not found.');
       // Only repair an unfinished image touch. A completed replay must not undo later edits/main-photo selection.
       if(asset&&(!asset.updated_at||String(asset.updated_at)<String(previous.uploaded_at))){
         const touch={updated_at:previous.uploaded_at,updated_by:actorKey_(user)};
@@ -936,7 +1096,8 @@ function uploadQueuedImage_(p,user) {
 function uploadImage_(p, user, queued) {
   p=Object.assign({},p,{_queueStamp:queued&&queued.stamp||'',_queueImageId:queued&&queued.id||''});
   if (!p.assetId) throw new Error('assetId is required.');
-  if (!findByKey_(SHEETS.ASSETS,'asset_id',p.assetId)) throw new Error('Asset not found.');
+  const asset = findByKey_(SHEETS.ASSETS,'asset_id',p.assetId);
+  if (!asset||asset.status==='Deleted') throw new Error('Asset not found.');
   if (!p.base64Data) throw new Error('Image data is required.');
 
   const folder = getOrCreateAssetFolder_(p.assetId);
@@ -979,7 +1140,7 @@ function setMainImage_(p,user) {
   const assetId=clean_(p.asset_id),imageId=clean_(p.image_id);
   const asset=findByKey_(SHEETS.ASSETS,'asset_id',assetId);
   const image=findByKey_(SHEETS.ASSET_IMAGES,'image_id',imageId);
-  if(!asset || !image || String(image.asset_id)!==String(assetId) || !truthy_(image.active)) throw new Error('Active image not found for this asset.');
+  if(!asset || asset.status==='Deleted' || !image || String(image.asset_id)!==String(assetId) || !truthy_(image.active)) throw new Error('Active image not found for this asset.');
   const old=asset.main_image_id||'';
   updateByKey_(SHEETS.ASSETS,'asset_id',assetId,{main_image_id:imageId,updated_at:new Date().toISOString(),updated_by:actorKey_(user)});
   log_(user,'SET_MAIN_IMAGE',assetId,'Main photo changed', {main_image_id:old},{main_image_id:imageId});
@@ -1022,6 +1183,10 @@ function deleteImage_(imageId, user) {
 
 function getImageData_(fileId) {
   if (!fileId) throw new Error('file_id is required.');
+  // Only photos registered to an asset may be streamed; this route is public.
+  const assets = new Set(listObjects_(SHEETS.ASSETS).filter(r=>r.status!=='Deleted').map(r=>r.asset_id));
+  const known = listObjects_(SHEETS.ASSET_IMAGES).some(r=>assets.has(r.asset_id) && truthy_(r.active) && (String(r.drive_file_id)===String(fileId) || String(r.thumbnail_file_id)===String(fileId)));
+  if (!known) throw new Error('Image not found.');
   const file = DriveApp.getFileById(fileId);
   const blob = file.getBlob();
   return {
@@ -1370,12 +1535,13 @@ function sanitizeSerial_(value) {
 
 function createMaintenance_(p, user) {
   if (!p.asset_id || !p.issue) throw new Error('Asset and issue are required.');
-  if (!findByKey_(SHEETS.ASSETS,'asset_id',p.asset_id)) throw new Error('Asset not found.');
+  const asset = findByKey_(SHEETS.ASSETS,'asset_id',p.asset_id);
+  if (!asset||asset.status==='Deleted') throw new Error('Asset not found.');
   const now = new Date().toISOString();
   const row = {
     maintenance_id:'MNT-'+shortId_(), asset_id:p.asset_id, issue:clean_(p.issue),
     maintenance_type:clean_(p.maintenance_type)||'Repair', status:'Open', reported_by:actorKey_(user),
-    reported_at:now, assigned_to:'', resolution:'', cost:'', completed_at:'', updated_at:now
+    reported_at:now, assigned_to:clean_(p.assigned_to), resolution:'', cost:'', completed_at:'', updated_at:now, archived_at:''
   };
   appendObject_(SHEETS.MAINTENANCE,row);
   log_(user,'REPORT_ISSUE',p.asset_id,row.issue,null,row);
@@ -1387,13 +1553,20 @@ function updateMaintenance_(p, user) {
   const id = clean_(p.maintenance_id);
   const existing = findByKey_(SHEETS.MAINTENANCE,'maintenance_id',id);
   if (!existing) throw new Error('Maintenance record not found.');
+  if (existing.archived_at) throw new Error('Restore this maintenance record before editing it.');
   const status = clean_(p.status || existing.status);
+  if (!MAINTENANCE_STATUSES.includes(status)) throw new Error('Invalid maintenance status: ' + status);
   const now = new Date().toISOString();
-  const patch = {
-    maintenance_type:clean_(p.maintenance_type || existing.maintenance_type), status:status,
-    assigned_to:clean_(p.assigned_to), resolution:clean_(p.resolution), cost:clean_(p.cost),
-    completed_at:status==='Completed' ? (existing.completed_at || now) : '', updated_at:now
-  };
+  // Merge-patch: a field the client did not send keeps its stored value.
+  const has = k => Object.prototype.hasOwnProperty.call(p, k);
+  const patch = {status:status, completed_at:status==='Completed' ? (existing.completed_at || now) : '', updated_at:now};
+  ['maintenance_type','assigned_to','resolution','cost'].forEach(k=>{ if (has(k)) patch[k]=clean_(p[k]); });
+  // The issue and asset can be corrected only while the ticket is still Open.
+  if ((has('issue') && clean_(p.issue)!==clean_(existing.issue)) || (has('asset_id') && clean_(p.asset_id)!==clean_(existing.asset_id))) {
+    if (String(existing.status)!=='Open') throw new Error('The issue and asset can only be changed while the ticket is Open.');
+    if (has('issue')) { if (!clean_(p.issue)) throw new Error('Issue is required.'); patch.issue=clean_(p.issue); }
+    if (has('asset_id')) { const asset=findByKey_(SHEETS.ASSETS,'asset_id',p.asset_id); if (!asset||asset.status==='Deleted') throw new Error('Asset not found.'); patch.asset_id=clean_(p.asset_id); }
+  }
   updateByKey_(SHEETS.MAINTENANCE,'maintenance_id',id,patch);
   const updated = Object.assign({},existing,patch);
   log_(user,'UPDATE_MAINTENANCE',existing.asset_id,JSON.stringify({status:status}),existing,updated);
@@ -1401,9 +1574,25 @@ function updateMaintenance_(p, user) {
   return updated;
 }
 
-function listMaintenance_() {
+function archiveMaintenance_(p, user, archive) {
+  const id = clean_(p.maintenance_id);
+  const existing = findByKey_(SHEETS.MAINTENANCE,'maintenance_id',id);
+  if (!existing) throw new Error('Maintenance record not found.');
+  if (!archive&&findByKey_(SHEETS.ASSETS,'asset_id',existing.asset_id)?.status==='Deleted') {
+    throw new Error('This ticket belongs to a deleted asset.');
+  }
+  const now = new Date().toISOString();
+  const patch = {archived_at:archive ? now : '', updated_at:now};
+  updateByKey_(SHEETS.MAINTENANCE,'maintenance_id',id,patch);
+  const updated = Object.assign({},existing,patch);
+  log_(user,archive?'ARCHIVE_MAINTENANCE':'RESTORE_MAINTENANCE',existing.asset_id,id,existing,updated);
+  invalidateDataCache_();
+  return updated;
+}
+
+function listMaintenance_(includeArchived) {
   const rawAssets = objectMap_(listObjects_(SHEETS.ASSETS),'asset_id');
-  return listObjects_(SHEETS.MAINTENANCE).map(r=>{
+  return listObjects_(SHEETS.MAINTENANCE).filter(r=>includeArchived||!r.archived_at).map(r=>{
     const a=rawAssets[r.asset_id];
     return Object.assign({},r,{asset:a ? {asset_id:a.asset_id,brand:a.brand,model:a.model,category_name:a.category||'',status:a.status,site_name:a.site||'',area_name:a.area||''} : null});
   }).reverse();
@@ -1413,7 +1602,7 @@ function startAudit_(p, user) {
   if (!p.site_id) throw new Error('Site is required.');
   const now = new Date().toISOString();
   const expected = listObjects_(SHEETS.ASSETS).filter(x=>
-    !['Retired','Merged'].includes(String(x.status)) &&
+    assetInRegister_(x)&&x.status!=='Retired' &&
     String(x.site_id)===String(p.site_id) &&
     (!p.area_id || String(x.area_id)===String(p.area_id)));
   const row = {audit_id:'AUD-'+shortId_(),site_id:p.site_id,area_id:clean_(p.area_id),name:clean_(p.name)||'Physical Audit',started_at:now,started_by:actorKey_(user),status:'In Progress',completed_at:''};
@@ -1459,7 +1648,7 @@ function auditProgress_(audit, allAssets, allEntries) {
   // A legacy V1.9 audit has no Pending rows. Count its original verified entries
   // against the currently registered scope as a cautious compatibility fallback.
   const hasSnapshot=entries.some(e=>String(e.entry_id).startsWith('SNP-'));
-  const scoped=allAssets.filter(x=>!['Retired','Merged'].includes(String(x.status))&&String(x.site_id)===String(audit.site_id)&&(!audit.area_id||String(x.area_id)===String(audit.area_id)));
+  const scoped=allAssets.filter(x=>assetInRegister_(x)&&x.status!=='Retired'&&String(x.site_id)===String(audit.site_id)&&(!audit.area_id||String(x.area_id)===String(audit.area_id)));
   const expectedIds=hasSnapshot ? new Set(snapshots.filter(e=>e.result!=='Unexpected').map(e=>String(e.asset_id))) : new Set(scoped.map(x=>String(x.asset_id)));
   const checkedIds=new Set(entries.filter(e=>e.result!=='Pending' && e.checked_at && expectedIds.has(String(e.asset_id))).map(e=>String(e.asset_id)));
   const pendingCount=[...expectedIds].filter(id=>!checkedIds.has(id)).length;
@@ -1480,6 +1669,45 @@ function completeAudit_(auditId, user) {
   log_(user,'COMPLETE_AUDIT','',JSON.stringify({audit_id:auditId,summary}),null,{audit_id:auditId,status:'Completed'});
   invalidateDataCache_();
   return Object.assign({},audit,summary,{status:'Completed',completed_at:now});
+}
+
+function auditInProgress_(auditId) {
+  const audit = findByKey_(SHEETS.AUDITS,'audit_id',auditId);
+  if (!audit) throw new Error('Audit not found.');
+  if (String(audit.status)!=='In Progress') throw new Error('Only an in-progress audit can be changed.');
+  return audit;
+}
+
+function cancelAudit_(p, user) {
+  const audit = auditInProgress_(p.audit_id);
+  const now = new Date().toISOString();
+  const patch = {status:'Cancelled',completed_at:now};
+  updateByKey_(SHEETS.AUDITS,'audit_id',audit.audit_id,patch);
+  log_(user,'CANCEL_AUDIT','',JSON.stringify({audit_id:audit.audit_id,reason:clean_(p.reason)}),audit,patch);
+  invalidateDataCache_();
+  return Object.assign({},audit,patch);
+}
+
+function renameAudit_(p, user) {
+  const audit = auditInProgress_(p.audit_id);
+  const name = clean_(p.name);
+  if (!name) throw new Error('Audit name is required.');
+  updateByKey_(SHEETS.AUDITS,'audit_id',audit.audit_id,{name:name});
+  log_(user,'RENAME_AUDIT','',JSON.stringify({audit_id:audit.audit_id,name:name}),audit,{name:name});
+  invalidateDataCache_();
+  return Object.assign({},audit,{name:name});
+}
+
+// Undo a verification: expected assets return to Pending, ad-hoc entries are cleared.
+function resetAuditEntry_(p, user) {
+  const audit = auditInProgress_(p.audit_id);
+  const entry = listObjects_(SHEETS.AUDIT_ENTRIES).find(r=>String(r.audit_id)===String(audit.audit_id)&&String(r.asset_id)===String(p.asset_id));
+  if (!entry) throw new Error('This asset has no result in the audit.');
+  const patch = {result:String(entry.entry_id).startsWith('SNP-')?'Pending':'Cleared',checked_by:'',checked_at:'',notes:''};
+  updateByKey_(SHEETS.AUDIT_ENTRIES,'entry_id',entry.entry_id,patch);
+  log_(user,'RESET_AUDIT_RESULT',entry.asset_id,JSON.stringify({audit_id:audit.audit_id,previous:entry.result}),entry,patch);
+  invalidateDataCache_();
+  return Object.assign({},entry,patch);
 }
 
 function listAudits_() {
@@ -1507,7 +1735,7 @@ function getAuditRoster_(auditId, user) {
   const hasSnapshot=entries.some(e=>String(e.entry_id).startsWith('SNP-'));
   const expected=hasSnapshot
     ? entries.filter(e=>String(e.entry_id).startsWith('SNP-'))
-    : assets.filter(x=>!['Retired','Merged'].includes(String(x.status))&&String(x.site_id)===String(audit.site_id)&&(!audit.area_id||String(x.area_id)===String(audit.area_id))).map(x=>({asset_id:x.asset_id,result:'Pending',entry_id:''}));
+    : assets.filter(x=>assetInRegister_(x)&&x.status!=='Retired'&&String(x.site_id)===String(audit.site_id)&&(!audit.area_id||String(x.area_id)===String(audit.area_id))).map(x=>({asset_id:x.asset_id,result:'Pending',entry_id:''}));
   const entryMap=objectMap_(entries,'asset_id');
   const expectedIds=new Set(expected.map(x=>String(x.asset_id)));
   const additional=entries.filter(e=>!expectedIds.has(String(e.asset_id)));
@@ -1777,17 +2005,31 @@ function adminSave_(p, user) {
 }
 
 function saveUser_(p, user) {
-  const username = clean_(p.username).toLowerCase();
   const email = clean_(p.email).toLowerCase();
+  // Existing users are addressed by user_id so a username can never fork into a second account.
+  const existing = clean_(p.user_id) ? findByKey_(SHEETS.USERS,'user_id',clean_(p.user_id)) : null;
+  if (clean_(p.user_id) && !existing) throw new Error('User not found.');
+  const username = existing ? String(existing.username || '').toLowerCase() : clean_(p.username).toLowerCase();
   if (!username) throw new Error('Username is required.');
-  const existing = findUserByLogin_(username) || (email ? findUserByLogin_(email) : null);
+  if (!existing && findUserByLogin_(username)) throw new Error('Username ' + username + ' already exists. Edit that user instead.');
+  if (email) { const other = findUserByLogin_(email); if (other && (!existing || other.user_id !== existing.user_id)) throw new Error('Email ' + email + ' belongs to another user.'); }
+  if (!existing && !p.password) throw new Error('A password is required for a new user.');
   const now = new Date().toISOString();
+  const role = (clean_(p.role) || (existing ? existing.role : 'STAFF')).toUpperCase();
+  if (!['STAFF','ADMIN'].includes(role)) throw new Error('Role must be Staff or Admin.');
+  const active = p.active===''||p.active==null ? (existing ? truthy_(existing.active) : true) : truthy_(p.active);
+  if (existing && String(existing.role).toUpperCase()==='ADMIN' && truthy_(existing.active) && (role!=='ADMIN' || !active)) {
+    if (String(existing.username||'').toLowerCase()===String(user.username||'').toLowerCase()) throw new Error('You cannot remove your own Admin access. Ask another Admin.');
+    const otherAdmins = listObjects_(SHEETS.USERS).filter(u=>u.user_id!==existing.user_id && truthy_(u.active) && String(u.role).toUpperCase()==='ADMIN');
+    if (!otherAdmins.length) throw new Error('This is the last active Admin. Add another Admin first.');
+  }
   const row = {
     user_id:existing ? existing.user_id : ('USR-'+shortId_()),
     username:username,
-    email:email,
-    name:clean_(p.name)||username,
-    role:(clean_(p.role)||'STAFF').toUpperCase(), active:p.active===''||p.active==null ? true : truthy_(p.active),
+    // Fields the request leaves out keep their stored values (e.g. enabling a user).
+    email:Object.prototype.hasOwnProperty.call(p,'email') ? email : (existing ? String(existing.email||'') : ''),
+    name:clean_(p.name)||(existing ? existing.name : '')||username,
+    role:role, active:active,
     password_hash:existing ? existing.password_hash : '', password_salt:existing ? existing.password_salt : '',
     created_at:existing ? existing.created_at : now, updated_at:now
   };
@@ -1866,7 +2108,19 @@ function requireRole_(user, role) {
   if (!roleAtLeast_(user, role)) throw new Error('PERMISSION_DENIED');
 }
 function devUser_(){ return {username:'setup',email:'setup@local',name:'Setup Admin',role:'ADMIN',active:true}; }
-function safeUser_(u){ return {username:u.username||'',email:u.email||'',name:u.name,role:String(u.role||'STAFF').toUpperCase(),active:truthy_(u.active)}; }
+function safeUser_(u){ return {user_id:u.user_id||'',username:u.username||'',email:u.email||'',name:u.name,role:String(u.role||'STAFF').toUpperCase(),active:truthy_(u.active)}; }
+
+// Admin-only view of all reference rows, including archived ones, so they can be restored.
+function adminReferences_(token) {
+  requireUser_(token, 'ADMIN');
+  return {
+    sites:listObjects_(SHEETS.SITES),
+    areas:listObjects_(SHEETS.AREAS),
+    categories:listObjects_(SHEETS.CATEGORIES),
+    custom_fields:listObjects_(SHEETS.CUSTOM_FIELDS).sort((a,b)=>num_(a.sort_order)-num_(b.sort_order)),
+    users:listObjects_(SHEETS.USERS).map(safeUser_)
+  };
+}
 function cleanupSessions_(){ const rows=listObjects_(SHEETS.SESSIONS); const now=new Date(); rows.forEach(r=>{ if(!r.revoked_at && new Date(r.expires_at)<=now) updateByKey_(SHEETS.SESSIONS,'session_id',r.session_id,{revoked_at:now.toISOString()}); }); }
 
 function saveCustomValues_(assetId, json, user) {
@@ -1937,6 +2191,16 @@ function listObjects_(name) {
   const rows = values.filter(row=>row.some(v=>String(v).trim()!=='')).map(row=>rowToObject_(headers,row));
   _rowCache[name]=rows;
   return rows.map(r=>Object.assign({},r));
+}
+
+// Reads only the newest rows of a growing log instead of the whole sheet.
+function tailObjects_(name, count) {
+  if (_rowCache[name]) return _rowCache[name].slice(-count).map(r=>Object.assign({},r));
+  const sheet = getSheet_(name), last = sheet.getLastRow();
+  if (last < 2) return [];
+  const headers = headers_(sheet), start = Math.max(2, last - count + 1);
+  return sheet.getRange(start,1,last-start+1,headers.length).getValues()
+    .filter(row=>row.some(v=>String(v).trim()!=='')).map(row=>rowToObject_(headers,row));
 }
 
 function appendObject_(name, obj) {
@@ -2020,7 +2284,7 @@ function clearRequestCache_(name) {
 }
 
 function invalidateBootCache_() {
-  try { CacheService.getScriptCache().remove('assethub_boot_base_' + APP_VERSION); } catch (_) {}
+  cacheRemoveLarge_('assethub_boot_base_' + APP_VERSION);
 }
 
 function invalidateDataCache_() {
@@ -3490,6 +3754,7 @@ function legacyPrivateDetails_() {
 function jsonText_(value){ try{return JSON.stringify(value);}catch(_){return String(value||'');} }
 function postReply_(params, obj) {
   if (String(params && params.transport || '') !== 'iframe') return json_(obj);
+  stampServerTime_(obj);
   const requestId = clean_(params.request_id || '');
   let replyOrigin = String(params.reply_origin || '*').trim();
   // Only echo a normal http/https origin back into postMessage. Otherwise use '*'.
@@ -3511,7 +3776,9 @@ function postReply_(params, obj) {
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-function json_(obj){ return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON); }
+// Server time per request, so slow actions can be identified from the live backend.
+function stampServerTime_(obj){ if(obj&&typeof obj==='object'&&_requestStart)obj.server_ms=Date.now()-_requestStart; return obj; }
+function json_(obj){ return ContentService.createTextOutput(JSON.stringify(stampServerTime_(obj))).setMimeType(ContentService.MimeType.JSON); }
 
 
 // V2.7 universal OCR interpreter. This does not modify records; saving remains
@@ -3631,7 +3898,7 @@ function suggestUniversalMatches_(p){
   const accepted=['imei','imei2','mac','service_tag','part_number','asset_id'];
   const valid=ids.filter(i=>i&&accepted.includes(i.type)&&norm(i.value).length>=6).slice(0,15);
   if(!valid.length)return base;
-  const raw=listObjects_(SHEETS.ASSETS).filter(r=>String(r.status)!=='Merged');
+  const raw=listObjects_(SHEETS.ASSETS).filter(assetInRegister_);
   const cat=objectMap_(listObjects_(SHEETS.CATEGORIES),'category_id');
   const sites=objectMap_(listObjects_(SHEETS.SITES),'site_id');
   const areas=objectMap_(listObjects_(SHEETS.AREAS),'area_id');

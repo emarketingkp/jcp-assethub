@@ -40,7 +40,7 @@
     try {
       const response = await fetch(input, {...(init||{}), signal:controller.signal});
       const data = await parseResponse(response, action);
-      lastTiming = {action, ms:Math.round(performance.now()-start), ok:true, at:Date.now(), transport:'fetch'};
+      lastTiming = {action, ms:Math.round(performance.now()-start), ok:true, at:Date.now(), transport:'fetch', serverMs:data?.server_ms};
       return data;
     } catch (err) {
       lastTiming = {action, ms:Math.round(performance.now()-start), ok:false, at:Date.now(), transport:'fetch'};
@@ -119,7 +119,7 @@
         }
         if(settled)return; settled=true; clean();
         const data = msg.data || {};
-        lastTiming = {action, ms:Math.round(performance.now()-start), ok:data.success!==false, at:Date.now(), transport:'iframe'};
+        lastTiming = {action, ms:Math.round(performance.now()-start), ok:data.success!==false, at:Date.now(), transport:'iframe', serverMs:data.server_ms};
         if(data.success === false) reject(new Error(data.error || `${action} failed.`));
         else resolve(data);
       };

@@ -19,7 +19,7 @@
       for(const item of items){
         const row=document.createElement('div');row.className='photo-picker-preview';
         const image=document.createElement('img');image.src=item.url;image.alt='Selected photo';
-        const name=document.createElement('span');name.textContent=item.file.name+(item.uploaded?' · uploaded':item.type==='serial_label'?' · scan evidence':'');
+        const name=document.createElement('span');name.textContent=item.file.name+(item.unreadable?' · can’t be read, remove it':item.uploaded?' · uploaded':item.type==='serial_label'?' · scan evidence':'');row.classList.toggle('unreadable',!!item.unreadable);
         const remove=document.createElement('button');remove.type='button';remove.className='btn light sm';remove.textContent='Remove';remove.setAttribute('aria-label','Remove '+item.file.name);remove.disabled=busy||item.uploaded;
         remove.addEventListener('click',()=>{if(busy||item.uploaded)return;items.splice(items.indexOf(item),1);URL.revokeObjectURL(item.url);render();onChange();});
         row.append(image,name,remove);previews.append(row);
@@ -41,13 +41,16 @@
       }
       render();onChange();
     }
-    camera.addEventListener('change',()=>{add(Array.from(camera.files||[]));camera.value='';});
-    gallery.addEventListener('change',()=>{add(Array.from(gallery.files||[]));gallery.value='';});
+    // Copy the photos before clearing the input; the original file handles can expire.
+    const take=async input=>{const files=Array.from(input.files||[]);try{add(await AssetImage.ownCopies(files));}catch(err){onError(String(err.message||err).replace(/^PHOTO_UNREADABLE: /,''));}finally{input.value='';}};
+    camera.addEventListener('change',()=>void take(camera));
+    gallery.addEventListener('change',()=>void take(gallery));
     container.querySelector('[data-photo-camera]').addEventListener('click',()=>camera.click());
     container.querySelector('[data-photo-gallery]').addEventListener('click',()=>gallery.click());
     for(const item of initial){add([item.file||item],item.file?(item.type||'serial_label'):'serial_label');if(item.main){items.forEach(p=>p.main=p.file===(item.file||item));}}
     render();
-    return {items,add,setBusy(value){busy=value;render();},markUploaded(item){item.uploaded=true;render();},dispose(){disposed=true;for(const item of items)URL.revokeObjectURL(item.url);}};
+    function removeUnreadable(){for(const item of items.filter(i=>i.unreadable)){items.splice(items.indexOf(item),1);URL.revokeObjectURL(item.url);}render();onChange();}
+    return {items,add,refresh:render,removeUnreadable,setBusy(value){busy=value;render();},markUploaded(item){item.uploaded=true;render();},dispose(){disposed=true;for(const item of items)URL.revokeObjectURL(item.url);}};
   }
   return {mount};
 });

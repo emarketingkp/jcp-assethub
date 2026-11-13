@@ -60,14 +60,16 @@ window.AssetReview = {
           const id=queueRow?.id||session?.queueId||crypto.randomUUID();
           const photos=files.map(file=>({file,type:'serial_label',main:!!session?.photos.find(p=>p.file===file)?.main}));
           const old=c.rows().find(r=>r.id===id),evidence=session?c.recognitionEvidence(session):null;
-          const saved=old?await c.queue().revise(id,params,photos,{...link,kind:'reconcile'},evidence):await c.queue().enqueue({id,kind:'reconcile',params,photos,evidence,...link});
+          const queue=c.queue();
+          if(!queue)throw new Error('Wait for your session to finish loading, then try again.');
+          const saved=old?await queue.revise(id,params,photos,{...link,kind:'reconcile'},evidence):await queue.enqueue({id,kind:'reconcile',params,photos,evidence,...link});
           await forget(session?.draftId);
           if(scope!==c.scope()||!form.isConnected)return;
           if(session)session.locallySaved=true;
           if(c.returnToInterruptedTask(id))return;
           const restore=c.hasModalReturn();c.closeModal();if(restore)return;
           c.resetScannerResult({restartCamera:false});c.openLocalOperation(saved);
-        } catch(err) {c.toast('Changes were not saved. '+err.message,'error');}
+        } catch(err) {c.toast('Changes were not saved. '+(c.humanError?c.humanError(err):err.message),'error');}
         finally {button.disabled=false;}
       };
     },{size:'lg',stack:true});

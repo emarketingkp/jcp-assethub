@@ -1,3 +1,56 @@
+# 2.10.5 — photo access and save recovery (preview)
+
+- Copy each photo into the app the moment it is taken or chosen (asset photos, scanner, linked-asset photo, tag photos and audit photos). Android only grants brief access to a picked file, so reading it later when storing a draft or saving failed with "The requested file could not be read".
+- Show a plain message if the phone refuses to share a photo, and use the same message in every save path.
+- Saves that fail on a dropped or slow connection now retry by themselves (after 30 seconds, then longer gaps up to 10 minutes) instead of waiting in Needs attention for a tap. Other failures still wait for the person.
+- Plain-language messages for full phone storage, no connection, an unexpected server reply, a busy spreadsheet, a temporarily unavailable server and phone app-storage faults. The technical text is kept in the browser console.
+- Any failure no screen handled now shows a message instead of failing silently.
+- No more lock-ups when a photo can't be read: the problem is reported once instead of on every tap, the unreadable photo is marked in red, and one button removes it while keeping everything typed. Saving checks photos first and points at the one to fix.
+- Frontend only; no Apps Script changes beyond 2.10.4. Physical Android device behaviour remains to be confirmed.
+
+# 2.10.4 — Admin asset deletion (2026-11-13)
+
+- Add Delete asset under More in Admin view, with confirmation and feedback.
+- Hide deleted records from the register, reports and scan matching. Preserve record history and photo files, and allow reuse of the serial with a new asset ID.
+- Deploy updated Code.gs and AssetGroups.gs to enable the option. The existing spreadsheet schema supports deletion.
+
+# 2.10.3 — registration and dialog feedback (2026-11-12)
+
+- Keep validation and sync feedback visible inside the active dialog, including on mobile Scan.
+- Replace the match picker with the comparison once the asset loads. Failed lookups retain the picker for retry.
+- Confirm when registration is saved on the device and offer a next entry while details and photos sync.
+- Show confirmed registrations in the register immediately and support Guest drafts while they await confirmation.
+- Preserve the underlying form when a photo preview or serial reader closes.
+
+# 2.10.2 — asset details overview (2026-11-12)
+
+- Add Overview, Photos and Activity tabs with accessible keyboard navigation and expandable supporting information.
+- Build highlights from saved specification labels for every asset category; retain free text, all original specifications, custom values including zero/false, and Staff-only visibility.
+- Preserve existing Edit, Move, Report issue, More, linked-asset and photo handlers. Keep tab and fold state during background confirmations.
+- Add initial-load and cached-refresh errors with retry, independent main-photo/gallery loading, photo retry, copy-ID feedback and queued-save attention/progress messages.
+- Frontend only. Existing backend API 2.10.0 and Apps Script deployment remain unchanged.
+
+# 2.10.1 — draft recovery fix (2026-11-10)
+
+- Store photo bytes in browser draft and operation records, restoring File objects when read. Existing Blob records remain readable without clearing browser storage.
+- Serialize draft writes and deletion so a late autosave cannot recreate a finished draft.
+- Keep a confirmed local save successful when removing its old recovery draft fails. Resume already-sent drafts through their existing pending operation.
+- Collapse duplicate errors, show at most two notifications, and limit their height on phones.
+- Validation: 155 unit tests; focused Chromium regression covers photo storage when IndexedDB rejects Blobs, repeated writes, deletion ordering, pending-operation recovery, cleanup failure and notification bounds. Physical Android device behavior remains to be confirmed.
+- Frontend-only patch; backend API remains 2.10.0. No Apps Script changes.
+
+# 2.10.0 — preview, not deployed (2026-10-30)
+
+- Readability: 12px minimum text, normal font weights, sentence-case labels, one navy main-button colour and yellow only for brand and Scan.
+- On this device: drafts, unsent saves and failed saves can be discarded; failed photos can be skipped; waiting children can save without their link; one entry on the Assets menu and page replaces the app-bar counters.
+- Notifications: stacked bottom toasts that never cover the task, errors stay until dismissed, inline next-step actions instead of the post-save dialog; offline bar above the mobile nav.
+- Asset details: one action bar (Edit, Move / assign, Report issue, ⋯), Retire out of the edit form, Restore for retired assets, Separate again (unmerge), visible and cancellable scan-to-update mode.
+- Maintenance: read-only ticket view, focused status and detail forms, archive/restore, optional Under Repair / back-to-Active status follow-ups.
+- Audit: results view and CSV export, rename and cancel, sticky Complete footer, change or reset a result, Move asset here / Mark Missing follow-ups.
+- System Setup: archived sites, areas, categories and fields stay listed and can be restored; users edited by id with last-admin guards and Disable/Enable.
+- Backend: restoreAsset, unmergeAsset, archive/restoreMaintenance, cancel/renameAudit, resetAuditEntry, adminReferences; maintenance merge-patch fix, legacy status whitelist, image allow-list, guest-safe reports, initial admin from Script Properties; features.record_lifecycle.
+- Deploy: replace Code.gs and AssetGroups.gs, run setupAssetGrouping once, set INITIAL_ADMIN_USERNAME / INITIAL_ADMIN_PASSWORD only for a new database. No deployment performed.
+
 # 2.9.0 — preview, not deployed (2026-10-23)
 
 - Preserve all existing fields and add optional unit names across lists, details, search, labels and exports.
